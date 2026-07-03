@@ -1,0 +1,48 @@
+version: '3.8'
+
+services:
+  mongodb:
+    image: mongo:7
+    container_name: cantoflow-mongodb
+    ports:
+      - "27017:27017"
+    environment:
+      MONGO_INITDB_DATABASE: cantoflow
+    volumes:
+      - mongodb_data:/data/db
+    networks:
+      - cantoflow-network
+
+  redis:
+    image: redis:7-alpine
+    container_name: cantoflow-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - cantoflow-network
+
+  # Uncomment to run PostgreSQL (for future user management)
+  # postgres:
+  #   image: postgres:15
+  #   container_name: cantoflow-postgres
+  #   ports:
+  #     - "5432:5432"
+  #   environment:
+  #     POSTGRES_DB: cantoflow
+  #     POSTGRES_USER: cantoflow
+  #     POSTGRES_PASSWORD: cantoflow
+  #   volumes:
+  #     - postgres_data:/var/lib/postgresql/data
+  #   networks:
+  #     - cantoflow-network
+
+volumes:
+  mongodb_data:
+  redis_data:
+  # postgres_data:
+
+networks:
+  cantoflow-network:
+    driver: bridge
