@@ -189,6 +189,28 @@ const TEMPLATES = {
       { key: 'cta',      label: 'Organiser line', default: 'Medartis AG · Basel · medartis.com' },
     ],
   },
+  'thank-you-card': {
+    label: 'Thank You Card',
+    desc: 'Personal thanks — visit, course, collaboration',
+    fields: [
+      { key: 'eyebrow',  label: 'Fixed tag', default: 'THANK YOU' },
+      { key: 'headline', label: 'Message headline', default: 'Danke f\u00fcr Ihren Besuch.', multiline: true },
+      { key: 'subline',  label: 'Recipient / occasion', default: 'AO Davos Courses 2026' },
+      { key: 'body',     label: 'Personal message', default: 'Wir freuen uns auf die weitere Zusammenarbeit \u2014 bis bald in Basel.', multiline: true },
+      { key: 'cta',      label: 'Sender', default: 'Ihr Medartis Team \u00b7 medartis.com' },
+    ],
+  },
+  'celebration-card': {
+    label: 'Celebration Card',
+    desc: 'Birthday, anniversary, congratulations',
+    fields: [
+      { key: 'eyebrow',  label: 'Fixed tag', default: 'CONGRATULATIONS' },
+      { key: 'headline', label: 'Occasion headline', default: 'Herzlichen Gl\u00fcckwunsch!', multiline: true },
+      { key: 'subline',  label: 'Recipient / milestone', default: '10 Jahre Medartis \u00b7 Prof. R. Arora' },
+      { key: 'body',     label: 'Personal message', default: 'Danke f\u00fcr zehn Jahre Partnerschaft und Vertrauen.', multiline: true },
+      { key: 'cta',      label: 'Sender', default: 'Ihr Medartis Team \u00b7 medartis.com' },
+    ],
+  },
   'agenda-flyer': {
     label: 'Programme / Agenda',
     desc: 'Session list with times — one line per session',
@@ -464,6 +486,8 @@ const TEMPLATE_TAGS = {
   'save-the-date':        'STD',
   'programme-cover':      'PROGRAMME',
   'agenda-flyer':         'AGENDA',
+  'thank-you-card':       'THANKS',
+  'celebration-card':     'CELEBRATE',
   // Carousel storytelling templates
   'product-tour':         'TOUR',
   'surgical-technique':   'TECHNIQUE',
