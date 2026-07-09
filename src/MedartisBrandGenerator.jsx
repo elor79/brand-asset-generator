@@ -163,7 +163,7 @@ const TEMPLATES = {
       { key: 'eyebrow',  label: 'Occasion (eyebrow)', default: 'MEDARTIS SYMPOSIUM' },
       { key: 'headline', label: 'Event title', default: 'Advanced Solutions for Fractures and Beyond', multiline: true },
       { key: 'subline',  label: 'Speakers / faculty', default: 'PD Dr. med. F. Früh · Dr. med. P. Honigmann' },
-      { key: 'body',     label: 'Fact block (Date / Time / Venue — keep the labels)', default: 'Date Friday, November 29, 2026\nTime 11.45 – 12.30\nVenue Saal A, Palazzo dei Congressi', multiline: true },
+      { key: 'body',     label: 'Fact block · Date / Time / Venue', default: 'Date Friday, November 29, 2026\nTime 11.45 – 12.30\nVenue Saal A, Palazzo dei Congressi', multiline: true },
       { key: 'cta',      label: 'Registration / booth', default: 'Registration: events@medartis.com · Booth #14' },
     ],
   },
@@ -1187,15 +1187,36 @@ const WORDMARK_PATHS = [
   'M417.303,153.189c-11.301,0-16.693-3.218-16.693-12.521h4.695c0,5.739,2.867,7.653,11.912,7.653,9.389,0,12.607-2.09,12.607-7.131,0-7.304-2.176-7.041-11.742-7.391-8.865-.262-16.779.261-16.779-11.477,0-9.477,6.09-12.259,17.564-12.259,10.088,0,15.998,2.87,15.998,12.52h-4.695c0-5.564-2.693-7.827-11.217-7.827-9.477,0-12.605,1.916-12.605,6.869,0,7.565,2.957,6.869,11.041,7.217,8.955.435,17.477-.609,17.477,11.739,0,9.477-5.998,12.607-17.562,12.607',
 ];
 
+// The OFFICIAL logo ships with the app at /brand/wordmark.svg (dark) and
+// /brand/wordmark-white.svg (light). Its 526.755 × 245.078 viewBox frames the
+// "medartis" glyphs inside a uniform clear-space border. WM_GLYPH is the glyph
+// bounding box within that viewBox — we align it to the layout so sizing stays
+// consistent while the asset's clear space is respected automatically.
+const WM_VIEW  = { w: 526.755, h: 245.078 };
+const WM_GLYPH = { x: 91.89, y: 91.89, w: 342.98, h: 61.30 };
+const WORDMARK_ASSETS = { dark: null, light: null };
+const isLightColor = (hex) => {
+  if (!hex || hex[0] !== '#' || hex.length < 7) return false;
+  const r = parseInt(hex.slice(1, 3), 16), g = parseInt(hex.slice(3, 5), 16), b = parseInt(hex.slice(5, 7), 16);
+  return (0.299 * r + 0.587 * g + 0.114 * b) > 140;
+};
+
 const drawWordmark = (ctx, x, y, height, color) => {
-  const srcH = 61;
-  const offsetX = 92;
-  const offsetY = 92;
-  const scale = height / srcH;
+  // (x, y) = top-left of the VISIBLE glyphs; `height` = their height.
+  const scale = height / WM_GLYPH.h;
+  const img = isLightColor(color) ? WORDMARK_ASSETS.light : WORDMARK_ASSETS.dark;
+  if (img && img.complete && img.naturalWidth) {
+    // Draw the shipped asset, aligned so the glyphs land exactly where the
+    // layout placed them. The clear-space border is transparent, so any part
+    // that spills past the canvas edge is invisible — never a visible crop.
+    ctx.drawImage(img, x - WM_GLYPH.x * scale, y - WM_GLYPH.y * scale, WM_VIEW.w * scale, WM_VIEW.h * scale);
+    return;
+  }
+  // Fallback until the asset image has loaded: the identical vector paths.
   ctx.save();
   ctx.translate(x, y);
   ctx.scale(scale, scale);
-  ctx.translate(-offsetX, -offsetY);
+  ctx.translate(-WM_GLYPH.x, -WM_GLYPH.y);
   ctx.fillStyle = color;
   for (const d of WORDMARK_PATHS) ctx.fill(new Path2D(d));
   ctx.restore();
@@ -1378,6 +1399,16 @@ function drawFullBleedOverlay(ctx, frame, content, image, opts) {
   const overlaySafeArea = { x: 0, y: 0, w, h };
   const clearance = brandBarClearance(ctx, frame, { ...opts, safeArea: overlaySafeArea });
   const textBottomY = h - padY * 1.7 - clearance.bottom;
+  // Intelligent text colour — same idea as the wordmark auto-contrast. The
+  // image + darkening gradient are already painted, so sample the actual pixels
+  // behind the lower text band and flip the whole text block to ink or bone for
+  // legibility. A user-set backdrop already guarantees contrast, so skip then.
+  if (!opts.textBackdrop?.enabled) {
+    const bandTop = Math.min(textBottomY, h * 0.5);
+    const lum = sampleCanvasLuminance(ctx, padX, bandTop, w - padX * 2, Math.max(1, textBottomY - bandTop));
+    if (lum > 145) { overlayPalette.ink = BRAND.ink; overlayPalette.muted = BRAND.ink600; overlayPalette.mode = 'light'; }
+    else           { overlayPalette.ink = BRAND.bone00; overlayPalette.muted = BRAND.cream100; overlayPalette.mode = 'dark'; }
+  }
   drawTextBackdropOnly(ctx, content, padX, textBottomY, w - padX * 2, overlayPalette, accent, frame, 'bottom', opts.textBackdrop);
   if (!opts.skipOverlays) drawTextBlock(ctx, content, padX, textBottomY, w - padX * 2, overlayPalette, accent, frame, 'bottom', null);
   if (!opts.skipOverlays) drawBrandBar(ctx, frame, overlayPalette, accent, true, opts);
@@ -1398,6 +1429,14 @@ const ROW_TIME_RE = /^(\d{1,2}[.:]\d{2}(?:\s*[\u2013\u2014-]\s*\d{1,2}[.:]\d{2})
 const ROW_LABEL_RE = /^(date|time|venue|room|location|faculty|datum|zeit|ort|raum|fakult\u00e4t|fecha|hora|sala|lugar)\s*:?\s+(.+)$/i;
 function parseStructuredRows(lines) {
   const rows = lines.map((l) => {
+    // Explicit "LABEL\tvalue" from the fact-block editor — supports ANY custom
+    // label (not just the known set below), rendered as the gold label column.
+    if (l.includes('\t')) {
+      const ti = l.indexOf('\t');
+      const lab = l.slice(0, ti).trim();
+      const val = l.slice(ti + 1).trim();
+      if (lab) return { col: lab.toUpperCase(), main: val, note: null };
+    }
     // A lone (possibly partial) time — a row still being typed, or an end
     // marker — keeps the time-column treatment from the first keystroke.
     if (ROW_PARTIAL_TIME_RE.test(l)) return { col: l, main: '', note: null };
@@ -1429,11 +1468,30 @@ function parseStructuredRows(lines) {
 // time / title / faculty columns with add/remove/reorder. The body STRING stays
 // the source of truth (presets, deep links and PDF export are untouched) — this
 // is just a friendlier way to write it than a raw textarea.
+// A steerable page break: a marker line in the body. The user inserts/moves/removes
+// these in the agenda editor to control exactly where each printed page ends.
+const PAGE_BREAK = '<<<PAGEBREAK>>>';
+
+// Split a content object into pages at PAGE_BREAK markers. Page 1 keeps the header
+// (eyebrow/headline/subline); later pages are body-only; the CTA lands on the last.
+// Returns null when there are no breaks (single page).
+function splitAgendaPages(content) {
+  const raw = (content && content.body) || '';
+  if (!raw.includes(PAGE_BREAK)) return null;
+  const chunks = raw.split(PAGE_BREAK).map((s) => s.replace(/^\n+|\n+$/g, '').trim()).filter(Boolean);
+  if (chunks.length < 2) return null;
+  return chunks.map((body, i) => i === 0
+    ? { ...content, body, cta: chunks.length === 1 ? content.cta : '' }
+    : { eyebrow: '', headline: '', subline: '', body, cta: i === chunks.length - 1 ? (content.cta || '') : '' });
+}
+
 function parseAgendaBody(body) {
   return (body || '').split('\n').map((l) => l.trim()).filter(Boolean).map((l) => {
+    if (l === PAGE_BREAK) return { pagebreak: true };
     if (ROW_PARTIAL_TIME_RE.test(l)) return { time: l, title: '', faculty: '' };
     const m = l.match(ROW_TIME_RE);
-    if (!m) return { time: '', title: l, faculty: '' };
+    // A no-time ALL-CAPS line is a section divider ("HALLUX VALGUS 1").
+    if (!m) return { time: '', title: l, faculty: '', section: l === l.toUpperCase() && /[A-ZÀ-Ý]/.test(l) };
     if (!m[2]) return { time: m[1], title: '', faculty: '' };
     const parts = m[2].split(/\s+\u2014\s+|\s+\u2013\s+/);
     const last = parts[parts.length - 1];
@@ -1445,8 +1503,8 @@ function parseAgendaBody(body) {
 }
 function serializeAgendaRows(rows) {
   return rows
-    .filter((r) => r.time || r.title || r.faculty)
-    .map((r) => `${r.time ? r.time + '  ' : ''}${r.title}${r.faculty ? ' \u2014 ' + r.faculty : ''}`)
+    .filter((r) => r.pagebreak || r.time || r.title || r.faculty)
+    .map((r) => r.pagebreak ? PAGE_BREAK : `${r.time ? r.time + '  ' : ''}${r.title}${r.faculty ? ' \u2014 ' + r.faculty : ''}`)
     .join('\n');
 }
 // House time format: always HH.MM with a DOT (Swiss convention — matches the
@@ -1505,11 +1563,14 @@ function AgendaEditor({ value, onChange }) {
   // the CONTENT between slots, not drag the times out of chronological order.
   // Off = the whole row (incl. its time) moves.
   const [pinTimes, setPinTimes] = useState(true);
+  const [hoverGap, setHoverGap] = useState(-1);
   const move = (i, d) => {
     const to = i + d;
     if (to < 0 || to >= rows.length) return;
     const next = [...rows];
-    if (pinTimes) {
+    // Section/break rows always move whole (content-swap only makes sense for sessions).
+    const special = next[i].section || next[i].pagebreak || next[to].section || next[to].pagebreak;
+    if (pinTimes && !special) {
       const a = next[i], b = next[to];
       next[i] = { ...a, title: b.title, faculty: b.faculty };
       next[to] = { ...b, title: a.title, faculty: a.faculty };
@@ -1518,9 +1579,67 @@ function AgendaEditor({ value, onChange }) {
     }
     commit(next);
   };
-  const add = () => commit([...rows, { time: '', title: '', faculty: '' }]);
-  const cell = { fontSize: 12, padding: '5px 7px', border: `1px solid ${BRAND.ink100}`, background: '#fff', width: '100%', boxSizing: 'border-box' };
-  const iconBtn = { border: 'none', background: 'transparent', cursor: 'pointer', color: BRAND.ink300, fontSize: 12, padding: '2px 4px' };
+  // Row factories + insert-anywhere: a session, section or page break can be added
+  // before or after any row via the thin bar between rows (and at the ends).
+  const sessionRow = () => ({ time: '', title: '', faculty: '' });
+  const sectionRow = () => ({ time: '', title: '', faculty: '', section: true });
+  const breakRow = () => ({ pagebreak: true });
+  const insertAt = (i, row) => commit([...rows.slice(0, i), row, ...rows.slice(i)]);
+  // Time small, SESSION biggest (the content), faculty medium, controls tight.
+  const GRID = 'minmax(44px,52px) minmax(0,1fr) minmax(0,0.62fr) 44px';
+  const cell = { fontSize: 12, padding: '5px 7px', border: `1px solid ${BRAND.ink100}`, background: '#fff', width: '100%', boxSizing: 'border-box', minWidth: 0 };
+  const iconBtn = { border: 'none', background: 'transparent', cursor: 'pointer', color: BRAND.ink300, fontSize: 12, padding: '1px 3px' };
+  const insBtn = { border: `1px solid ${BRAND.ink100}`, background: '#fff', cursor: 'pointer', fontFamily: BRAND.mono, fontSize: 9, letterSpacing: '0.05em', color: BRAND.ink600, padding: '2px 8px', borderRadius: 3, lineHeight: 1.6 };
+  // A quiet hairline between rows; hovering it reveals the insert options — so the list
+  // stays scannable instead of being interrupted by three buttons on every gap.
+  const renderInsert = (at) => (
+    <div
+      onMouseEnter={() => setHoverGap(at)}
+      onMouseLeave={() => setHoverGap((g) => (g === at ? -1 : g))}
+      style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: hoverGap === at ? 26 : 11, cursor: 'pointer' }}
+    >
+      {hoverGap === at ? (
+        <div style={{ display: 'flex', gap: 5 }}>
+          <button style={insBtn} title="Insert session here" onClick={() => insertAt(at, sessionRow())}>+ row</button>
+          <button style={{ ...insBtn, color: BRAND.gold, borderColor: BRAND.gold }} title="Insert section title here" onClick={() => insertAt(at, sectionRow())}>+ section</button>
+          <button style={{ ...insBtn, color: BRAND.gold, borderColor: BRAND.gold }} title="Insert page break here" onClick={() => insertAt(at, breakRow())}>+ break</button>
+        </div>
+      ) : (
+        <div style={{ position: 'relative', width: '100%', borderTop: `1px solid ${BRAND.ink100}`, opacity: 0.45 }}>
+          <span style={{ position: 'absolute', top: -9, left: '50%', transform: 'translateX(-50%)', background: BRAND.bone00, color: BRAND.ink300, fontSize: 12, lineHeight: '16px', padding: '0 6px' }}>+</span>
+        </div>
+      )}
+    </div>
+  );
+  const rowEl = (r, i) => {
+    const controls = (
+      <span style={{ whiteSpace: 'nowrap' }}>
+        <button style={iconBtn} title="Move up" onClick={() => move(i, -1)} disabled={i === 0}>↑</button>
+        <button style={iconBtn} title="Move down" onClick={() => move(i, 1)} disabled={i === rows.length - 1}>↓</button>
+        <button style={{ ...iconBtn, color: '#e11d48' }} title="Remove" onClick={() => remove(i)}>✕</button>
+      </span>
+    );
+    if (r.pagebreak) return (
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 44px', gap: 4, alignItems: 'center' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, borderTop: `1px dashed ${BRAND.gold}`, paddingTop: 6, fontFamily: BRAND.mono, fontSize: 9, letterSpacing: '0.14em', color: BRAND.gold }}>⎯⎯ PAGE BREAK ⎯⎯</div>
+        {controls}
+      </div>
+    );
+    if (r.section) return (
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 44px', gap: 4, alignItems: 'center' }}>
+        <input style={{ ...cell, fontFamily: BRAND.display, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.04em', color: BRAND.gold }} value={r.title} placeholder="SECTION (e.g. HALLUX VALGUS 1)" onChange={(e) => update(i, 'title', e.target.value)} />
+        {controls}
+      </div>
+    );
+    return (
+      <div style={{ display: 'grid', gridTemplateColumns: GRID, gap: 4, alignItems: 'center' }}>
+        <input style={{ ...cell, fontFamily: BRAND.mono }} value={r.time} placeholder="09.15" onChange={(e) => update(i, 'time', e.target.value)} onBlur={() => update(i, 'time', normalizeTime(r.time))} />
+        <input style={cell} value={r.title} placeholder="Session title" onChange={(e) => update(i, 'title', e.target.value)} />
+        <input style={cell} value={r.faculty} placeholder="Faculty" onChange={(e) => update(i, 'faculty', e.target.value)} />
+        {controls}
+      </div>
+    );
+  };
   return (
     <div>
       <label style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8, fontFamily: BRAND.mono, fontSize: 9, letterSpacing: '0.1em', color: BRAND.ink600, cursor: 'pointer' }}
@@ -1528,40 +1647,175 @@ function AgendaEditor({ value, onChange }) {
         <input type="checkbox" checked={pinTimes} onChange={(e) => setPinTimes(e.target.checked)} />
         KEEP TIMES IN PLACE WHEN REORDERING
       </label>
-      <div style={{ display: 'grid', gridTemplateColumns: '64px 1fr 130px 60px', gap: 4, marginBottom: 4, fontFamily: BRAND.mono, fontSize: 9, letterSpacing: '0.1em', color: BRAND.ink300 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: GRID, gap: 4, marginBottom: 2, fontFamily: BRAND.mono, fontSize: 9, letterSpacing: '0.1em', color: BRAND.ink300 }}>
         <span>TIME</span><span>SESSION</span><span>FACULTY</span><span />
       </div>
       {rows.map((r, i) => (
-        <div key={i} style={{ display: 'grid', gridTemplateColumns: '64px 1fr 130px 60px', gap: 4, marginBottom: 4, alignItems: 'center' }}>
-          <input style={{ ...cell, fontFamily: BRAND.mono }} value={r.time} placeholder="09.15" onChange={(e) => update(i, 'time', e.target.value)} onBlur={() => update(i, 'time', normalizeTime(r.time))} />
-          <input style={cell} value={r.title} placeholder="Session title" onChange={(e) => update(i, 'title', e.target.value)} />
-          <input style={cell} value={r.faculty} placeholder="Prof. N. N." onChange={(e) => update(i, 'faculty', e.target.value)} />
-          <span style={{ whiteSpace: 'nowrap' }}>
-            <button style={iconBtn} title="Move up" onClick={() => move(i, -1)} disabled={i === 0}>↑</button>
-            <button style={iconBtn} title="Move down" onClick={() => move(i, 1)} disabled={i === rows.length - 1}>↓</button>
-            <button style={{ ...iconBtn, color: '#e11d48' }} title="Remove" onClick={() => remove(i)}>✕</button>
-          </span>
+        <div key={i}>
+          {renderInsert(i)}
+          {rowEl(r, i)}
         </div>
       ))}
-      <button onClick={add} style={{ marginTop: 2, border: `1px dashed ${BRAND.ink300}`, background: 'transparent', cursor: 'pointer', fontFamily: BRAND.mono, fontSize: 10, letterSpacing: '0.08em', color: BRAND.ink600, padding: '5px 10px' }}>+ SESSION</button>
+      {renderInsert(rows.length)}
     </div>
   );
 }
 
+// ─── Fact-block editor (invitation / save-the-date) ──────────────────────────
+// The fact block renders as "LABEL  value" rows (Date / Time / Venue …). Editing
+// it as one textarea where every line must be prefixed with its label is a trap —
+// people retype the label into the value ("Date Date and time to be confirmed").
+// This gives each row an explicit LABEL field and VALUE field, so the value holds
+// ONLY the value. The body STRING stays the source of truth (presets/PDF untouched).
+const FACT_LABELS = ['Date', 'Time', 'Venue', 'Location', 'Room', 'Faculty', 'Registration', 'Contact'];
+const FACT_SEP = '\t'; // label/value separator in the body — lets ANY custom label render as a label
+function parseFactRows(value) {
+  const lines = (value || '').split('\n');
+  const rows = lines.map((l) => {
+    if (l.includes(FACT_SEP)) {
+      const i = l.indexOf(FACT_SEP);
+      return { label: l.slice(0, i).trim(), value: l.slice(i + 1).trim() };
+    }
+    const t = l.trim();
+    if (!t) return null;
+    const m = t.match(ROW_LABEL_RE); // legacy: known label + space (Cadence / older presets)
+    if (m) {
+      const label = m[1].charAt(0).toUpperCase() + m[1].slice(1).toLowerCase();
+      return { label, value: m[2] };
+    }
+    return { label: '', value: t };
+  }).filter(Boolean);
+  return rows.length ? rows : [{ label: 'Date', value: '' }];
+}
+function serializeFactRows(rows) {
+  return rows
+    .map((r) => {
+      const v = (r.value || '').trim();
+      const lab = (r.label || '').trim();
+      // Tab-separate label from value so a custom label is unambiguous to the
+      // renderer; an unlabelled row is just the value.
+      return lab ? `${lab}${FACT_SEP}${v}` : v;
+    })
+    .filter((l) => l.replace(FACT_SEP, '').length) // drop fully-empty rows
+    .join('\n');
+}
+let FACT_ROW_SEQ = 0;
+const withRowIds = (rows) => rows.map((r) => ({ id: r.id ?? ++FACT_ROW_SEQ, label: r.label || '', value: r.value || '' }));
+function FactBlockEditor({ value, onChange }) {
+  // Rows live in LOCAL state so each field is preserved verbatim while typing.
+  // The body string round-trip is lossy for empty/partial rows (a labelled row
+  // with a blank value would collapse and its label would leak into the field
+  // next to it) — so we serialise OUTWARD only, and re-parse the incoming value
+  // just for EXTERNAL changes (template switch / preset load), ignoring our echo.
+  const [rows, setRows] = useState(() => withRowIds(parseFactRows(value)));
+  const lastEmit = useRef(null);
+  useEffect(() => {
+    if (value === lastEmit.current) return;
+    setRows(withRowIds(parseFactRows(value)));
+  }, [value]);
+  const commit = (next) => {
+    setRows(next);
+    const s = serializeFactRows(next);
+    lastEmit.current = s;
+    onChange(s);
+  };
+  const cell = { fontSize: 12, padding: '6px 8px', border: `1px solid ${BRAND.ink100}`, background: '#fff', width: '100%', boxSizing: 'border-box', minWidth: 0 };
+  const iconBtn = { border: 'none', background: 'transparent', cursor: 'pointer', color: BRAND.ink300, fontSize: 12, padding: '1px 3px' };
+  const update = (i, key, v) => { const a = rows.map((r) => ({ ...r })); a[i][key] = v; commit(a); };
+  const move = (i, d) => { const a = rows.map((r) => ({ ...r })); const j = i + d; if (j < 0 || j >= a.length) return; [a[i], a[j]] = [a[j], a[i]]; commit(a); };
+  const remove = (i) => commit(rows.filter((_, k) => k !== i));
+  const add = () => commit(withRowIds([...rows, { label: FACT_LABELS.find((l) => !rows.some((r) => r.label === l)) || '', value: '' }]));
+  return (
+    <div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'minmax(84px,0.5fr) minmax(0,1fr) 44px', gap: 4, marginBottom: 3, fontFamily: BRAND.mono, fontSize: 9, letterSpacing: '0.1em', color: BRAND.ink300 }}>
+        <span>LABEL</span><span>VALUE</span><span />
+      </div>
+      {rows.map((r, i) => (
+        <div key={r.id} style={{ display: 'grid', gridTemplateColumns: 'minmax(84px,0.5fr) minmax(0,1fr) 44px', gap: 4, alignItems: 'center', marginBottom: 4 }}>
+          <input list="factlabels" style={{ ...cell, fontFamily: BRAND.mono, textTransform: 'uppercase', color: BRAND.gold, letterSpacing: '0.04em' }}
+                 value={r.label} placeholder="Type custom or pick…" title="Type any custom label, or pick a common one from the list"
+                 onChange={(e) => update(i, 'label', e.target.value)} />
+          <input style={cell} value={r.value} placeholder="e.g. Friday, 29 Nov 2026" onChange={(e) => update(i, 'value', e.target.value)} />
+          <span style={{ whiteSpace: 'nowrap' }}>
+            <button style={iconBtn} title="Move up" onClick={() => move(i, -1)} disabled={i === 0}>↑</button>
+            <button style={{ ...iconBtn, color: '#e11d48' }} title="Remove" onClick={() => remove(i)}>✕</button>
+          </span>
+        </div>
+      ))}
+      <datalist id="factlabels">{FACT_LABELS.map((l) => <option key={l} value={l} />)}</datalist>
+      <button onClick={add} style={{ marginTop: 2, border: `1px solid ${BRAND.ink100}`, background: '#fff', cursor: 'pointer', fontFamily: BRAND.mono, fontSize: 9, letterSpacing: '0.08em', color: BRAND.ink600, padding: '4px 10px', borderRadius: 3, textTransform: 'uppercase' }}>+ Add row</button>
+      <div style={{ fontSize: 9.5, color: BRAND.ink300, fontFamily: BRAND.mono, marginTop: 6, lineHeight: 1.5 }}>
+        Label shows in gold — type any custom label or pick one, or leave it blank for an unlabelled line. The value holds only the value; don't repeat the label.
+      </div>
+    </div>
+  );
+}
+
+// ── TYPE SYSTEM — one modular scale for every text role ──────────────
+// Sizes are a fraction of the canvas short side (`base`), so a role scales
+// with the canvas. A format's CATEGORY tunes two knobs — the body size (the
+// anchor the other roles step off) and the modular `ratio` — plus a headline
+// cap/floor. Tuning is driven by physical read distance:
+//   poster  — read across a room → big type, big steps
+//   card    — read in the hand   → proportionally big type, gentle steps
+//   paged   — dense A4/A5 flyers & programmes → smaller type so many lines fit
+//   social  — phone feed         → generous type
+//   digital — screens / email    → middle ground
+// The px floors keep tiny canvases legible; the headline stays dominant because
+// it is capped near the short-side fraction, not derived from the body step.
+const TYPE_CATEGORIES = {
+  poster:  { body: 0.0230, ratio: 1.33, headlineCap: 0.115, headlineFloor: 0.060 },
+  paged:   { body: 0.0175, ratio: 1.26, headlineCap: 0.082, headlineFloor: 0.042 },
+  card:    { body: 0.0320, ratio: 1.20, headlineCap: 0.110, headlineFloor: 0.058 },
+  social:  { body: 0.0280, ratio: 1.25, headlineCap: 0.100, headlineFloor: 0.052 },
+  digital: { body: 0.0220, ratio: 1.25, headlineCap: 0.082, headlineFloor: 0.044 },
+};
+
+function formatCategory(formatKey) {
+  const fmt = FORMATS[formatKey] || {};
+  const g = fmt.group || '';
+  // A6 postcard & business card are held close — treat them as "card" scale.
+  if (formatKey === 'business-card' || formatKey === 'postcard-a6') return 'card';
+  if (g.startsWith('Print · poster')) return 'poster';
+  if (g.startsWith('Print · paged')) return 'paged';
+  if (g.startsWith('Digital')) return 'digital';
+  return 'social';
+}
+
+function computeTypeScale(frame) {
+  const base = Math.min(frame.w, frame.h);
+  const cat = TYPE_CATEGORIES[formatCategory(frame.formatKey)] || TYPE_CATEGORIES.social;
+  const B = base * cat.body;            // body size — the modular anchor
+  const step = (n) => B * Math.pow(cat.ratio, n);
+  return {
+    gridUnit:     Math.max(4, Math.round(base * 0.008)),
+    eyebrowSize:  Math.max(11, step(-1)),
+    ctaSize:      Math.max(11, step(-1)),
+    bodySize:     Math.max(12, step(0)),
+    sublineSize:  Math.max(14, step(1)),
+    headlineMax:  Math.max(34, base * cat.headlineCap),
+    headlineMin:  Math.max(20, base * cat.headlineFloor),
+  };
+}
+
 function layoutTextElements(ctx, content, x, y, w, palette, accent, frame, anchor = 'top') {
+  const ts = computeTypeScale(frame);
   const baseSize = Math.min(frame.w, frame.h);
-  // Stringent baseline grid: every element baseline snaps to a multiple of `gridUnit`
-  // so vertical rhythm is mathematically identical across all templates and formats.
-  // Per brand guide §grid baseline_px=8 → here we scale: ~0.8% of short side.
-  const gridUnit = Math.max(4, Math.round(baseSize * 0.008));
+  // Baseline grid: every element baseline snaps to a multiple of `gridUnit` so
+  // vertical rhythm is identical across templates/formats. (From the type scale.)
+  const gridUnit = ts.gridUnit;
   const snap = (v) => Math.round(v / gridUnit) * gridUnit;
 
-  const eyebrowSize = Math.max(11, baseSize * 0.0135);
-  const headlineMax = Math.max(36, baseSize * 0.078);
-  const headlineMin = Math.max(22, baseSize * 0.04);
-  const sublineSize = Math.max(15, baseSize * 0.024);
-  const bodySize    = Math.max(12, baseSize * 0.0165);
-  const ctaSize     = Math.max(11, baseSize * 0.014);
+  // Text roles come from ONE modular scale, tuned per format category — see
+  // computeTypeScale / TYPE_CATEGORIES. Supporting roles (eyebrow/body/subline/
+  // cta) step off the body size by a fixed ratio; the headline is governed by a
+  // category cap+floor and then shrunk-to-fit by fitFont below.
+  const eyebrowSize = ts.eyebrowSize;
+  const headlineMax = ts.headlineMax;
+  const headlineMin = ts.headlineMin;
+  const sublineSize = ts.sublineSize;
+  const bodySize    = ts.bodySize;
+  const ctaSize     = ts.ctaSize;
 
   const blocks = [];
   if (content.eyebrow) blocks.push({ type: 'eyebrow', text: content.eyebrow, size: eyebrowSize });
@@ -1577,7 +1831,8 @@ function layoutTextElements(ctx, content, x, y, w, palette, accent, frame, ancho
     blocks.push({ type: 'subline', lines: wrapText(ctx, content.subline, w), size: sublineSize });
   }
   if (content.body) {
-    const rawLines = content.body.split('\n').map((l) => l.trim()).filter(Boolean);
+    // Never render a PAGE_BREAK marker as text (defensive — pages are split upstream).
+    const rawLines = content.body.split('\n').map((l) => l.trim()).filter((l) => l && l !== PAGE_BREAK);
     const structured = parseStructuredRows(rawLines);
     if (structured) {
       // Column width from the widest mono col text (time or label) + gutter.
@@ -1586,9 +1841,15 @@ function layoutTextElements(ctx, content, x, y, w, palette, accent, frame, ancho
       const colW = Math.max(...structured.map((r) => ctx.measureText(r.col).width), 0) + bodySize * 1.4;
       const textW = Math.max(60, w - colW);
       ctx.font = `500 ${bodySize}px ${BRAND.display}`;
-      const rows = structured.map((r) => ({ ...r, titleLines: wrapText(ctx, r.main, textW) }));
+      // A row with no time column whose text is ALL-CAPS is a SECTION divider
+      // (e.g. "HALLUX VALGUS 1") — rendered gold, spaced, not as a session line.
+      const rows = structured.map((r) => {
+        const section = !r.col && !!r.main && r.main === r.main.toUpperCase() && /[A-ZÀ-Ý]/.test(r.main);
+        return { ...r, section, titleLines: wrapText(ctx, r.main, section ? w : textW) };
+      });
       const lineCount = rows.reduce((n, r) => n + r.titleLines.length, 0);
-      const estH = lineCount * bodySize * 1.18 + rows.length * bodySize * 0.6;
+      const sectionCount = rows.filter((r) => r.section).length;
+      const estH = lineCount * bodySize * 1.18 + rows.length * bodySize * 0.6 + sectionCount * bodySize * 0.9;
       blocks.push({ type: 'rows', rows, colW, colSize, size: bodySize, estH });
     } else {
       ctx.font = `400 ${bodySize}px ${BRAND.display}`;
@@ -1648,7 +1909,15 @@ function layoutTextElements(ctx, content, x, y, w, palette, accent, frame, ancho
       advance(el.size * gaps.body);
     } else if (el.type === 'rows') {
       const colColor = palette.mode === 'dark' ? BRAND.gold : BRAND.ink600;
+      const sectionColor = palette.mode === 'dark' ? BRAND.gold : BRAND.ink600;
       for (const r of el.rows) {
+        if (r.section) {
+          // Section divider: extra breathing room above, gold, tracked caps.
+          advance(el.size * 1.5);
+          tokens.push({ type: 'tracked', text: r.main.toUpperCase(), x, y: cursorY, family: 'Inter', weight: 800, size: el.size * 0.92, color: sectionColor, letterSpacing: el.size * 0.05 });
+          advance(el.size * 0.55);
+          continue;
+        }
         advance(el.size);
         if (r.col) tokens.push({ type: 'plain', text: r.col, x, y: cursorY, family: 'JetBrainsMono', weight: 500, size: el.colSize, color: colColor });
         r.titleLines.forEach((line, i) => {
@@ -1779,15 +2048,51 @@ function drawTextBlock(ctx, content, x, y, w, palette, accent, frame, anchor = '
 // Margins: 7% horizontal / 6.5% vertical of short side
 const POS_KEYS = ['tl', 'tr', 'bl', 'br', 'hidden'];
 
-// Each format declares wmPct = wordmark width as fraction of short side.
-// Guide values: 0.27 paged · 0.30 poster · 0.10 sensible digital default.
-// User can override via opts.wordmarkPctOverride (0..1) to set their own size.
-// Wordmark height derives from the source aspect ratio (~5.64 : 1).
-const WORDMARK_AR = 344 / 61;
-function wordmarkSizeFor(frame, formatKey, pctOverride) {
+// Wordmark width = fraction of the canvas short side. Sizing is a coherent
+// per-category concept, resolved in this priority order:
+//   1. user override (opts.wordmarkPctOverride)
+//   2. the format's explicit wmPct — the BRAND-GUIDE print values (0.27 paged /
+//      0.30 poster) live here and must be honoured exactly
+//   3. the category default below — the single source of truth for every other
+//      surface, so the logo reads at a consistent relative size within a category
+// Category defaults mirror the guide intent: the logo is a corner signature, not
+// a hero — prominent on held print, restrained on screens and feeds.
+// Wordmark height derives from the source aspect ratio. WORDMARK_AR is the
+// MEASURED width/height of the vector paths (bbox 342.98 × 61.30), so the width
+// we reserve for layout equals the width actually drawn — no right-edge cut-off.
+const WORDMARK_AR = 342.98 / 61.30; // visible glyph aspect (width / height)
+// The wordmark is a HORIZONTAL mark, so its logical size depends on orientation:
+//   • Print (poster / paged / card) follows the brand guide — a fraction of the
+//     SHORT side (0.27 paged · 0.30 poster). Honoured exactly.
+//   • Screens (social / digital) size to the canvas WIDTH, giving a consistent
+//     corner presence across square, tall (9:16 — TikTok/Story) and wide formats.
+//     "% of short side" made the mark look tiny on tall canvases.
+const LOGO_SHORT_PCT = { poster: 0.30, paged: 0.27, card: 0.30 }; // fraction of short side (print, brand guide)
+const LOGO_WIDTH_PCT = { social: 0.13, digital: 0.13 };           // fraction of width (screens)
+const LOGO_MIN_WIDTH_FRAC  = 0.055; // legibility floor (of canvas width)
+const LOGO_MAX_WIDTH_FRAC  = 0.32;  // never dominate / overflow (of canvas width)
+const LOGO_MAX_HEIGHT_FRAC = 0.14;  // never oversized on very short/wide banners (of canvas height)
+
+// The default wordmark width expressed as a fraction of the SHORT side, so the
+// size-override slider (which works in short-side terms) stays consistent with
+// what actually renders. Applies the orientation rule + proportional guards.
+function defaultWordmarkShortFrac(formatKey, w, h) {
+  const cat = formatCategory(formatKey);
   const fmt = FORMATS[formatKey] || {};
+  const shortSide = Math.min(w, h);
+  let targetW = (LOGO_SHORT_PCT[cat] != null)
+    ? shortSide * (fmt.wmPct ?? LOGO_SHORT_PCT[cat])
+    : w * (LOGO_WIDTH_PCT[cat] ?? 0.13);
+  targetW = clamp(targetW, w * LOGO_MIN_WIDTH_FRAC, w * LOGO_MAX_WIDTH_FRAC);
+  targetW = Math.min(targetW, h * LOGO_MAX_HEIGHT_FRAC * WORDMARK_AR);
+  return targetW / shortSide;
+}
+
+function wordmarkSizeFor(frame, formatKey, pctOverride) {
   const shortSide = Math.min(frame.w, frame.h);
-  const pct = (pctOverride != null && pctOverride > 0) ? pctOverride : (fmt.wmPct ?? 0.10);
+  const pct = (pctOverride != null && pctOverride > 0)
+    ? pctOverride
+    : defaultWordmarkShortFrac(formatKey, frame.w, frame.h);
   const targetW = shortSide * pct;
   const h = Math.max(18, targetW / WORDMARK_AR);
   return { w: targetW, h };
@@ -1816,6 +2121,13 @@ function computeWordmarkBox(frame, pos, formatKey, safeArea, pctOverride) {
   if (pos === 'tr') { x = right; y = top; }
   if (pos === 'bl') { x = left;  y = bottom; }
   if (pos === 'br') { x = right; y = bottom; }
+  // Definitive clear-space clamp: whatever the intent, the mark must sit fully
+  // inside the canvas with a margin ≥ its own clear space. Guarantees it can
+  // never be cut off on any format or aspect ratio.
+  const csX = Math.max(padX * 0.5, wm.h * 0.5);
+  const csY = Math.max(padY * 0.5, wm.h * 0.5);
+  x = clamp(x, csX, Math.max(csX, frame.w - wm.w - csX));
+  y = clamp(y, csY, Math.max(csY, frame.h - wm.h - csY));
   return { x, y, w: wm.w, h: wm.h, pos };
 }
 
@@ -1845,6 +2157,10 @@ function computeFolioBox(ctx, frame, pos, formatKey, safeArea, folioText) {
   if (pos === 'tr') { x = right; y = top; }
   if (pos === 'bl') { x = left;  y = bottom; }
   if (pos === 'br') { x = right; y = bottom; }
+  // Keep the sender fully on-canvas (baseline y, so allow a line above/below).
+  const cs = Math.max(padX * 0.5, folioSize * 0.6);
+  x = clamp(x, cs, Math.max(cs, frame.w - tw - cs));
+  y = clamp(y, cs + folioSize, Math.max(cs + folioSize, frame.h - cs));
   return { x, y, w: tw, h: folioSize, pos, fontSize: folioSize, letterSpacing: ls, text: folioText };
 }
 
@@ -1933,6 +2249,11 @@ export default function MedartisBrandGenerator() {
   const [templateKey, setTemplateKey] = useState('product-launch');
   const [carouselSlide, setCarouselSlide] = useState(0);
   const [carouselSlides, setCarouselSlides] = useState(3);
+  // True once the user has typed real copy or imported a preset/manuscript.
+  // Gates whether switching the content template carries that copy forward
+  // (fixing a wrong template must NOT wipe content) vs. loads sample defaults
+  // (a pristine canvas should still show each template's example).
+  const contentEdited = useRef(false);
 
   const initialContent = useMemo(() => {
     const t = TEMPLATES[templateKey];
@@ -1944,6 +2265,12 @@ export default function MedartisBrandGenerator() {
   // Per-slide state (carousel) + single-slide fallback
   const [content, setContent] = useState(initialContent);
   const [carouselContent, setCarouselContent] = useState(() => [initialContent, initialContent, initialContent]);
+  // Print PAGES: a long agenda splits onto extra A4 pages at steerable PAGE_BREAK
+  // markers in the body (edited in the agenda editor). `pages` is DERIVED from the
+  // body, so moving a break instantly re-flows the pages. Distinct from carousel slides.
+  const [pageIdx, setPageIdx] = useState(0);
+  const [pageImages, setPageImages] = useState([]); // optional per-page background image
+  const [pageFits, setPageFits] = useState([]);     // per-page image transform (size/pos/rotation/fade)
   const [image, setImage] = useState(null);
   const [carouselImages, setCarouselImages] = useState([null, null, null]);
   const [imageFit, setImageFit] = useState({ ...DEFAULT_FIT });
@@ -1951,8 +2278,23 @@ export default function MedartisBrandGenerator() {
 
   useEffect(() => {
     const t = TEMPLATES[templateKey];
-    setContent(initialContent);
     setCarouselSlide(0);
+    // Carry the user's copy across a template switch. Every template shares the
+    // {eyebrow,headline,subline,body,cta} field shape, so once content has been
+    // edited/imported we keep each value and only fall back to the new
+    // template's default for keys that are still empty. A pristine canvas
+    // (nothing edited yet) still loads the template's sample content, so simply
+    // browsing templates behaves as before.
+    const keep = contentEdited.current;
+    const carry = (prev) => {
+      const next = {};
+      t.fields.forEach((f) => {
+        const existing = prev ? prev[f.key] : undefined;
+        next[f.key] = (keep && existing != null && existing !== '') ? existing : f.default;
+      });
+      return next;
+    };
+    setContent((prev) => carry(prev));
     // If the template provides per-slide content, use it (and auto-set slide count).
     // Otherwise fall back to filling every slide with the single-content defaults.
     if (t?.carouselContent && t.carouselContent.length) {
@@ -1969,7 +2311,7 @@ export default function MedartisBrandGenerator() {
       setCarouselFits(p => { const a = [...p]; while (a.length < slides) a.push({ ...DEFAULT_FIT }); return a.slice(0, slides); });
       setCarouselImages(p => { const a = [...p]; while (a.length < slides) a.push(null); return a.slice(0, slides); });
     } else {
-      setCarouselContent(prev => prev.map(() => ({ ...initialContent })));
+      setCarouselContent(prev => prev.map((c) => carry(c)));
     }
   }, [templateKey, initialContent]);
 
@@ -2129,6 +2471,64 @@ export default function MedartisBrandGenerator() {
     });
   }, []);
 
+  // Load the official wordmark assets once; bump wmReady so the canvas repaints
+  // from the SVG the moment it's available (paths render meanwhile).
+  const [wmReady, setWmReady] = useState(false);
+  useEffect(() => {
+    const done = () => { if (WORDMARK_ASSETS.dark?.complete && WORDMARK_ASSETS.light?.complete) setWmReady(v => !v); };
+    if (!WORDMARK_ASSETS.dark)  { const d = new Image(); d.onload = done; d.src = '/brand/wordmark.svg';       WORDMARK_ASSETS.dark = d; }
+    if (!WORDMARK_ASSETS.light) { const l = new Image(); l.onload = done; l.src = '/brand/wordmark-white.svg'; WORDMARK_ASSETS.light = l; }
+    done();
+  }, []);
+
+  // ── SAVED LIBRARY ─────────────────────────────────────────────────
+  // User-curated images (e.g. picked from Canto) persisted to localStorage so
+  // they join the standard Medartis library across sessions. Stored compressed
+  // as data URLs; loaded into the same libraryImages map so they apply exactly
+  // like built-in assets.
+  const SAVED_LIB_KEY = 'medartis-saved-library-v1';
+  const [savedLibrary, setSavedLibrary] = useState(() => {
+    try { return JSON.parse(localStorage.getItem(SAVED_LIB_KEY) || '[]'); }
+    catch { return []; }
+  });
+  useEffect(() => {
+    savedLibrary.forEach(asset => {
+      if (libraryImages[asset.id]) return;
+      const img = new Image();
+      img.onload = () => setLibraryImages(prev => ({ ...prev, [asset.id]: img }));
+      img.src = asset.src;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [savedLibrary]);
+
+  const persistSavedLibrary = (next) => {
+    setSavedLibrary(next);
+    try { localStorage.setItem(SAVED_LIB_KEY, JSON.stringify(next)); }
+    catch { alert('Could not save to the library — browser storage is full. Remove a few saved images and try again.'); }
+  };
+
+  // Compress + persist an image element into the saved library. Returns true on success.
+  const saveImageToLibrary = (img, label = 'Saved image', category = 'saved') => {
+    if (!img) return false;
+    if (savedLibrary.some(a => a.label === label && a.category === category)) return true; // already saved
+    try {
+      const src = compressDataUrl(img, 1600, 0.82);
+      const id = 'saved-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 6);
+      const entry = { id, label: (label || 'Saved image').slice(0, 48), category, src, saved: true };
+      setLibraryImages(prev => ({ ...prev, [id]: img }));
+      persistSavedLibrary([entry, ...savedLibrary]);
+      return true;
+    } catch (e) {
+      alert('Could not save image: ' + e.message);
+      return false;
+    }
+  };
+
+  const removeFromLibrary = (id) => {
+    persistSavedLibrary(savedLibrary.filter(a => a.id !== id));
+    setLibraryImages(prev => { const n = { ...prev }; delete n[id]; return n; });
+  };
+
   const canvasRef = useRef(null);
   const previewWrapRef = useRef(null);
   const [previewSize, setPreviewSize] = useState({ w: 500, h: 500 });
@@ -2157,10 +2557,18 @@ export default function MedartisBrandGenerator() {
     }
   }, [formatKey, layoutKey]);
 
-  // Active values (per-slide for carousels)
-  const activeContent = format.multi ? (carouselContent[carouselSlide] || initialContent) : content;
-  const activeImage   = format.multi ? carouselImages[carouselSlide]   : image;
-  const activeFit     = format.multi ? (carouselFits[carouselSlide] || DEFAULT_FIT) : imageFit;
+  // Pages are DERIVED from the body's PAGE_BREAK markers — edit a break, re-flow.
+  const pages = useMemo(() => splitAgendaPages(content), [content]);
+  const curPage = pages ? Math.min(pageIdx, pages.length - 1) : 0;
+  // Keep the page index valid when a break is removed and the page count drops.
+  useEffect(() => { if (pages && pageIdx > pages.length - 1) setPageIdx(Math.max(0, pages.length - 1)); }, [pages, pageIdx]);
+
+  // Active values (per-slide for carousels; per-page for a paginated agenda)
+  const activeContent = pages
+    ? (pages[curPage] || content)
+    : (format.multi ? (carouselContent[carouselSlide] || initialContent) : content);
+  const activeImage   = pages ? (pageImages[curPage] || image) : (format.multi ? carouselImages[carouselSlide]   : image);
+  const activeFit     = pages ? (pageFits[curPage] || DEFAULT_FIT) : (format.multi ? (carouselFits[carouselSlide] || DEFAULT_FIT) : imageFit);
   // Per-slide image picker is redundant when a spanning bg is covering the image area
   const perSlideImageDisabled = format.multi
     && carouselBg.enabled
@@ -2176,7 +2584,7 @@ export default function MedartisBrandGenerator() {
     ctx.textBaseline = 'alphabetic';
 
     const pad = Math.min(format.w, format.h) * 0.07;
-    const frame = { w: format.w, h: format.h, padX: pad, padY: pad };
+    const frame = { w: format.w, h: format.h, padX: pad, padY: pad, formatKey };
 
     const layout = LAYOUTS[layoutKey];
     if (layout) {
@@ -2221,7 +2629,7 @@ export default function MedartisBrandGenerator() {
         ctx.fill();
       }
     }
-  }, [format, layoutKey, activeContent, activeImage, activeFit, palette, carouselSlides, carouselSlide, wordmarkPos, folioPos, formatKey, wordmarkOverImage, folioOverImage, wordmarkColor, folioColor, folioText, qrConfig, qrImage, carouselBg, carouselBgImage, carouselQrPer, carouselFolioPer, textBackdrop, wordmarkPctOverride]);
+  }, [format, layoutKey, activeContent, activeImage, activeFit, palette, carouselSlides, carouselSlide, wordmarkPos, folioPos, formatKey, wordmarkOverImage, folioOverImage, wordmarkColor, folioColor, folioText, qrConfig, qrImage, carouselBg, carouselBgImage, carouselQrPer, carouselFolioPer, textBackdrop, wordmarkPctOverride, wmReady]);
 
   useEffect(() => { draw(); }, [draw]);
 
@@ -2241,6 +2649,7 @@ export default function MedartisBrandGenerator() {
 
   // ── Per-slide mutators ───────────────────────────────────────────
   const updateField = (key, value) => {
+    contentEdited.current = true; // real copy now exists — protect it on template switches
     if (format.multi) {
       const next = [...carouselContent];
       next[carouselSlide] = { ...(next[carouselSlide] || initialContent), [key]: value };
@@ -2251,7 +2660,10 @@ export default function MedartisBrandGenerator() {
   };
 
   const updateFit = (patch) => {
-    if (format.multi) {
+    if (pages) {
+      // Per-page image transform (size/position/rotation/fade) — keyed to this page.
+      setPageFits((p) => { const a = [...p]; while (a.length < pages.length) a.push({ ...DEFAULT_FIT }); a[curPage] = { ...(a[curPage] || DEFAULT_FIT), ...patch }; return a; });
+    } else if (format.multi) {
       const next = [...carouselFits];
       next[carouselSlide] = { ...(next[carouselSlide] || DEFAULT_FIT), ...patch };
       setCarouselFits(next);
@@ -2278,7 +2690,10 @@ export default function MedartisBrandGenerator() {
 
   const applyImage = (imgOrSrc) => {
     const assign = (img) => {
-      if (format.multi) {
+      if (pages) {
+        // Per-page image: set just this page's background, leave the others.
+        setPageImages((p) => { const a = [...p]; while (a.length < pages.length) a.push(null); a[curPage] = img; return a; });
+      } else if (format.multi) {
         const next = [...carouselImages];
         next[carouselSlide] = img;
         setCarouselImages(next);
@@ -2319,6 +2734,21 @@ export default function MedartisBrandGenerator() {
     }
   };
 
+  // A paginated agenda: export one PNG per content page. Rendered off-screen
+  // with each page's own content, image and fit, so we don't flicker the live
+  // preview and every page keeps its own crop/rotation/fades.
+  const downloadAllPages = async () => {
+    if (!pages) return;
+    for (let i = 0; i < pages.length; i++) {
+      const c = renderOffscreenCanvas(false, pages[i], pageImages[i] || image, pageFits[i] || DEFAULT_FIT, 1, 0, 0);
+      const link = document.createElement('a');
+      link.download = `medartis-${formatKey}-page-${i + 1}.png`;
+      link.href = c.toDataURL('image/png');
+      link.click();
+      await new Promise(r => setTimeout(r, 250));
+    }
+  };
+
   // ── PDF export (optional bleed + crop marks) ────────────────────
   const [pdfBleed, setPdfBleed] = useState(true);
   const [pdfCropMarks, setPdfCropMarks] = useState(true);
@@ -2341,7 +2771,7 @@ export default function MedartisBrandGenerator() {
     // Shift so the layout's (0,0) lands inside the trim area
     if (bleedPx) ctx.translate(bleedPx, bleedPx);
     const pad = Math.min(trimW, trimH) * 0.07;
-    const frame = { w: trimW, h: trimH, padX: pad, padY: pad, bleedPx };
+    const frame = { w: trimW, h: trimH, padX: pad, padY: pad, bleedPx, formatKey };
     const layout = LAYOUTS[layoutKey];
     const idx = slideIdxOverride ?? (format.multi ? carouselSlide : 0);
     const slideShowsFolio = format.multi ? (carouselFolioPer[idx] ?? true) : true;
@@ -2398,7 +2828,7 @@ export default function MedartisBrandGenerator() {
   // Used by the vector PDF path so we can emit vector text/wordmark.
   const computeSlideVectorParts = (slideContent, slideFit) => {
     const pad = Math.min(format.w, format.h) * 0.07;
-    const frame = { w: format.w, h: format.h, padX: pad, padY: pad };
+    const frame = { w: format.w, h: format.h, padX: pad, padY: pad, formatKey };
 
     // We need a measurement canvas context so layoutTextElements can measure widths
     const measCanvas = document.createElement('canvas');
@@ -2519,7 +2949,7 @@ export default function MedartisBrandGenerator() {
 
     // Vector text + brand bar on top
     const pad = Math.min(formatDef.w, formatDef.h) * 0.07;
-    const frame = { w: formatDef.w, h: formatDef.h, padX: pad, padY: pad };
+    const frame = { w: formatDef.w, h: formatDef.h, padX: pad, padY: pad, formatKey };
     const { textTokens, opts: vecOpts, palette: vecPalette } = computeSlideVectorParts(slideContent, slideFit);
 
     // Auto-contrast: sample the bitmap canvas under the wordmark / sender
@@ -2547,6 +2977,24 @@ export default function MedartisBrandGenerator() {
     const flAuto = vecOpts.folioColor    === 'auto' && (vecOpts.folioOverImage    || layoutKey === 'overlay');
     const wmResolvedColor = wmAuto ? sampleAt(wmBox) : null;
     const flResolvedColor = flAuto ? sampleAt(fBox)  : null;
+
+    // Intelligent text colour (overlay): sample the bitmap behind the text band
+    // and flip the whole text block to ink on a light background — mirrors the
+    // live-canvas logic so the PDF matches the preview.
+    if (layoutKey === 'overlay' && !textBackdrop.enabled) {
+      const bpx = bleedMm * dpi / 25.4;
+      const bandTop = formatDef.h * 0.5;
+      const bandH = Math.max(1, (formatDef.h - pad * 1.7) - bandTop);
+      const lum = sampleCanvasLuminance(bitmapCtx,
+        (pad + bpx) * bitmapScaleX, (bandTop + bpx) * bitmapScaleY,
+        (formatDef.w - pad * 2) * bitmapScaleX, bandH * bitmapScaleY);
+      if (lum > 145) {
+        for (const t of textTokens) {
+          if (t.color === BRAND.bone00) t.color = BRAND.ink;
+          else if (t.color === BRAND.cream100) t.color = BRAND.ink600;
+        }
+      }
+    }
 
     pdfDrawTextTokens(pdf, textTokens, dpi, bleedMm);
     pdfDrawBrandBar(pdf, frame, vecPalette, formatKey, {
@@ -2620,7 +3068,29 @@ export default function MedartisBrandGenerator() {
       }
     };
 
-    if (format.multi) {
+    // A paginated agenda: one PDF page per content page (mirrors the carousel loop),
+    // each with its own optional background image.
+    const renderPage = async (idx) => {
+      const pageContent = pages[idx] || content;
+      const pageImage = pageImages[idx] || image;
+      const pageFit = pageFits[idx] || DEFAULT_FIT;
+      if (pdfVector && PDF_FONT_CACHE.loaded) {
+        await renderVectorPdfPage(pdf, pageContent, pageImage, pageFit, formatDef, bleedMm, 0);
+      } else {
+        setPageIdx(idx);
+        await new Promise(r => setTimeout(r, 220));
+        renderCanvasToPdf(pdf, canvasRef.current, formatDef, bleedMm);
+      }
+    };
+
+    if (pages) {
+      const restore = pageIdx;
+      for (let i = 0; i < pages.length; i++) {
+        if (i > 0) newPdfPage(pdf, totalWmm, totalHmm);
+        await renderPage(i);
+      }
+      setPageIdx(restore);
+    } else if (format.multi) {
       for (let i = 0; i < carouselSlides; i++) {
         if (i > 0) newPdfPage(pdf, totalWmm, totalHmm);
         await renderSlide(i);
@@ -2708,8 +3178,10 @@ export default function MedartisBrandGenerator() {
     carouselContent,
     imageFit,
     carouselFits,
+    pageFits,
     imageRef: imageToRef(image),
     carouselImageRefs: carouselImages.map(imageToRef),
+    pageImageRefs: pageImages.map(imageToRef),
   });
 
   const restoreState = async (preset) => {
@@ -2733,7 +3205,16 @@ export default function MedartisBrandGenerator() {
     if (Array.isArray(preset.carouselFolioPer)) setCarouselFolioPer(preset.carouselFolioPer);
     if (preset.textBackdrop) setTextBackdrop(preset.textBackdrop);
     await new Promise(r => setTimeout(r, 60));
-    setContent(preset.content || {});
+    // Pages are steered by PAGE_BREAK markers IN the body. A Cadence deep-link sends
+    // a pre-split `pages` array (clean body) — rebuild the marked body from it so the
+    // breaks become editable. A generator-saved preset already carries markers in
+    // content.body, so it round-trips as-is.
+    const baseContent = preset.content || {};
+    const markedBody = (Array.isArray(preset.pages) && preset.pages.length > 1)
+      ? preset.pages.map((p) => (p && p.body) || '').filter(Boolean).join('\n' + PAGE_BREAK + '\n')
+      : (baseContent.body ?? '');
+    setContent({ ...baseContent, body: markedBody });
+    setPageIdx(0);
     setCarouselSlides(preset.carouselSlides || 3);
     setCarouselSlide(preset.carouselSlide || 0);
     setCarouselContent(preset.carouselContent || []);
@@ -2743,6 +3224,11 @@ export default function MedartisBrandGenerator() {
     setImage(await refToImage(preset.imageRef));
     const imgs = await Promise.all((preset.carouselImageRefs || []).map(refToImage));
     setCarouselImages(imgs);
+    const pageImgs = await Promise.all((preset.pageImageRefs || []).map(refToImage));
+    setPageImages(pageImgs);
+    setPageFits((preset.pageFits || []).map(f => ({ ...DEFAULT_FIT, ...(f || {}) })));
+    // Imported content is real content — a later template correction must keep it.
+    contentEdited.current = true;
   };
 
   const readPresets = () => {
@@ -3004,6 +3490,8 @@ export default function MedartisBrandGenerator() {
 
   const [presets, setPresets] = useState({});
   const [presetName, setPresetName] = useState('');
+  const [presetFilter, setPresetFilter] = useState('');
+  const [showDemos, setShowDemos] = useState(false);
   useEffect(() => { setPresets(readPresets()); }, []);
 
   // Render a small thumbnail of the current canvas (max ~360px on long edge)
@@ -3218,6 +3706,15 @@ export default function MedartisBrandGenerator() {
         </Section>
 
         <Section label="§ 03 — CONTENT TEMPLATE" {...sp('TEMPLATE')}>
+          {contentEdited.current && (
+            <div style={{
+              fontSize: 10, fontFamily: BRAND.mono, color: BRAND.ink600,
+              letterSpacing: '0.04em', lineHeight: 1.5, marginBottom: 8,
+              padding: '7px 9px', background: BRAND.bone, border: `1px solid ${BRAND.ink100}`,
+            }}>
+              Wrong type? Pick the right one — your content is kept.
+            </div>
+          )}
           {(() => {
             const entries = Object.entries(TEMPLATES);
             const single = entries.filter(([, t]) => !t.carouselContent);
@@ -3341,11 +3838,25 @@ export default function MedartisBrandGenerator() {
             <CarouselNav onClick={() => setCarouselSlide(Math.min(carouselSlides - 1, carouselSlide + 1))} disabled={carouselSlide === carouselSlides - 1}>→</CarouselNav>
           </div>
         )}
+
+        {pages && !format.multi && (
+          <div style={{
+            position: 'absolute', bottom: 28, left: 0, right: 0,
+            display: 'flex', justifyContent: 'center', gap: 10, alignItems: 'center'
+          }}>
+            <CarouselNav onClick={() => setPageIdx(Math.max(0, curPage - 1))} disabled={curPage === 0}>←</CarouselNav>
+            <div style={{
+              color: BRAND.bone00, fontSize: 11, padding: '0 12px', minWidth: 100,
+              textAlign: 'center', fontFamily: BRAND.mono, letterSpacing: '0.1em'
+            }}>PAGE {curPage + 1} / {pages.length}</div>
+            <CarouselNav onClick={() => setPageIdx(Math.min(pages.length - 1, curPage + 1))} disabled={curPage === pages.length - 1}>→</CarouselNav>
+          </div>
+        )}
       </div>
 
-      {/* RIGHT SIDEBAR */}
+      {/* RIGHT SIDEBAR — widened so the agenda editor has room to breathe */}
       <div style={{
-        width: 380, background: BRAND.bone00, padding: '24px 22px',
+        width: 'clamp(380px, 30vw, 560px)', flexShrink: 0, background: BRAND.bone00, padding: '24px 22px',
         overflowY: 'auto', borderLeft: `1px solid ${BRAND.ink100}`
       }}>
         <Section label="§ 04 — SURFACE" {...sp('SURFACE')}>
@@ -3408,7 +3919,7 @@ export default function MedartisBrandGenerator() {
 
           {/* Wordmark size override — defaults to format wmPct per brand guide */}
           {(() => {
-            const formatDefault = (FORMATS[formatKey]?.wmPct) ?? 0.10;
+            const formatDefault = defaultWordmarkShortFrac(formatKey, format.w, format.h);
             const effective = wordmarkPctOverride ?? formatDefault;
             return (
               <div style={{ marginTop: 10 }}>
@@ -3742,7 +4253,7 @@ export default function MedartisBrandGenerator() {
               fontFamily: BRAND.mono, letterSpacing: '0.08em', textTransform: 'uppercase'
             }}>OR · MEDARTIS LIBRARY</div>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 4 }}>
-              {LIBRARY.map(asset => (
+              {[...LIBRARY, ...savedLibrary].map(asset => (
                 <button key={asset.id} title={asset.label}
                         onClick={() => setCarouselBg({
                           ...carouselBg, enabled: true, imageSrc: asset.src
@@ -3841,12 +4352,17 @@ export default function MedartisBrandGenerator() {
                 fontFamily: BRAND.mono
               }}>{field.label}</label>
               {templateKey === 'agenda-flyer' && field.key === 'body' ? (
-                <AgendaEditor value={activeContent.body || ''} onChange={(v) => updateField('body', v)} />
+                // Edit the FULL body (all pages + PAGE_BREAK markers), not just the
+                // current page — otherwise editing collapses the pagination.
+                <AgendaEditor value={(format.multi ? activeContent.body : content.body) || ''} onChange={(v) => updateField('body', v)} />
+              ) : (['event-invitation', 'save-the-date', 'programme-cover'].includes(templateKey) && field.key === 'body') ? (
+                // Structured Date/Time/Venue rows — no more "Date Date …" duplication.
+                <FactBlockEditor value={activeContent.body || ''} onChange={(v) => updateField('body', v)} />
               ) : field.multiline ? (
-                <textarea value={activeContent[field.key] || ''}
+                <textarea value={activeContent[field.key] || ''} placeholder={field.default || ''}
                           onChange={(e) => updateField(field.key, e.target.value)} rows={3} />
               ) : (
-                <input type="text" value={activeContent[field.key] || ''}
+                <input type="text" value={activeContent[field.key] || ''} placeholder={field.default || ''}
                        onChange={(e) => updateField(field.key, e.target.value)} />
               )}
             </div>
@@ -3896,22 +4412,32 @@ export default function MedartisBrandGenerator() {
           }}>MEDARTIS LIBRARY · 02-ASSETS / VISUALS</div>
 
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: 4 }}>
-            {LIBRARY.map(asset => (
+            {[...LIBRARY, ...savedLibrary].map(asset => (
               <button key={asset.id} title={asset.label}
                       onClick={() => libraryImages[asset.id] && applyImage(libraryImages[asset.id])}
                       style={{
                         aspectRatio: '1', background: BRAND.bone,
-                        border: `1px solid ${BRAND.ink100}`, borderRadius: 0,
+                        border: `1px solid ${asset.saved ? BRAND.gold : BRAND.ink100}`, borderRadius: 0,
                         cursor: 'pointer', padding: 0, overflow: 'hidden', position: 'relative'
                       }}>
                 {libraryImages[asset.id] && (
                   <img src={asset.src} alt={asset.label}
                        style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />
                 )}
+                {asset.saved && (
+                  <span onClick={(e) => { e.stopPropagation(); removeFromLibrary(asset.id); }}
+                        title="Remove from library"
+                        style={{
+                          position: 'absolute', top: 2, right: 2, width: 16, height: 16,
+                          display: 'flex', alignItems: 'center', justifyContent: 'center',
+                          background: 'rgba(19,19,16,0.72)', color: BRAND.bone00, fontSize: 11,
+                          lineHeight: '16px', fontFamily: BRAND.mono, cursor: 'pointer', borderRadius: 2,
+                        }}>×</span>
+                )}
                 <div style={{
                   position: 'absolute', bottom: 0, left: 0, right: 0,
                   background: 'linear-gradient(transparent, rgba(19,19,16,0.85))',
-                  color: BRAND.bone00, fontSize: 8.5, padding: '10px 4px 4px',
+                  color: asset.saved ? BRAND.gold : BRAND.bone00, fontSize: 8.5, padding: '10px 4px 4px',
                   textAlign: 'left', fontWeight: 500, fontFamily: BRAND.mono,
                   letterSpacing: '0.04em', textTransform: 'uppercase'
                 }}>{asset.category}</div>
@@ -3923,7 +4449,7 @@ export default function MedartisBrandGenerator() {
 
         {/* Canto search */}
         <div style={{ opacity: perSlideImageDisabled ? 0.4 : 1, pointerEvents: perSlideImageDisabled ? 'none' : 'auto' }}>
-          <CantoSection onPickImage={applyImage} sectionProps={sp('CANTO')} />
+          <CantoSection onPickImage={applyImage} onSaveToLibrary={saveImageToLibrary} sectionProps={sp('CANTO')} />
         </div>
 
         {/* Image fit controls */}
@@ -3956,7 +4482,7 @@ export default function MedartisBrandGenerator() {
             fontSize: 11, fontWeight: 500, cursor: 'pointer',
             fontFamily: BRAND.mono, marginBottom: 6,
             letterSpacing: '0.16em', textTransform: 'uppercase'
-          }}>DOWNLOAD PNG</button>
+          }}>DOWNLOAD PNG{pages ? ` · PAGE ${curPage + 1}` : ''}</button>
           {format.multi && (
             <button onClick={downloadAllSlides} style={{
               width: '100%', padding: '12px', background: BRAND.paper,
@@ -3965,6 +4491,15 @@ export default function MedartisBrandGenerator() {
               fontFamily: BRAND.mono, letterSpacing: '0.16em', textTransform: 'uppercase',
               marginBottom: 6
             }}>DOWNLOAD ALL {carouselSlides} SLIDES PNG</button>
+          )}
+          {pages && pages.length > 1 && (
+            <button onClick={downloadAllPages} style={{
+              width: '100%', padding: '12px', background: BRAND.paper,
+              color: BRAND.ink, border: `1px solid ${BRAND.ink}`, borderRadius: 0,
+              fontSize: 10.5, fontWeight: 500, cursor: 'pointer',
+              fontFamily: BRAND.mono, letterSpacing: '0.16em', textTransform: 'uppercase',
+              marginBottom: 6
+            }}>DOWNLOAD ALL {pages.length} PAGES PNG</button>
           )}
 
           {/* PDF options panel */}
@@ -4050,45 +4585,92 @@ export default function MedartisBrandGenerator() {
             AUTO-NAMED IF BLANK · {presetName.trim() ? 'CUSTOM' : 'AUTO'}: <span style={{ color: BRAND.ink }}>{presetName.trim() || autoName}</span>
           </div>
 
-          {Object.keys(presets).length === 0 ? (
-            <div style={{
-              fontSize: 10.5, color: BRAND.ink600, fontFamily: BRAND.mono,
-              letterSpacing: '0.06em', padding: '10px 0'
-            }}>NO SAVED PRESETS YET</div>
-          ) : (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 3, marginBottom: 10 }}>
-              {Object.entries(presets)
-                .sort(([, a], [, b]) => (b.savedAt || '').localeCompare(a.savedAt || ''))
-                .map(([name, p]) => (
-                  <div key={name} style={{
-                    display: 'flex', alignItems: 'center', gap: 4,
-                    padding: '8px 10px', background: BRAND.paper,
-                    border: `1px solid ${BRAND.ink100}`
-                  }}>
-                    <button onClick={() => loadPreset(name)} title={p.savedAt || ''} style={{
-                      flex: 1, textAlign: 'left', background: 'transparent', border: 'none',
-                      cursor: 'pointer', fontFamily: BRAND.display, color: BRAND.ink,
-                      fontSize: 12, padding: 0
+          {(() => {
+            const isDemo = (name) => /·\s*demo\s*$/i.test(name);
+            const q = presetFilter.trim().toLowerCase();
+            const all = Object.entries(presets)
+              .sort(([, a], [, b]) => (b.savedAt || '').localeCompare(a.savedAt || ''));
+            const match = ([name, p]) => !q || name.toLowerCase().includes(q)
+              || `${p.formatKey} ${p.templateKey}`.toLowerCase().includes(q);
+            const mine  = all.filter(([n]) => !isDemo(n)).filter(match);
+            const demos = all.filter(([n]) =>  isDemo(n)).filter(match);
+
+            const Row = ([name, p]) => (
+              <div key={name} title={p.savedAt || ''} onClick={() => loadPreset(name)} style={{
+                display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer',
+                padding: 5, background: BRAND.paper, border: `1px solid ${BRAND.ink100}`,
+              }}>
+                <div style={{
+                  width: 46, height: 34, flexShrink: 0, background: BRAND.bone,
+                  border: `1px solid ${BRAND.ink100}`, overflow: 'hidden',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                }}>
+                  {p.thumbnail
+                    ? <img src={p.thumbnail} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />
+                    : <span style={{ fontSize: 8, color: BRAND.ink300, fontFamily: BRAND.mono }}>—</span>}
+                </div>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{
+                    fontFamily: BRAND.display, color: BRAND.ink, fontSize: 12, fontWeight: 500,
+                    whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+                  }}>{name.replace(/\s*·\s*demo\s*$/i, '')}</div>
+                  <div style={{
+                    fontSize: 9, color: BRAND.ink600, fontFamily: BRAND.mono, letterSpacing: '0.04em',
+                    whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', marginTop: 1,
+                  }}>{p.formatKey} · {p.templateKey}{p.carouselSlides > 1 ? ` · ${p.carouselSlides}×` : ''}</div>
+                </div>
+                <button onClick={(e) => { e.stopPropagation(); if (confirm(`Delete preset "${name}"?`)) deletePreset(name); }}
+                  title="Delete" style={{
+                    width: 20, height: 20, flexShrink: 0, background: 'transparent',
+                    border: 'none', cursor: 'pointer', color: BRAND.ink300,
+                    fontSize: 15, lineHeight: 1, fontFamily: BRAND.display,
+                  }}>×</button>
+              </div>
+            );
+
+            if (all.length === 0) return (
+              <div style={{ fontSize: 10.5, color: BRAND.ink600, fontFamily: BRAND.mono, letterSpacing: '0.06em', padding: '10px 0' }}>
+                NO SAVED PRESETS YET
+              </div>
+            );
+
+            return (
+              <div style={{ marginBottom: 10 }}>
+                {all.length > 6 && (
+                  <input type="text" placeholder="Filter presets…" value={presetFilter}
+                    onChange={(e) => setPresetFilter(e.target.value)}
+                    style={{ width: '100%', marginBottom: 6, fontSize: 11 }} />
+                )}
+                {mine.length > 0 && (
+                  <>
+                    <div style={{ fontSize: 9, fontFamily: BRAND.mono, color: BRAND.ink600, letterSpacing: '0.1em', textTransform: 'uppercase', margin: '2px 0 5px' }}>
+                      Your presets · {mine.length}
+                    </div>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>{mine.map(Row)}</div>
+                  </>
+                )}
+                {demos.length > 0 && (
+                  <div style={{ marginTop: mine.length ? 12 : 0 }}>
+                    <button onClick={() => setShowDemos(v => !v)} style={{
+                      display: 'flex', alignItems: 'center', gap: 6, width: '100%', padding: 0,
+                      background: 'transparent', border: 'none', cursor: 'pointer', textAlign: 'left',
+                      fontSize: 9, fontFamily: BRAND.mono, color: BRAND.ink600, letterSpacing: '0.1em',
+                      textTransform: 'uppercase', marginBottom: 5,
                     }}>
-                      <div style={{ fontWeight: 500 }}>{name}</div>
-                      <div style={{
-                        fontSize: 9.5, color: BRAND.ink600, fontFamily: BRAND.mono,
-                        letterSpacing: '0.05em', marginTop: 1
-                      }}>
-                        {p.formatKey} · {p.templateKey}{p.carouselSlides > 1 ? ` · ${p.carouselSlides} slides` : ''}
-                      </div>
+                      <span style={{ display: 'inline-block', width: 8, transition: 'transform 0.12s', transform: showDemos ? 'rotate(0deg)' : 'rotate(-90deg)' }}>▾</span>
+                      Demo gallery · {demos.length}
                     </button>
-                    <button onClick={() => {
-                      if (confirm(`Delete preset "${name}"?`)) deletePreset(name);
-                    }} style={{
-                      width: 22, height: 22, background: 'transparent',
-                      border: 'none', cursor: 'pointer', color: BRAND.ink600,
-                      fontSize: 16, lineHeight: 1, fontFamily: BRAND.display
-                    }} title="Delete">×</button>
+                    {showDemos && <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>{demos.map(Row)}</div>}
                   </div>
-                ))}
-            </div>
-          )}
+                )}
+                {mine.length === 0 && demos.length === 0 && (
+                  <div style={{ fontSize: 10, color: BRAND.ink600, fontFamily: BRAND.mono, padding: '8px 0' }}>
+                    No presets match “{presetFilter}”.
+                  </div>
+                )}
+              </div>
+            );
+          })()}
 
           <div style={{ display: 'flex', gap: 4 }}>
             <button onClick={exportPresetFile} style={{
@@ -4608,13 +5190,14 @@ const DualRangeSlider = ({ start, end, onChange }) => {
 };
 
 // ── Canto search section ─────────────────────────────────────────────
-const CantoSection = ({ onPickImage, sectionProps = {} }) => {
+const CantoSection = ({ onPickImage, onSaveToLibrary, sectionProps = {} }) => {
   const [status, setStatus] = useState(null);
   const [query, setQuery] = useState('');
   const [results, setResults] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [expanded, setExpanded] = useState(false);
+  const [savedIds, setSavedIds] = useState({}); // asset.id → true once saved this session
 
   useEffect(() => {
     fetch('/api/canto/status')
@@ -4641,6 +5224,19 @@ const CantoSection = ({ onPickImage, sectionProps = {} }) => {
     img.crossOrigin = 'anonymous';
     img.onload = () => onPickImage(img);
     img.onerror = () => setError('Failed to load Canto image');
+    img.src = asset.originalUrl;
+  };
+
+  // Save a Canto asset into the standard (saved) library without applying it.
+  const saveAsset = (asset) => {
+    if (!onSaveToLibrary) return;
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.onload = () => {
+      const ok = onSaveToLibrary(img, asset.name || 'Canto image', 'canto');
+      if (ok) setSavedIds(prev => ({ ...prev, [asset.id]: true }));
+    };
+    img.onerror = () => setError('Failed to load Canto image for saving');
     img.src = asset.originalUrl;
   };
 
@@ -4696,9 +5292,14 @@ const CantoSection = ({ onPickImage, sectionProps = {} }) => {
               fontFamily: BRAND.mono
             }}>ERROR · {error}</div>
           )}
+          {results.length > 0 && (
+            <div style={{ fontSize: 9.5, color: BRAND.ink600, marginBottom: 6, fontFamily: BRAND.mono, letterSpacing: '0.04em' }}>
+              Click to use · <span style={{ color: BRAND.gold }}>+LIB</span> saves to your standard library
+            </div>
+          )}
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: 4, maxHeight: expanded ? 'none' : 280, overflow: 'auto' }}>
             {results.map(a => (
-              <button key={a.id} title={a.name} onClick={() => pickAsset(a)} style={{
+              <div key={a.id} title={a.name} onClick={() => pickAsset(a)} style={{
                 aspectRatio: '1', background: BRAND.bone,
                 border: `1px solid ${BRAND.ink100}`, borderRadius: 0,
                 cursor: 'pointer', padding: 0, overflow: 'hidden', position: 'relative'
@@ -4707,7 +5308,18 @@ const CantoSection = ({ onPickImage, sectionProps = {} }) => {
                   <img src={a.previewUrl} alt={a.name} loading="lazy"
                        style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />
                 )}
-              </button>
+                {onSaveToLibrary && (
+                  <span onClick={(e) => { e.stopPropagation(); saveAsset(a); }}
+                        title={savedIds[a.id] ? 'Saved to library' : 'Save to standard library'}
+                        style={{
+                          position: 'absolute', top: 3, right: 3, padding: '1px 5px',
+                          background: savedIds[a.id] ? BRAND.gold : 'rgba(19,19,16,0.72)',
+                          color: savedIds[a.id] ? BRAND.ink : BRAND.bone00,
+                          fontSize: 8.5, fontFamily: BRAND.mono, letterSpacing: '0.06em',
+                          cursor: 'pointer', borderRadius: 2, fontWeight: 500,
+                        }}>{savedIds[a.id] ? 'SAVED' : '+LIB'}</span>
+                )}
+              </div>
             ))}
           </div>
           {results.length > 8 && (
