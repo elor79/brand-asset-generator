@@ -1,0 +1,188 @@
+{
+  "_comment": "Step 5 \u2014 GENERATIVE EXPAND. Takes one hero image and outpaints it to another canvas ratio, so a single shoot frame becomes 1:1, 9:16, 4:1 and A3 without a destructive crop. The plugin patches: 20.image (uploaded source), 21.left/right/top/bottom (padding computed from the TARGET format's aspect), 6.text, 25.noise_seed, 10.strength_model.",
+  "_requires": "FLUX.1-Fill-dev (flux1-fill-dev.safetensors) in ComfyUI/models/diffusion_models. It is NOT in ai_models \u2014 download it. Same non-commercial licence as flux1-dev. /api/gen/status reports it as missing until it is there.",
+  "12": {
+    "class_type": "UNETLoader",
+    "inputs": {
+      "unet_name": "flux1-fill-dev.safetensors",
+      "weight_dtype": "default"
+    }
+  },
+  "11": {
+    "class_type": "DualCLIPLoader",
+    "inputs": {
+      "clip_name1": "t5xxl_fp16.safetensors",
+      "clip_name2": "clip_l.safetensors",
+      "type": "flux"
+    }
+  },
+  "10": {
+    "class_type": "LoraLoaderModelOnly",
+    "inputs": {
+      "lora_name": "ibra_house_flux.safetensors",
+      "strength_model": 0.85,
+      "model": [
+        "12",
+        0
+      ]
+    }
+  },
+  "13": {
+    "class_type": "VAELoader",
+    "inputs": {
+      "vae_name": "ae.safetensors"
+    }
+  },
+  "20": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "SOURCE.png",
+      "upload": "image"
+    }
+  },
+  "21": {
+    "class_type": "ImagePadForOutpaint",
+    "inputs": {
+      "image": [
+        "20",
+        0
+      ],
+      "left": 0,
+      "top": 0,
+      "right": 0,
+      "bottom": 0,
+      "feathering": 48
+    }
+  },
+  "6": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "text": "ibrahouse, continue the scene naturally, same room, same light",
+      "clip": [
+        "11",
+        0
+      ]
+    }
+  },
+  "26": {
+    "class_type": "FluxGuidance",
+    "inputs": {
+      "guidance": 30.0,
+      "conditioning": [
+        "6",
+        0
+      ]
+    }
+  },
+  "27": {
+    "class_type": "InpaintModelConditioning",
+    "inputs": {
+      "positive": [
+        "26",
+        0
+      ],
+      "negative": [
+        "26",
+        0
+      ],
+      "vae": [
+        "13",
+        0
+      ],
+      "pixels": [
+        "21",
+        0
+      ],
+      "mask": [
+        "21",
+        1
+      ],
+      "noise_mask": true
+    }
+  },
+  "25": {
+    "class_type": "RandomNoise",
+    "inputs": {
+      "noise_seed": 0
+    }
+  },
+  "16": {
+    "class_type": "KSamplerSelect",
+    "inputs": {
+      "sampler_name": "euler"
+    }
+  },
+  "17": {
+    "class_type": "BasicScheduler",
+    "inputs": {
+      "scheduler": "normal",
+      "steps": 24,
+      "denoise": 1.0,
+      "model": [
+        "10",
+        0
+      ]
+    }
+  },
+  "22": {
+    "class_type": "BasicGuider",
+    "inputs": {
+      "model": [
+        "10",
+        0
+      ],
+      "conditioning": [
+        "27",
+        0
+      ]
+    }
+  },
+  "13_sampler": {
+    "class_type": "SamplerCustomAdvanced",
+    "inputs": {
+      "noise": [
+        "25",
+        0
+      ],
+      "guider": [
+        "22",
+        0
+      ],
+      "sampler": [
+        "16",
+        0
+      ],
+      "sigmas": [
+        "17",
+        0
+      ],
+      "latent_image": [
+        "27",
+        2
+      ]
+    }
+  },
+  "8": {
+    "class_type": "VAEDecode",
+    "inputs": {
+      "samples": [
+        "13_sampler",
+        0
+      ],
+      "vae": [
+        "13",
+        0
+      ]
+    }
+  },
+  "9": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "filename_prefix": "medartis/expand",
+      "images": [
+        "8",
+        0
+      ]
+    }
+  }
+}

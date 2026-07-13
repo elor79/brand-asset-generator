@@ -1,0 +1,715 @@
+// Vite dev-server plugin: generative image/video backends
+// Mirrors vite-plugin-canto.js so the whole tool still runs from `npm run dev`.
+//
+// Providers
+//   local       — ComfyUI on this machine (Flux.1 [dev] + the IBRA house LoRA)
+//   higgsfield  — cloud; used for still → motion (Reels/Stories) and as a
+//                 fallback when the local box isn't running
+//
+// Env (.env.local):
+//   COMFY_URL             default http://127.0.0.1:8188
+//   COMFY_LORA_NAME       default medartis_house_flux.safetensors
+//   HIGGSFIELD_API_KEY    optional — enables the cloud provider
+//   HIGGSFIELD_API_URL    default https://platform.higgsfield.ai/v1
+//
+// Routes
+//   GET  /api/gen/status                  → { providers, ready, missing[], lora }
+//   POST /api/gen/image    {prompt, w, h, surface, program, seed, strength}
+//   POST /api/gen/expand   {image(dataURL), w, h, prompt}     ← format-aware outpaint
+//   POST /api/gen/video    {image(dataURL), prompt, ratio, duration}
+//   GET  /api/gen/job/:id                 → { status, progress, images[], video }
+//
+// LICENCE: FLUX.1 [dev] is NON-COMMERCIAL. Generated assets are flagged
+// ai_generated + non_commercial all the way through to the UI badge.
+
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+const COMFY = () => (process.env.COMFY_URL || 'http://127.0.0.1:8188').replace(/\/$/, '');
+const LORA  = () => process.env.COMFY_LORA_NAME || 'medartis_house_flux.safetensors';
+// A Flux LoRA cannot load on SDXL and vice versa — different architectures, so
+// they are different files with different names.
+const SDXL_LORA = () => process.env.COMFY_SDXL_LORA_NAME || 'medartis_house_sdxl.safetensors';
+const HF_KEY = () => process.env.HIGGSFIELD_API_KEY || '';
+const HF_URL = () => (process.env.HIGGSFIELD_API_URL || 'https://platform.higgsfield.ai/v1').replace(/\/$/, '');
+
+const readJson = (p) => JSON.parse(fs.readFileSync(path.join(__dirname, p), 'utf8'));
+
+// Load a workflow and drop every "_comment"/"_licence"/"_upscale"-style doc key.
+// ComfyUI treats EVERY top-level key as a node, so a string value there crashes
+// its validator with a 500 rather than a readable validation error.
+function loadWorkflow(file) {
+  const wf = readJson(file);
+  for (const k of Object.keys(wf)) if (k.startsWith('_')) delete wf[k];
+  return wf;
+}
+const STYLE = () => readJson('ai/prompt/house_style.json');
+
+// ── jobs ───────────────────────────────────────────────────────────────
+// In-memory; a dev tool doesn't need a queue. { status, progress, images, error }
+const JOBS = new Map();
+const newJob = () => {
+  const id = Math.random().toString(36).slice(2, 10);
+  JOBS.set(id, { status: 'queued', progress: 0, images: [] });
+  return id;
+};
+const patchJob = (id, p) => JOBS.set(id, { ...(JOBS.get(id) || {}), ...p });
+
+// ── prompt compiler ────────────────────────────────────────────────────
+// The user never reaches the model directly. We compile:
+//   [trigger] + [subject] + [house look] + [realism] + [surface/program context]
+// and attach the negative. This is what keeps generated frames sitting next to
+// the library instead of next to generic AI stock.
+//
+// REALISM — READ THIS BEFORE "JUST ADDING NEGATIVES":
+// FLUX.1 [dev] is guidance-distilled. At CFG 1 it does not read a negative
+// prompt AT ALL — handing it a beautiful list of things to avoid changes
+// precisely nothing. So realism is asserted POSITIVELY (camera, optics, light
+// transport, skin texture, sensor grain) and only *additionally* defended with
+// the negative on engines that actually consume one (SDXL / Turbo, or Flux with
+// strict negatives, which raises CFG above 1 at the cost of speed).
+// `negativeHonoured` is reported back so the UI can never lie about it.
+function compilePrompt({ prompt, surface, program, realism = true, extraNegative = '' }) {
+  const s = STYLE();
+  const parts = [s.trigger, (prompt || '').trim()];
+  parts.push(...s.look);
+  if (realism && Array.isArray(s.realism)) parts.push(...s.realism);
+  if (surface && s.surfaces[surface]) parts.push(s.surfaces[surface]);
+  if (program && s.programs[program]) parts.push(s.programs[program]);
+  const negative = [...(s.negative || []), (extraNegative || '').trim()]
+    .filter(Boolean).join(', ');
+  return {
+    positive: parts.filter(Boolean).join(', '),
+    negative,
+  };
+}
+
+// The hard gate. IBRA is a surgical-education association: clinical-looking
+// synthetic imagery is a credibility problem, not a style problem.
+function safetyCheck(prompt) {
+  const s = STYLE();
+  const text = ` ${(prompt || '').toLowerCase()} `;
+  const hit = s.blocklist.find((w) => text.includes(` ${w} `) || text.includes(` ${w},`) || text.includes(` ${w}.`));
+  return hit ? { ok: false, term: hit, message: s.blocklist_message } : { ok: true };
+}
+
+// ── ComfyUI ────────────────────────────────────────────────────────────
+// Flux likes multiples of 16; also cap the pixel budget so a 3508px A4 canvas
+// doesn't try to generate at print resolution (generate at screen res, then the
+// canvas upsamples — or run an upscaler pass separately).
+const clampInt = (v, lo, hi) => Math.max(lo, Math.min(hi, Math.round(Number(v) || lo)));
+const clampNum = (v, lo, hi) => Math.max(lo, Math.min(hi, Number(v) || lo));
+
+// EVERY diffusion model has a native training resolution, and pushing past it is
+// what produces duplicated subjects and giants — the model tiles what it knows.
+//   SDXL Turbo : trained at 512²   → generate at 512², never 1024²
+//   Flux.1 dev : trained around 1MP → 1024² is the sweet spot
+// So: generate NATIVE at the canvas's aspect ratio, then upscale to the canvas.
+const NATIVE_PX = {
+  'sdxl-turbo': 512 * 512,
+  flux: 1024 * 1024,
+};
+
+function latentSize(w, h, engine = 'flux') {
+  const budget = NATIVE_PX[engine] || NATIVE_PX.flux;
+  const ratio = (w || 1024) / (h || 1024);
+  let lw = Math.sqrt(budget * ratio);
+  let lh = lw / ratio;
+  // SD/Flux latents want multiples of 64; clamp the short side so extreme canvas
+  // ratios (a 4:1 banner, a lanyard) don't collapse into a sliver the model
+  // cannot compose in.
+  const round64 = (v) => Math.max(320, Math.round(v / 64) * 64);
+  return { width: round64(lw), height: round64(lh) };
+}
+
+// Target size on the canvas — what we upscale TO. Capped so a 3508 px A4 doesn't
+// ask for a 4×-of-4× monster.
+function targetSize(w, h) {
+  const MAX_EDGE = 2560;
+  const scale = Math.min(1, MAX_EDGE / Math.max(w || 1, h || 1));
+  const even = (v) => Math.max(64, Math.round(v * scale / 8) * 8);
+  return { width: even(w || 1024), height: even(h || 1024) };
+}
+
+// The upscale tail (nodes 90/91/92) is part of the workflow FILES, so the graph
+// in ComfyUI's sidebar is the graph we run. Here we only bind it to reality:
+// the real model name, the real canvas size — or bypass it entirely when no
+// upscale model is installed (then SaveImage goes straight off the VAEDecode).
+function configureUpscale(wf, target, upscaleModel) {
+  if (!wf['92']) return wf;
+  if (!upscaleModel) {
+    wf['92'].inputs.image = ['8', 0];   // skip ESRGAN, keep the exact-size resize
+    delete wf['90'];
+    delete wf['91'];
+  } else {
+    wf['90'].inputs.model_name = upscaleModel;
+  }
+  wf['92'].inputs.width = target.width;
+  wf['92'].inputs.height = target.height;
+  return wf;
+}
+
+async function comfyFetch(path, ms = 20000) {
+  const r = await fetch(`${COMFY()}${path}`, { signal: AbortSignal.timeout(ms) });
+  if (!r.ok) throw new Error(`ComfyUI ${r.status} on ${path}`);
+  return r.json();
+}
+
+// /object_info is several MB and slow to serialise once custom node packs are
+// installed. Cache it — the status route is polled every few seconds.
+let OBJ_CACHE = { at: 0, data: null };
+async function comfyObjectInfo() {
+  if (OBJ_CACHE.data && Date.now() - OBJ_CACHE.at < 30000) return OBJ_CACHE.data;
+  const data = await comfyFetch('/object_info', 20000);
+  OBJ_CACHE = { at: Date.now(), data };
+  return data;
+}
+
+// Is ComfyUI there at all? Cheap call — never gate this on /object_info.
+async function comfyAlive() {
+  try { await comfyFetch('/system_stats', 3000); return true; } catch { return false; }
+}
+
+// What hardware is ComfyUI on? fp8 weights are a CUDA memory trick and do not
+// exist on Apple's MPS backend ("Undefined type Float8_e4m3fn"), so the dtype is
+// chosen from the device rather than hard-coded in the workflow.
+async function comfyDevice() {
+  try {
+    const j = await comfyFetch('/system_stats', 3000);
+    const d = (j.devices || [])[0] || {};
+    const type = (d.type || '').toLowerCase();     // 'cuda' | 'mps' | 'cpu'
+    return {
+      type,
+      name: d.name || type,
+      vramGb: d.vram_total ? Math.round(d.vram_total / 1e9) : null,
+    };
+  } catch {
+    return { type: '', name: 'unknown', vramGb: null };
+  }
+}
+
+async function weightDtype(device) {
+  if (process.env.COMFY_WEIGHT_DTYPE) return process.env.COMFY_WEIGHT_DTYPE;
+  const dev = device || await comfyDevice();
+  return dev.type === 'cuda' ? 'fp8_e4m3fn' : 'default';
+}
+
+// ComfyUI reports a combo input in TWO shapes depending on version:
+//   old:  [ ["a.safetensors", "b.safetensors"], {...} ]
+//   new:  [ "COMBO", { options: ["a.safetensors", ...] } ]
+// Reading [0] blindly on the new shape yields the STRING "COMBO", and then
+// list[0] is the character "C" — which is exactly how we ended up asking for an
+// upscale model called 'C'. Handle both.
+function comboOptions(spec) {
+  if (!Array.isArray(spec)) return [];
+  const [first, second] = spec;
+  if (Array.isArray(first)) return first;                       // old shape
+  if (second && Array.isArray(second.options)) return second.options; // new shape
+  return [];
+}
+
+async function comfyModels() {
+  const info = await comfyObjectInfo();
+  const pick = (node, input) => comboOptions(info?.[node]?.input?.required?.[input]);
+  return {
+    unets: pick('UNETLoader', 'unet_name'),
+    loras: pick('LoraLoaderModelOnly', 'lora_name'),
+    vaes:  pick('VAELoader', 'vae_name'),
+    clips: pick('DualCLIPLoader', 'clip_name1'),
+    ckpts: pick('CheckpointLoaderSimple', 'ckpt_name'),
+    upscalers: pick('UpscaleModelLoader', 'model_name'),
+  };
+}
+
+// Resolve the workflow against what ComfyUI ACTUALLY has. Two reasons:
+//   · the weights may be named slightly differently on disk
+//   · the house LoRA does not exist until it has been trained — so before then
+//     we generate with BASE Flux rather than failing with a validation error
+async function resolveWorkflow(wf) {
+  const m = await comfyModels();
+  const pick = (list, ...cands) => cands.find((c) => list.includes(c))
+    || list.find((f) => cands.some((c) => f.toLowerCase().includes(c.split('.')[0].toLowerCase())));
+
+  // Rewire every consumer of `from` to `to`, then drop it. `remap` translates the
+  // output index, because slots differ between node types: a LoraLoader is
+  // (MODEL 0, CLIP 1) — the same as a checkpoint — but a VAELoader is (VAE 0),
+  // whereas the checkpoint's VAE is slot 2. Rewiring a VAE naively would hand
+  // VAEDecode the MODEL and blow up deep inside ComfyUI.
+  const bypassNode = (graph, from, to, remap = (i) => i) => {
+    for (const node of Object.values(graph)) {
+      for (const [k, v] of Object.entries(node.inputs || {})) {
+        if (Array.isArray(v) && v[0] === from) node.inputs[k] = [to, remap(v[1])];
+      }
+    }
+    delete graph[from];
+  };
+
+  // BOTH SDXL graphs (base+LoRA and Turbo) start with a CheckpointLoaderSimple.
+  // They are told apart by the LoraLoader, not by the checkpoint — getting this
+  // wrong is what sent an untrained house-LoRA name to ComfyUI and produced a
+  // "Value not in list" validation error instead of quietly running base SDXL.
+  if (wf['4']?.class_type === 'CheckpointLoaderSimple') {
+    const isBase = wf['10']?.class_type === 'LoraLoader';
+    const want = wf['4'].inputs.ckpt_name;
+    const ckpt = pick(m.ckpts, want, isBase ? 'sd_xl_base' : 'sd_xl_turbo');
+    if (!ckpt) {
+      throw new Error(`ComfyUI has no ${want} in models/checkpoints. ` +
+        `Install it, or pick another engine in the Generate panel.`);
+    }
+    wf['4'].inputs.ckpt_name = ckpt;
+
+    let usedLora = null;
+    if (isBase) {
+      // The house LoRA does not exist until it has been trained. Generate with
+      // BASE SDXL rather than failing: bypass the LoraLoader (its MODEL/CLIP
+      // outputs share indices 0/1 with the checkpoint, so the rewire is exact).
+      const lora = wf['10'].inputs.lora_name;
+      if (lora && m.loras.includes(lora)) usedLora = lora;
+      else bypassNode(wf, '10', '4');
+    }
+
+    // The SDXL VAE is a separate file; fall back to the checkpoint's baked VAE.
+    if (wf['14']?.class_type === 'VAELoader') {
+      const vae = pick(m.vaes, wf['14'].inputs.vae_name, 'sdxl_vae');
+      if (vae) wf['14'].inputs.vae_name = vae;
+      else bypassNode(wf, '14', '4', () => 2); // VAEDecode.vae → ['4', 2] = checkpoint VAE
+    }
+
+    return { wf, usedLora, engine: isBase ? 'sdxl' : 'sdxl-turbo' };
+  }
+
+  const unetWanted = wf['12'].inputs.unet_name;
+  const unet = pick(m.unets, unetWanted);
+  if (!unet) {
+    throw new Error(`ComfyUI has no ${unetWanted} in models/diffusion_models. ` +
+      `Run: bash ai/tools/setup_comfyui.sh`);
+  }
+  wf['12'].inputs.unet_name = unet;
+  wf['12'].inputs.weight_dtype = await weightDtype();
+
+  const t5 = pick(m.clips, 't5xxl_fp16.safetensors', 't5xxl');
+  const cl = pick(m.clips, 'clip_l.safetensors', 'clip_l');
+  const vae = pick(m.vaes, 'ae.safetensors', 'ae');
+  if (t5) wf['11'].inputs.clip_name1 = t5;
+  if (cl) wf['11'].inputs.clip_name2 = cl;
+  if (vae) wf['13'].inputs.vae_name = vae;
+
+  const lora = wf['10']?.inputs?.lora_name;
+  const haveLora = lora && m.loras.includes(lora);
+  if (wf['10'] && !haveLora) {
+    // Bypass the LoRA: rewire every consumer of node 10 straight to the UNET.
+    for (const node of Object.values(wf)) {
+      for (const [k, v] of Object.entries(node.inputs || {})) {
+        if (Array.isArray(v) && v[0] === '10') node.inputs[k] = ['12', v[1]];
+      }
+    }
+    delete wf['10'];
+  }
+  return { wf, usedLora: haveLora ? lora : null, engine: 'flux' };
+}
+
+async function comfyUploadImage(dataUrl) {
+  const [, b64] = dataUrl.split(',');
+  const buf = Buffer.from(b64, 'base64');
+  const form = new FormData();
+  form.append('image', new Blob([buf], { type: 'image/png' }), `medartis-src-${Date.now()}.png`);
+  form.append('overwrite', 'true');
+  const r = await fetch(`${COMFY()}/upload/image`, { method: 'POST', body: form });
+  if (!r.ok) throw new Error(`ComfyUI upload failed (${r.status})`);
+  return (await r.json()).name;
+}
+
+// ComfyUI streams progress over a websocket: {type:'progress', data:{value,max}}
+// and {type:'executing', data:{node}}. Polling /history alone tells you nothing
+// until the image lands — which is why the panel just sat there.
+function attachProgress(jobId, clientId) {
+  if (typeof WebSocket === 'undefined') return () => {};   // older Node: no live steps
+  const wsUrl = COMFY().replace(/^http/, 'ws') + `/ws?clientId=${encodeURIComponent(clientId)}`;
+  let ws;
+  try { ws = new WebSocket(wsUrl); } catch { return () => {}; }
+  ws.onmessage = (ev) => {
+    let msg;
+    try { msg = JSON.parse(typeof ev.data === 'string' ? ev.data : ''); } catch { return; }
+    if (!msg?.type) return;
+    const job = JOBS.get(jobId);
+    if (!job || job.status === 'done' || job.status === 'error') return;
+    if (msg.type === 'progress' && msg.data?.max) {
+      patchJob(jobId, {
+        status: 'running',
+        step: msg.data.value,
+        steps: msg.data.max,
+        // Sampling is the bulk of the wall time, but not all of it — leave room
+        // for VAE decode so the bar doesn't sit at 100% looking broken.
+        progress: 0.08 + 0.85 * (msg.data.value / msg.data.max),
+      });
+    } else if (msg.type === 'executing' && msg.data?.node) {
+      const cls = job.workflow?.[msg.data.node]?.class_type;
+      patchJob(jobId, { status: 'running', node: cls || msg.data.node });
+    }
+  };
+  ws.onerror = () => {};
+  return () => { try { ws.close(); } catch { /* already gone */ } };
+}
+
+// Belt and braces: every value in a ComfyUI prompt must be a node object with a
+// class_type. Catch a stray key here, with a message that names it, rather than
+// letting ComfyUI 500 with an AttributeError.
+function assertNodes(wf) {
+  for (const [k, v] of Object.entries(wf)) {
+    if (!v || typeof v !== 'object' || !v.class_type) {
+      throw new Error(`Workflow key "${k}" is not a node (no class_type) — ComfyUI would reject the whole prompt.`);
+    }
+  }
+  return wf;
+}
+
+async function comfyRun(jobId, workflow) {
+  assertNodes(workflow);
+  const clientId = `medartis-${jobId}`;
+  patchJob(jobId, { workflow, startedAt: Date.now() });
+  const detach = attachProgress(jobId, clientId);
+  const r = await fetch(`${COMFY()}/prompt`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ prompt: workflow, client_id: clientId }),
+  });
+  if (!r.ok) {
+    // ComfyUI answers 400 with {error, node_errors} — say WHICH node and why,
+    // otherwise the panel just shows "it didn't work".
+    let detail = '';
+    try {
+      const j = JSON.parse(await r.text());
+      const parts = [];
+      if (j.error?.message) parts.push(j.error.message);
+      if (j.error?.details) parts.push(j.error.details);
+      for (const [nodeId, ne] of Object.entries(j.node_errors || {})) {
+        const cls = ne.class_type || workflow[nodeId]?.class_type || nodeId;
+        for (const e of ne.errors || []) parts.push(`${cls}: ${e.message}${e.details ? ` (${e.details})` : ''}`);
+      }
+      detail = parts.join(' · ');
+    } catch { /* not JSON — fall through */ }
+    detach();
+    if (!detail && r.status >= 500) {
+      detail = 'ComfyUI threw a server error (500) — see comfyui.log for the traceback. ' +
+        'This usually means the prompt was malformed, not that the model failed.';
+    }
+    throw new Error(detail || `ComfyUI rejected the workflow (HTTP ${r.status}).`);
+  }
+  const { prompt_id: promptId } = await r.json();
+  patchJob(jobId, { status: 'running', progress: 0.05 });
+
+  // Poll /history. (A websocket would give live progress; polling keeps this
+  // dependency-free and a Flux image lands in ~20–40 s anyway.)
+  for (let i = 0; i < 600; i++) {
+    await new Promise((res) => setTimeout(res, 1000));
+    const h = await fetch(`${COMFY()}/history/${promptId}`).then((x) => x.json()).catch(() => ({}));
+    const entry = h?.[promptId];
+    if (!entry) {
+      // No live socket (older Node)? Then creep the bar so it isn't frozen.
+      const j = JOBS.get(jobId);
+      if (j && !j.steps) patchJob(jobId, { progress: Math.min(0.9, 0.05 + i * 0.02) });
+      continue;
+    }
+    const status = entry.status?.status_str;
+    if (status === 'error') {
+      const msg = (entry.status?.messages || [])
+        .filter(([kind]) => kind === 'execution_error')
+        .map(([, d]) => `${d.node_type || d.node_id}: ${d.exception_message || 'failed'}`)
+        .join(' · ');
+      detach();
+      patchJob(jobId, { status: 'error', error: msg || 'ComfyUI execution error — see comfyui.log.' });
+      return;
+    }
+    const images = [];
+    for (const out of Object.values(entry.outputs || {})) {
+      for (const im of out.images || []) {
+        const q = new URLSearchParams({ filename: im.filename, subfolder: im.subfolder || '', type: im.type || 'output' });
+        const bytes = await fetch(`${COMFY()}/view?${q}`).then((x) => x.arrayBuffer());
+        images.push(`data:image/png;base64,${Buffer.from(bytes).toString('base64')}`);
+      }
+    }
+    if (images.length) {
+      detach();
+      patchJob(jobId, {
+        status: 'done', progress: 1, images, provider: 'local',
+        aiGenerated: true, nonCommercial: true, workflow: null,
+        tookMs: Date.now() - (JOBS.get(jobId)?.startedAt || Date.now()),
+      });
+      return;
+    }
+  }
+  detach();
+  patchJob(jobId, { status: 'error', error: 'Timed out waiting for ComfyUI.' });
+}
+
+// ── Higgsfield (cloud) ─────────────────────────────────────────────────
+// Bearer auth; submit → generation_id + status_url → poll. Used for still →
+// motion, which maps straight onto the Story / Reel / TikTok formats the
+// generator already produces.
+async function higgsfieldVideo(jobId, { image, prompt, ratio = '9:16', duration = 5 }) {
+  const r = await fetch(`${HF_URL()}/image2video`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${HF_KEY()}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ image, prompt, aspect_ratio: ratio, duration, resolution: '1080p' }),
+  });
+  if (!r.ok) {
+    patchJob(jobId, { status: 'error', error: `Higgsfield ${r.status}: ${await r.text()}` });
+    return;
+  }
+  const sub = await r.json();
+  const statusUrl = sub.status_url || `${HF_URL()}/generations/${sub.generation_id}`;
+  patchJob(jobId, { status: 'running', progress: 0.1, provider: 'higgsfield' });
+
+  for (let i = 0; i < 300; i++) {
+    await new Promise((res) => setTimeout(res, 2000));
+    const s = await fetch(statusUrl, { headers: { Authorization: `Bearer ${HF_KEY()}` } })
+      .then((x) => x.json()).catch(() => null);
+    if (!s) continue;
+    const st = (s.status || '').toLowerCase();
+    if (st === 'completed' || st === 'succeeded') {
+      patchJob(jobId, {
+        status: 'done', progress: 1, provider: 'higgsfield', aiGenerated: true,
+        video: s.result?.url || s.output?.url || s.url || null,
+      });
+      return;
+    }
+    if (st === 'failed' || st === 'error') {
+      patchJob(jobId, { status: 'error', error: s.error || 'Higgsfield generation failed.' });
+      return;
+    }
+    patchJob(jobId, { progress: Math.min(0.95, 0.1 + i * 0.03) });
+  }
+  patchJob(jobId, { status: 'error', error: 'Timed out waiting for Higgsfield.' });
+}
+
+// ── plugin ─────────────────────────────────────────────────────────────
+export default function genai() {
+  const body = (req) => new Promise((resolve, reject) => {
+    let d = '';
+    req.on('data', (c) => { d += c; if (d.length > 40e6) reject(new Error('payload too large')); });
+    req.on('end', () => { try { resolve(d ? JSON.parse(d) : {}); } catch (e) { reject(e); } });
+  });
+  const send = (res, code, obj) => {
+    res.statusCode = code;
+    res.setHeader('Content-Type', 'application/json');
+    res.end(JSON.stringify(obj));
+  };
+
+  return {
+    name: 'medartis-genai',
+    configureServer(server) {
+      server.middlewares.use(async (req, res, next) => {
+        if (!req.url?.startsWith('/api/gen/')) return next();
+        const url = new URL(req.url, 'http://localhost');
+
+        try {
+          // ── status ────────────────────────────────────────────────
+          if (url.pathname === '/api/gen/status') {
+            const out = {
+              providers: [], lora: LORA(), missing: [],
+              nonCommercial: true,
+              blocklistMessage: STYLE().blocklist_message,
+            };
+            if (!(await comfyAlive())) {
+              out.comfyError = `No ComfyUI at ${COMFY()} — start it (npm start), or set COMFY_URL.`;
+              if (HF_KEY()) out.providers.push('higgsfield');
+              return send(res, 200, out);
+            }
+            try {
+              const m = await comfyModels();
+              out.providers.push('local');
+              out.models = m;
+              out.device = await comfyDevice();
+              out.weightDtype = await weightDtype(out.device);
+              if (!m.unets.includes('flux1-dev.safetensors')) out.missing.push('flux1-dev.safetensors (UNETLoader)');
+              out.engines = [];
+              // SDXL base first: it is the only engine whose output can ship.
+              if (m.ckpts.some((f) => f.toLowerCase().includes('sd_xl_base'))) out.engines.push('sdxl');
+              if (m.unets.some((f) => f.toLowerCase().includes('flux1-dev'))) out.engines.push('flux');
+              if (m.ckpts.some((f) => f.toLowerCase().includes('sd_xl_turbo'))) out.engines.push('sdxl-turbo');
+              out.hasSdxlBase = out.engines.includes('sdxl');
+              out.hasSdxlLora = m.loras.includes(SDXL_LORA());
+              if (!out.hasSdxlBase) out.missing.push('sd_xl_base_1.0.safetensors — the commercially licensable engine · npm run models');
+              out.upscalers = m.upscalers;
+              out.hasUpscaler = m.upscalers.length > 0;
+              if (!out.hasUpscaler) out.missing.push('an upscale model (models/upscale_models) — re-run ai/tools/setup_comfyui.sh');
+              out.hasLora = m.loras.includes(LORA());
+              if (!out.hasLora) out.missing.push(`${LORA()} — not trained yet · generating with BASE Flux (no house look)`);
+              if (!m.unets.includes('flux1-fill-dev.safetensors')) out.missing.push('flux1-fill-dev.safetensors (needed for Expand)');
+              out.canExpand = m.unets.includes('flux1-fill-dev.safetensors');
+            } catch (e) {
+              // It IS running — we just couldn't read its node list. Say that.
+              out.providers.push('local');
+              out.comfyError = `ComfyUI is up but /object_info failed: ${e.message}`;
+            }
+            if (HF_KEY()) out.providers.push('higgsfield');
+            return send(res, 200, out);
+          }
+
+          // ── text → image (local) ──────────────────────────────────
+          if (url.pathname === '/api/gen/image' && req.method === 'POST') {
+            const b = await body(req);
+            const gate = safetyCheck(b.prompt);
+            if (!gate.ok) return send(res, 422, { error: gate.message, term: gate.term });
+
+            const { positive, negative } = compilePrompt(b);
+            const seed = Number.isFinite(b.seed) ? b.seed : Math.floor(Math.random() * 2 ** 31);
+            const turbo = b.engine === 'sdxl-turbo';
+            const sdxl  = b.engine === 'sdxl';          // SDXL base 1.0 — the licensable engine
+            const engineKey = turbo ? 'sdxl-turbo' : sdxl ? 'sdxl' : 'flux';
+
+            // Generate at the model's NATIVE resolution (in the canvas's aspect),
+            // then upscale to the canvas. Asking SDXL Turbo for 941px was what
+            // produced duplicated people and a giant.
+            const { width, height } = latentSize(b.w, b.h, engineKey);
+            const target = targetSize(b.w, b.h);
+            const models = await comfyModels();
+            const upscaler = b.upscale === false ? null : (
+              ['4x-UltraSharp.pth', 'RealESRGAN_x4plus.pth', '4x_foolhardy_Remacri.pth']
+                .find((n) => models.upscalers.includes(n)) || models.upscalers[0] || null
+            );
+
+            let wf;
+            // Does the engine ACTUALLY consume the negative? SDXL/Turbo always do;
+            // Flux only when we swap in a CFGGuider below. Reported to the client so
+            // the panel can state the truth rather than imply the negative worked.
+            let fluxNegativeHonoured = false;
+            if (sdxl) {
+              // SDXL base 1.0 + house LoRA — the commercially licensable path.
+              wf = loadWorkflow('ai/workflows/sdxl_txt2img_lora.api.json');
+              wf['6'].inputs.text = positive;
+              wf['7'].inputs.text = negative;
+              wf['5'].inputs.width = width;
+              wf['5'].inputs.height = height;
+              wf['3'].inputs.seed = seed;
+              wf['3'].inputs.steps = clampInt(b.steps ?? 28, 8, 50);
+              wf['10'].inputs.lora_name = SDXL_LORA();
+              wf['10'].inputs.strength_model = b.strength ?? 0.85;
+              wf['10'].inputs.strength_clip = b.strength ?? 0.85;
+            } else if (turbo) {
+              wf = loadWorkflow('ai/workflows/sdxl_turbo_txt2img.api.json');
+              wf['6'].inputs.text = positive;
+              wf['7'].inputs.text = negative;          // Turbo takes a real negative
+              wf['5'].inputs.width = width;
+              wf['5'].inputs.height = height;
+              wf['3'].inputs.seed = seed;
+              wf['3'].inputs.steps = clampInt(b.steps ?? 4, 1, 8);
+            } else {
+              wf = loadWorkflow('ai/workflows/flux_txt2img_lora.api.json');
+              wf['6'].inputs.text = positive;
+              // FLUX + REAL NEGATIVES.
+              // Stock Flux runs a BasicGuider, which has no negative input at all —
+              // that is *why* a negative prompt silently does nothing here, not some
+              // quirk of the wording. Swapping in a CFGGuider gives the sampler a
+              // genuine negative branch (cfg > 1), so the negative is actually
+              // consumed. It costs roughly 2× the time (two passes per step), so it
+              // is opt-in via `strictNegative` and we report what really happened.
+              if (b.strictNegative && wf['22']?.class_type === 'BasicGuider') {
+                wf['7'] = { class_type: 'CLIPTextEncode', inputs: { text: negative, clip: wf['6'].inputs.clip } };
+                wf['22'] = {
+                  class_type: 'CFGGuider',
+                  inputs: {
+                    model: wf['22'].inputs.model,
+                    positive: wf['22'].inputs.conditioning, // FluxGuidance-wrapped positive
+                    negative: ['7', 0],
+                    cfg: clampNum(b.cfg ?? 3.0, 1.1, 8),
+                  },
+                };
+                fluxNegativeHonoured = true;
+              }
+              wf['5'].inputs.width = width;
+              wf['5'].inputs.height = height;
+              wf['25'].inputs.noise_seed = seed;
+              wf['10'].inputs.lora_name = LORA();
+              wf['10'].inputs.strength_model = b.strength ?? 0.85;
+              if (b.steps) wf['17'].inputs.steps = clampInt(b.steps, 4, 50);
+            }
+
+            configureUpscale(wf, target, upscaler);
+
+            const { wf: ready, usedLora, engine } = await resolveWorkflow(wf);
+            const id = newJob();
+            // negativeHonoured: whether the negative prompt was genuinely consumed.
+            // Flux at CFG 1 ignores it entirely — say so rather than pretend.
+            const negativeHonoured = engine !== 'flux' ? true : fluxNegativeHonoured;
+            const meta = {
+              prompt: positive, width, height, target, upscaler, lora: usedLora, engine,
+              negative, negativeHonoured, realism: b.realism !== false,
+            };
+            patchJob(id, meta);
+            comfyRun(id, ready).catch((e) => patchJob(id, { status: 'error', error: e.message }));
+            return send(res, 202, { jobId: id, ...meta });
+          }
+
+          // ── generative expand: one hero → every format ────────────
+          if (url.pathname === '/api/gen/expand' && req.method === 'POST') {
+            const b = await body(req);
+            if (!b.image) return send(res, 400, { error: 'No source image.' });
+            const name = await comfyUploadImage(b.image);
+
+            // Pad the SOURCE out to the TARGET aspect. We only ever grow the
+            // canvas — the original pixels are never cropped away.
+            const sw = b.sw || 1024, sh = b.sh || 1024;
+            const target = (b.w || 1024) / (b.h || 1024);
+            const cur = sw / sh;
+            let padX = 0, padY = 0;
+            if (target > cur) padX = Math.round((sh * target - sw) / 2);
+            else               padY = Math.round((sw / target - sh) / 2);
+
+            const wf = loadWorkflow('ai/workflows/flux_expand_outpaint.api.json');
+            wf['20'].inputs.image = name;
+            wf['21'].inputs.left = padX; wf['21'].inputs.right = padX;
+            wf['21'].inputs.top = padY;  wf['21'].inputs.bottom = padY;
+            wf['6'].inputs.text = compilePrompt({
+              prompt: b.prompt || 'continue the scene naturally, same room, same light, same depth of field',
+              surface: b.surface,
+            }).positive;
+            wf['25'].inputs.noise_seed = Math.floor(Math.random() * 2 ** 31);
+            wf['10'].inputs.lora_name = LORA();
+
+            const { wf: ready } = await resolveWorkflow(wf);
+            const id = newJob();
+            patchJob(id, { kind: 'expand' });
+            comfyRun(id, ready).catch((e) => patchJob(id, { status: 'error', error: e.message }));
+            return send(res, 202, { jobId: id, padX, padY });
+          }
+
+          // ── still → motion (Higgsfield) ───────────────────────────
+          if (url.pathname === '/api/gen/video' && req.method === 'POST') {
+            if (!HF_KEY()) return send(res, 400, { error: 'No HIGGSFIELD_API_KEY in .env.local.' });
+            const b = await body(req);
+            const gate = safetyCheck(b.prompt);
+            if (!gate.ok) return send(res, 422, { error: gate.message, term: gate.term });
+            const id = newJob();
+            higgsfieldVideo(id, b).catch((e) => patchJob(id, { status: 'error', error: e.message }));
+            return send(res, 202, { jobId: id });
+          }
+
+          // ── cancel ────────────────────────────────────────────────
+          if (url.pathname.startsWith('/api/gen/cancel/') && req.method === 'POST') {
+            const id = url.pathname.split('/').pop();
+            await fetch(`${COMFY()}/interrupt`, { method: 'POST' }).catch(() => {});
+            patchJob(id, { status: 'error', error: 'Cancelled.' });
+            return send(res, 200, { ok: true });
+          }
+
+          // ── job poll ──────────────────────────────────────────────
+          if (url.pathname.startsWith('/api/gen/job/')) {
+            const id = url.pathname.split('/').pop();
+            const job = JOBS.get(id);
+            if (!job) return send(res, 404, { error: 'Unknown job.' });
+            const { workflow: _wf, ...safe } = job;   // the graph isn't the browser's business
+            return send(res, 200, safe);
+          }
+
+          return send(res, 404, { error: 'Unknown /api/gen route.' });
+        } catch (e) {
+          return send(res, 500, { error: e.message });
+        }
+      });
+    },
+  };
+}

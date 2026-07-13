@@ -36,6 +36,10 @@ const BRAND = {
   cream300: '#9E9B8B',
   gold:    '#CFAB5C',
   gold500: '#B8923D',
+  // Accessible gold — the brand gold is only 1.9–2.2:1 on light surfaces, which
+  // fails WCAG. This deepened gold keeps the hue and clears AA (4.6–5.1:1) on
+  // paper/bone/cream. Used when "safe accent" is on (see the BRAND CHECK panel).
+  goldDeep: '#8A6828',
   plateBlue: '#BBD7F3',
   display: '"Inter", -apple-system, BlinkMacSystemFont, sans-serif',
   mono:    '"JetBrains Mono", "SF Mono", Menlo, monospace',
@@ -442,7 +446,59 @@ const DEFAULT_FIT = {
     bottom: { start: 0, end: 0 },
     left:   { start: 0, end: 0 },
   },
+  // Frame EDGES — move an edge of the image frame inward (or slightly outward).
+  // The image re-fits into the smaller rect and the palette background fills the
+  // freed space. Per-edge, as a fraction of the frame.
+  frameInset: { top: 0, right: 0, bottom: 0, left: 0 },
+  // Frame TILT — diagonal cuts on any edge (poster treatment). The cut only ever
+  // moves INTO the image, so surrounding content is never covered; the background
+  // shows through the wedge.
+  frameTilt: { top: 0, right: 0, bottom: 0, left: 0 },
 };
+
+// ── FRAME EDGES & TILT ───────────────────────────────────────────────
+const TILT_MAX = 30;
+const INSET_MIN = -0.1, INSET_MAX = 0.4;
+const normalizeFrameInset = (v) => {
+  const o = { top: 0, right: 0, bottom: 0, left: 0 };
+  if (!v || typeof v !== 'object') return o;
+  for (const k of ['top', 'right', 'bottom', 'left']) o[k] = clamp(v[k] || 0, INSET_MIN, INSET_MAX);
+  return o;
+};
+const normalizeFrameTilt = (v) => {
+  const o = { top: 0, right: 0, bottom: 0, left: 0 };
+  if (!v || typeof v !== 'object') return o;
+  for (const k of ['top', 'right', 'bottom', 'left']) o[k] = clamp(v[k] || 0, -TILT_MAX, TILT_MAX);
+  return o;
+};
+// Move the frame edges: returns the inset rect (never smaller than 10%).
+function applyFrameInset(rect, ins) {
+  if (!rect || !(ins.top || ins.right || ins.bottom || ins.left)) return rect;
+  return {
+    x: rect.x + ins.left * rect.w,
+    y: rect.y + ins.top * rect.h,
+    w: Math.max(rect.w * 0.1, rect.w * (1 - ins.left - ins.right)),
+    h: Math.max(rect.h * 0.1, rect.h * (1 - ins.top - ins.bottom)),
+  };
+}
+// Clip whatever `fn` draws to a quad with the requested edge tilts.
+function withFrameTiltClip(ctx, rect, tilts, fn) {
+  if (!rect || !(tilts.top || tilts.right || tilts.bottom || tilts.left)) { fn(); return; }
+  const tan = (deg) => Math.tan(deg * Math.PI / 180);
+  const { x, y, w: rw, h: rh } = rect;
+  const TL = [x, y], TR = [x + rw, y], BR = [x + rw, y + rh], BL = [x, y + rh];
+  { const d = tan(tilts.top) * rw;    if (d >= 0) TL[1] += d; else TR[1] -= d; }
+  { const d = tan(tilts.bottom) * rw; if (d >= 0) BR[1] -= d; else BL[1] += d; }
+  { const d = tan(tilts.left) * rh;   if (d >= 0) TL[0] += d; else BL[0] -= d; }
+  { const d = tan(tilts.right) * rh;  if (d >= 0) BR[0] -= d; else TR[0] += d; }
+  ctx.save();
+  ctx.beginPath();
+  [TL, TR, BR, BL].forEach(([px, py], i) => (i ? ctx.lineTo(px, py) : ctx.moveTo(px, py)));
+  ctx.closePath();
+  ctx.clip();
+  fn();
+  ctx.restore();
+}
 
 // hex (#RRGGBB) → rgba(r,g,b,a) string
 const hexToRgba = (hex, a) => {
@@ -628,6 +684,20 @@ const hexRgb = (hex) => {
   const h = (hex || '#000').replace('#', '');
   return [parseInt(h.slice(0,2),16), parseInt(h.slice(2,4),16), parseInt(h.slice(4,6),16)];
 };
+// ── WCAG 2.1 contrast (used by the live BRAND CHECK panel) ──────────
+// Relative luminance and contrast ratio per WCAG. AA wants 4.5:1 for normal
+// text, 3:1 for large/bold text and non-text elements (rules, icons).
+const relLuminance = (hex) => {
+  const c = [1, 3, 5]
+    .map((i) => parseInt(hex.slice(i, i + 2), 16) / 255)
+    .map((v) => (v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4)));
+  return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+};
+const contrastRatio = (a, b) => {
+  const la = relLuminance(a), lb = relLuminance(b);
+  return (Math.max(la, lb) + 0.05) / (Math.min(la, lb) + 0.05);
+};
+
 // Sample the canvas's average luminance over a rect (0..255 scale). Uses a
 // downsampled getImageData of just that rect — cheap enough for the small
 // rects we care about (wordmark / sender / QR).
@@ -649,6 +719,91 @@ function sampleCanvasLuminance(ctx, x, y, w, h) {
     n++;
   }
   return n ? sum / n : 128;
+}
+
+// ── LOGO LEGIBILITY OVER IMAGERY ────────────────────────────────────
+// Auto-contrast alone CANNOT guarantee a readable logo: on a mid-tone or busy
+// photo neither ink nor bone reaches AA, and a high-variance background (edges
+// running straight through the letterforms) shreds the mark even when the mean
+// contrast looks fine. So we measure, and when the measurement fails we lay a
+// backdrop down first — then re-measure against that backdrop to pick the ink.
+// The result is guaranteed, not hoped for.
+
+// Mean + standard deviation of luminance over a rect (0..255).
+function sampleCanvasStats(ctx, x, y, w, h) {
+  const cw = ctx.canvas.width, ch = ctx.canvas.height;
+  const sx = Math.max(0, Math.floor(x)), sy = Math.max(0, Math.floor(y));
+  const sw = Math.max(1, Math.min(Math.floor(w), cw - sx));
+  const sh = Math.max(1, Math.min(Math.floor(h), ch - sy));
+  if (sw <= 0 || sh <= 0) return { mean: 128, std: 0 };
+  let img;
+  try { img = ctx.getImageData(sx, sy, sw, sh); } catch { return { mean: 128, std: 0 }; }
+  const d = img.data;
+  const stride = Math.max(4, Math.floor(d.length / 4 / 1024)) * 4;
+  let sum = 0, sumSq = 0, n = 0;
+  for (let i = 0; i < d.length; i += stride) {
+    const l = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+    sum += l; sumSq += l * l; n++;
+  }
+  if (!n) return { mean: 128, std: 0 };
+  const mean = sum / n;
+  return { mean, std: Math.sqrt(Math.max(0, sumSq / n - mean * mean)) };
+}
+
+// Contrast of a hex colour against a sampled 0..255 grey level.
+const contrastVsLevel = (hex, level) => {
+  const v = level / 255;
+  const lin = v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+  const la = relLuminance(hex), lb = lin;
+  return (Math.max(la, lb) + 0.05) / (Math.min(la, lb) + 0.05);
+};
+
+// The best contrast either brand ink can manage against this background, and how
+// busy that background is. `std` above ~46 means detail is running through the mark.
+const LOGO_MIN_CR = 4.5;   // WCAG AA for the wordmark
+const LOGO_MAX_STD = 46;   // above this the background is too busy to trust
+function logoLegibility(ctx, box, pad) {
+  const { mean, std } = sampleCanvasStats(ctx, box.x - pad, box.y - pad, box.w + pad * 2, box.h + pad * 2);
+  const best = Math.max(contrastVsLevel(BRAND.ink, mean), contrastVsLevel(BRAND.bone00, mean));
+  return { mean, std, best, safe: best >= LOGO_MIN_CR && std <= LOGO_MAX_STD };
+}
+
+// Lay a backdrop behind the mark so it is readable no matter what is underneath.
+//   plate   — solid palette panel: absolute guarantee, most visible
+//   frosted — blurred glass: protects while keeping the photo present
+//   scrim   — soft directional wash: lightest touch
+function drawLogoBackdrop(ctx, box, mode, palette) {
+  if (!mode || mode === 'off' || !box) return;
+  const pad = Math.max(10, box.h * 0.55);
+  const x = box.x - pad, y = box.y - pad;
+  const w = box.w + pad * 2, h = box.h + pad * 2;
+  const dark = palette.mode === 'dark';
+  const r = Math.min(w, h) * 0.22;
+
+  if (mode === 'frosted') {
+    drawFrostedGlass(ctx, x, y, w, h, {
+      blur: Math.max(8, box.h * 0.5),
+      tint: dark ? 'rgba(19,19,16,0.42)' : 'rgba(250,248,240,0.46)',
+      radius: r,
+    });
+    return;
+  }
+  if (mode === 'scrim') {
+    // Soft wash that fades out away from the mark — no hard edge.
+    const g = ctx.createLinearGradient(x, y, x, y + h);
+    const c = dark ? '19,19,16' : '250,248,240';
+    g.addColorStop(0, `rgba(${c},0.80)`);
+    g.addColorStop(1, `rgba(${c},0)`);
+    ctx.save(); ctx.fillStyle = g; ctx.fillRect(x, y, w, h * 1.6); ctx.restore();
+    return;
+  }
+  // plate (default): a solid, rounded panel in the surface colour.
+  ctx.save();
+  ctx.beginPath();
+  if (ctx.roundRect) ctx.roundRect(x, y, w, h, r); else ctx.rect(x, y, w, h);
+  ctx.fillStyle = dark ? 'rgba(19,19,16,0.88)' : 'rgba(250,248,240,0.92)';
+  ctx.fill();
+  ctx.restore();
 }
 
 // Resolve 'auto' contrast colour: sample canvas luminance and pick ink or bone
@@ -1124,6 +1279,25 @@ const drawCarouselBackground = (ctx, dx, dy, dw, dh, image, slideIdx, totalSlide
 // Full transform image drawer
 // fit = { mode, focalX, focalY, scale, offsetX, offsetY, rotation, edgeFade }
 const drawImageFit = (ctx, img, x, y, w, h, fit, bg) => {
+  // FRAME EDGES / TILT — the single choke point every layout goes through, so
+  // moving an edge or cutting it on the diagonal works everywhere at once. The
+  // image re-fits into the reduced rect; the palette background (already painted
+  // by the layout) fills whatever the frame gives back.
+  const ins = normalizeFrameInset(fit?.frameInset);
+  const tilts = normalizeFrameTilt(fit?.frameTilt);
+  if (ins.top || ins.right || ins.bottom || ins.left) {
+    const r = applyFrameInset({ x, y, w, h }, ins);
+    x = r.x; y = r.y; w = r.w; h = r.h;
+  }
+  if (tilts.top || tilts.right || tilts.bottom || tilts.left) {
+    const inner = { x, y, w, h };
+    withFrameTiltClip(ctx, inner, tilts, () => drawImageFitInner(ctx, img, x, y, w, h, fit, bg));
+    return;
+  }
+  drawImageFitInner(ctx, img, x, y, w, h, fit, bg);
+};
+
+const drawImageFitInner = (ctx, img, x, y, w, h, fit, bg) => {
   ctx.save();
   // outer clip — keeps everything (image + fades) inside the frame rect
   ctx.beginPath();
@@ -2210,15 +2384,32 @@ function drawBrandBar(ctx, frame, palette, accent, overlay, opts = {}) {
   // actually behind it and pick a contrasting colour for legibility.
   // Brand guide says wordmark top-right; this keeps it readable on busy photos.
   let wmColor = resolveColor(opts.wordmarkColor);
-  if (opts.wordmarkColor === 'auto' && (opts.wordmarkOverImage || overlay)) {
+  const wmOverImage = opts.wordmarkOverImage || overlay;
+  if (wmOverImage) {
     const box = computeWordmarkBox(frame, wm, opts.formatKey, wmArea, opts.wordmarkPctOverride);
     if (box) {
-      // Pad the sample area a little so we catch what surrounds the wordmark
       const pad = Math.max(8, box.h * 0.4);
-      wmColor = resolveAutoContrast(ctx, box.x - pad, box.y - pad,
-                                    box.w + pad * 2, box.h + pad * 2,
-                                    palette.mode === 'dark');
+      // 1 · MEASURE what's actually under the mark (contrast + how busy it is).
+      let leg = logoLegibility(ctx, box, pad);
+      const mode = opts.logoPlate || 'auto';
+      // 2 · PROTECT. In 'auto' we only intervene when the measurement fails —
+      //     so a clean dark photo keeps its bare, confident logo.
+      const needs = mode === 'auto' ? !leg.safe : mode !== 'off';
+      if (needs) {
+        drawLogoBackdrop(ctx, box, mode === 'auto' ? 'plate' : mode, palette);
+        leg = logoLegibility(ctx, box, pad); // 3 · RE-MEASURE against the backdrop
+      }
+      // Report upward so the BRAND CHECK panel can state the real number.
+      if (opts.legibilityOut) Object.assign(opts.legibilityOut, { ...leg, protected: needs, mode });
+      // 4 · Pick the ink against whatever now sits behind the mark.
+      if (opts.wordmarkColor === 'auto') {
+        wmColor = resolveAutoContrast(ctx, box.x - pad, box.y - pad,
+                                      box.w + pad * 2, box.h + pad * 2,
+                                      palette.mode === 'dark');
+      }
     }
+  } else if (opts.legibilityOut) {
+    Object.assign(opts.legibilityOut, { best: 21, std: 0, safe: true, protected: false, mode: 'off' });
   }
   drawWordmarkAt(ctx, frame, wm, wmColor, opts.formatKey, wmArea, opts.wordmarkPctOverride);
 
@@ -2248,7 +2439,9 @@ export default function MedartisBrandGenerator() {
   const [layoutKey, setLayoutKey] = useState('image-bottom');
   const [templateKey, setTemplateKey] = useState('product-launch');
   const [carouselSlide, setCarouselSlide] = useState(0);
-  const [carouselSlides, setCarouselSlides] = useState(3);
+  // Start as a SINGLE frame. Slides appear only when the user adds one (+ under
+  // the canvas), or when a carousel format/template asks for them.
+  const [carouselSlides, setCarouselSlides] = useState(1);
   // True once the user has typed real copy or imported a preset/manuscript.
   // Gates whether switching the content template carries that copy forward
   // (fixing a wrong template must NOT wipe content) vs. loads sample defaults
@@ -2317,6 +2510,14 @@ export default function MedartisBrandGenerator() {
 
   // Palettes
   const [paletteName, setPaletteName] = useState('coal');
+  const [mutedBoost, setMutedBoost] = useState(false);
+  const [accentSafe, setAccentSafe] = useState(false);
+  // Logo protection over imagery: 'auto' intervenes only when the measurement
+  // fails; the others force a specific backdrop; 'off' trusts auto-contrast alone.
+  const [logoPlate, setLogoPlate] = useState('auto'); // auto | plate | frosted | scrim | off
+  // Filled by drawBrandBar on every render with the REAL measured legibility.
+  const legibRef = useRef({ best: 21, std: 0, safe: true, protected: false, mode: 'off' });
+  const [logoLegib, setLogoLegib] = useState({ best: 21, std: 0, safe: true, protected: false, mode: 'off' });
   // Brand bar — per brand guide §logo_placement: wordmark top-right, sender bottom-left
   const [wordmarkPos, setWordmarkPos] = useState('tr');
   const [folioPos, setFolioPos] = useState('bl');
@@ -2390,35 +2591,74 @@ export default function MedartisBrandGenerator() {
   // Collapsible sidebar groups — persisted to localStorage. Format-category
   // groups (keys starting with 'fmt:') behave as an ACCORDION: opening one
   // closes the others. Default: all format groups COLLAPSED (clean sidebar).
-  const COLLAPSE_KEY = 'medartis-bag-collapsed-v2';
-  const FMT_GROUPS = ['Social · square', 'Social · wide', 'Digital surface', 'Print · paged', 'Print · poster'];
+  const COLLAPSE_KEY = 'medartis-bag-collapsed-v3';
+  const ACCORDION_KEY = 'medartis-bag-accordion-v1';
+  // Derived from FORMATS so the two can never drift apart.
+  const FMT_GROUPS = [...new Set(Object.values(FORMATS).map(f => f.group || 'Other'))];
   const ALL_FMT_KEYS = FMT_GROUPS.map(g => 'fmt:' + g);
+  // Every collapsible <Section> id — keep in sync with the sp('…') calls below.
+  const SECTION_KEYS = [
+    'FORMAT', 'LAYOUT', 'TEMPLATE', 'CONTENT', 'CAROUSEL', 'CAROUSEL_BG', 'SURFACE',
+    'BRANDBAR', 'CHECK', 'IMAGE', 'IMAGEFIT', 'GENERATE', 'TEXTBG', 'QR',
+    'EXPORT', 'PRESETS', 'CANTO',
+  ];
+  const ALL_SEC_KEYS = SECTION_KEYS.map(k => 'sec:' + k);
+  const ALL_KEYS = [...ALL_SEC_KEYS, ...ALL_FMT_KEYS];
   const [collapsed, setCollapsed] = useState(() => {
     try {
       const stored = JSON.parse(localStorage.getItem(COLLAPSE_KEY) || 'null');
       if (Array.isArray(stored)) return new Set(stored);
     } catch {}
-    // First visit → all format groups collapsed
-    return new Set(ALL_FMT_KEYS);
+    // First visit → format groups + advanced panels collapsed, so the sidebar
+    // reads as a short, scannable list of the essentials.
+    return new Set([...ALL_FMT_KEYS, 'sec:TEXTBG', 'sec:QR', 'sec:CAROUSEL_BG', 'sec:CANTO', 'sec:GENERATE']);
   });
+  // Solo (accordion) mode: only one sidebar panel open at a time.
+  const [accordion, setAccordion] = useState(() => {
+    try { return localStorage.getItem(ACCORDION_KEY) === '1'; } catch { return false; }
+  });
+  const persistCollapsed = (next) => {
+    try { localStorage.setItem(COLLAPSE_KEY, JSON.stringify([...next])); } catch {}
+    return next;
+  };
   const toggleCollapsed = (k) => {
     setCollapsed(prev => {
       const next = new Set(prev);
-      // Accordion for format groups
+      // Accordion for format groups (always) and for sections (opt-in via Solo)
       if (k.startsWith('fmt:')) {
         const isOpen = !next.has(k);
-        if (isOpen) {
-          // currently open → just close it
-          next.add(k);
-        } else {
-          // opening this one → close all other fmt groups, open this
-          for (const f of ALL_FMT_KEYS) next.add(f);
-          next.delete(k);
-        }
+        if (isOpen) next.add(k);
+        else { for (const f of ALL_FMT_KEYS) next.add(f); next.delete(k); }
+      } else if (accordion && k.startsWith('sec:')) {
+        const isOpen = !next.has(k);
+        if (isOpen) next.add(k);
+        else { for (const s of ALL_SEC_KEYS) next.add(s); next.delete(k); }
       } else {
         next.has(k) ? next.delete(k) : next.add(k);
       }
-      try { localStorage.setItem(COLLAPSE_KEY, JSON.stringify([...next])); } catch {}
+      return persistCollapsed(next);
+    });
+  };
+  // Expand / collapse everything at once.
+  const allSectionsCollapsed = ALL_SEC_KEYS.every(k => collapsed.has(k));
+  const setAllCollapsed = (shouldCollapse) => {
+    setCollapsed(() => persistCollapsed(shouldCollapse ? new Set(ALL_KEYS) : new Set(ALL_FMT_KEYS)));
+  };
+  const toggleAccordion = () => {
+    setAccordion(prev => {
+      const next = !prev;
+      try { localStorage.setItem(ACCORDION_KEY, next ? '1' : '0'); } catch {}
+      // Switching Solo ON → keep at most one section open.
+      if (next) {
+        setCollapsed(cur => {
+          const open = ALL_SEC_KEYS.filter(k => !cur.has(k));
+          const keep = open[0];
+          const n = new Set(cur);
+          for (const s of ALL_SEC_KEYS) n.add(s);
+          if (keep) n.delete(keep);
+          return persistCollapsed(n);
+        });
+      }
       return next;
     });
   };
@@ -2442,7 +2682,14 @@ export default function MedartisBrandGenerator() {
       label: 'D·BLK',
     },
   };
-  const palette = palettes[paletteName];
+  // Accessibility remedies offered by the BRAND CHECK panel. `mutedBoost` lifts
+  // body/muted text to a high-contrast ink; `accentSafe` swaps the brand gold for
+  // the deepened gold that clears AA on light surfaces.
+  const basePalette = palettes[paletteName];
+  const palette = mutedBoost
+    ? { ...basePalette, muted: basePalette.mode === 'dark' ? BRAND.bone00 : BRAND.ink800 }
+    : basePalette;
+  const accentColor = (accentSafe && palette.mode !== 'dark') ? BRAND.goldDeep : BRAND.gold;
 
   // QR ink — resolved AFTER palette is known.
   // When backdrop is on, the QR sits on a light pill, so it must be DARK
@@ -2532,19 +2779,36 @@ export default function MedartisBrandGenerator() {
   const canvasRef = useRef(null);
   const previewWrapRef = useRef(null);
   const [previewSize, setPreviewSize] = useState({ w: 500, h: 500 });
-  const format = FORMATS[formatKey];
+  // ── ONE MENTAL MODEL: every canvas can have several "frames" ──────────
+  // Screen formats → SLIDES (manual + / − under the canvas; 1 = a single post).
+  // Print formats  → PAGES  (manual + / −, which insert/remove PAGE_BREAK markers
+  //                          in the body, so a long agenda still re-flows itself).
+  // `multi` stays the internal flag the render/export paths already understand:
+  // it simply means "this canvas currently has more than one slide".
+  const baseFormat = FORMATS[formatKey];
+  const supportsSlides = !baseFormat.printable;
+  const supportsPages = !!baseFormat.printable;
+  const format = useMemo(
+    () => ({ ...baseFormat, multi: supportsSlides && carouselSlides > 1, supportsSlides, supportsPages }),
+    [formatKey, carouselSlides] // eslint-disable-line react-hooks/exhaustive-deps
+  );
 
   useEffect(() => {
     const update = () => {
       if (!previewWrapRef.current) return;
       const rect = previewWrapRef.current.getBoundingClientRect();
       const pad = 80;
+      // Reserve room at the bottom for the FRAME BAR (slides / pages) and at the
+      // top for the format caption, so the canvas never sits flush against either
+      // — the bar gets to breathe instead of crowding the artwork.
+      const FRAME_BAR = 110;
+      const CAPTION = 40;
       const maxW = rect.width - pad;
-      const maxH = rect.height - pad - 40;
+      const maxH = rect.height - pad - CAPTION - FRAME_BAR;
       const ratio = format.w / format.h;
       let w = maxW, h = w / ratio;
       if (h > maxH) { h = maxH; w = h * ratio; }
-      setPreviewSize({ w, h });
+      setPreviewSize({ w: Math.max(80, w), h: Math.max(80, h) });
     };
     update();
     window.addEventListener('resize', update);
@@ -2557,11 +2821,38 @@ export default function MedartisBrandGenerator() {
     }
   }, [formatKey, layoutKey]);
 
+  // A carousel format opens with 3 slides; every other screen format starts as a
+  // single post and the user adds slides with + under the canvas.
+  useEffect(() => {
+    if (FORMATS[formatKey]?.multi && carouselSlides === 1) setSlideCount(3);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [formatKey]);
+
   // Pages are DERIVED from the body's PAGE_BREAK markers — edit a break, re-flow.
   const pages = useMemo(() => splitAgendaPages(content), [content]);
   const curPage = pages ? Math.min(pageIdx, pages.length - 1) : 0;
   // Keep the page index valid when a break is removed and the page count drops.
   useEffect(() => { if (pages && pageIdx > pages.length - 1) setPageIdx(Math.max(0, pages.length - 1)); }, [pages, pageIdx]);
+  // Pages are just PAGE_BREAK markers in the body, so adding/removing one is a
+  // body edit — the existing re-flow, per-page images and fits all keep working.
+  const pageCount = pages ? pages.length : 1;
+  const bodyChunks = () => (content.body || '').split(PAGE_BREAK).map((s) => s.replace(/^\n+|\n+$/g, ''));
+  const addPage = () => {
+    const raw = (content.body || '').replace(/\s+$/, '');
+    updateField('body', `${raw}\n${PAGE_BREAK}\n`);
+    setPageIdx(pageCount); // jump to the page we just created
+  };
+  const deletePage = (i) => {
+    const chunks = bodyChunks();
+    if (chunks.length <= 1) return;
+    const hasWork = (chunks[i] || '').trim().length > 0;
+    if (hasWork && !window.confirm(`Delete page ${i + 1}? Its lines, image and crop will be removed.`)) return;
+    chunks.splice(i, 1);
+    updateField('body', chunks.join(`\n${PAGE_BREAK}\n`).replace(/\n{3,}/g, '\n\n'));
+    setPageImages((p) => p.filter((_, k) => k !== i));
+    setPageFits((p) => p.filter((_, k) => k !== i));
+    setPageIdx((idx) => Math.max(0, Math.min(idx, chunks.length - 2)));
+  };
 
   // Active values (per-slide for carousels; per-page for a paginated agenda)
   const activeContent = pages
@@ -2574,6 +2865,125 @@ export default function MedartisBrandGenerator() {
     && carouselBg.enabled
     && !!carouselBgImage
     && (carouselBg.placement === 'full' || carouselBg.placement === 'image');
+
+  // ── PDF export (optional bleed + crop marks) ────────────────────
+  // Declared up here because the BRAND CHECK below reads pdfBleed.
+  const [pdfBleed, setPdfBleed] = useState(true);
+  const [pdfCropMarks, setPdfCropMarks] = useState(true);
+  const [pdfVector, setPdfVector] = useState(true);    // vectorise text + wordmark
+  const [pdfCropColor, setPdfCropColor] = useState('auto'); // 'auto' | 'ink' | 'bone'
+
+  // ── LIVE BRAND CHECK (guide-derived, recomputed on every change) ────
+  // Every check states WHY it passed/failed with the real number, and — where a
+  // machine can safely resolve it — carries a one-click `fix`.
+  const brandChecks = useMemo(() => {
+    const checks = [];
+    const fmt = FORMATS[formatKey] || {};
+    const isPrint = !!fmt.printable;
+    const dpi = fmt.printDpi || 300;
+
+    // 1 · Logo minimum size — below this the wordmark stops being legible.
+    if (wordmarkPos !== 'hidden') {
+      const wmBox = wordmarkSizeFor({ w: fmt.w, h: fmt.h }, formatKey, wordmarkPctOverride);
+      const min = { px: 60, mm: 16 };
+      const val = isPrint ? (wmBox.w / dpi) * 25.4 : wmBox.w;
+      const ok = isPrint ? val >= min.mm : val >= min.px;
+      checks.push({
+        ok: ok ? 'pass' : 'warn',
+        label: 'Logo minimum size',
+        note: isPrint
+          ? `${val.toFixed(0)} mm · min ${min.mm} mm${ok ? '' : ' — enlarge it'}`
+          : `${val.toFixed(0)} px · min ${min.px} px${ok ? '' : ' — enlarge it'}`,
+        fix: ok ? null : {
+          label: 'Enlarge to minimum',
+          apply: () => {
+            const shortSide = Math.min(fmt.w, fmt.h);
+            const targetPx = isPrint ? (min.mm / 25.4) * dpi : min.px;
+            setWordmarkPctOverride(clamp((targetPx * 1.05) / shortSide, 0.04, 0.45));
+          },
+        },
+      });
+      checks.push({ ok: 'pass', label: 'Clear space', note: 'the mark keeps its clear space on all four sides — it can never be cropped' });
+    } else {
+      checks.push({
+        ok: 'warn',
+        label: 'No logo on this canvas',
+        note: 'only for carrier pieces already inside a branded context — the sender line must still identify Medartis',
+        fix: { label: 'Put the logo back (top right)', apply: () => setWordmarkPos('tr') },
+      });
+    }
+
+    // 2 · Headline ink vs surface (WCAG AA: 4.5:1 normal, 3:1 large/bold).
+    const inkCr = contrastRatio(palette.ink, palette.bg);
+    checks.push({
+      ok: inkCr >= 4.5 ? 'pass' : inkCr >= 3 ? 'warn' : 'fail',
+      label: 'Headline contrast (WCAG AA)',
+      note: `${inkCr.toFixed(1)}:1${inkCr >= 4.5 ? '' : inkCr >= 3 ? ' — large/bold text only (18pt+ / 14pt+ bold)' : ' — fails AA, change the surface'}`,
+      fix: inkCr >= 4.5 ? null : {
+        label: palette.mode === 'dark' ? 'Switch surface → Bone' : 'Switch surface → Coal',
+        apply: () => setPaletteName(palette.mode === 'dark' ? 'bone' : 'coal'),
+      },
+    });
+
+    // 3 · Body / muted text vs surface.
+    const mutedCr = contrastRatio(palette.muted, palette.bg);
+    checks.push({
+      ok: mutedCr >= 4.5 ? 'pass' : mutedCr >= 3 ? 'warn' : 'fail',
+      label: 'Body text contrast',
+      note: `${mutedCr.toFixed(1)}:1${mutedBoost ? ' · boosted' : ''}`,
+      fix: mutedCr >= 4.5 ? null : (!mutedBoost
+        ? { label: 'Boost body text', apply: () => setMutedBoost(true) }
+        : { label: palette.mode === 'dark' ? 'Switch surface → Bone' : 'Switch surface → Coal',
+            apply: () => setPaletteName(palette.mode === 'dark' ? 'bone' : 'coal') }),
+    });
+
+    // 4 · The gold accent (eyebrow · rule · CTA). The brand gold is only ~2:1 on
+    //     light surfaces — a real accessibility trap the guide doesn't call out.
+    const accCr = contrastRatio(accentColor, palette.bg);
+    checks.push({
+      ok: accCr >= 4.5 ? 'pass' : accCr >= 3 ? 'warn' : 'fail',
+      label: 'Gold accent contrast',
+      note: `${accCr.toFixed(1)}:1${accentSafe && palette.mode !== 'dark' ? ' · deep gold' : ''}${accCr >= 4.5 ? '' : ' — the brand gold is low-contrast on light surfaces'}`,
+      fix: accCr >= 4.5 ? null : (!accentSafe
+        ? { label: 'Use the accessible deep gold', apply: () => setAccentSafe(true) }
+        : { label: 'Switch surface → Coal', apply: () => setPaletteName('coal') }),
+    });
+
+    // 4b · Logo legibility OVER IMAGERY — the real, measured number. This is the
+    //      one that actually decides whether the mark survives on a photo.
+    if ((wordmarkOverImage || layoutKey === 'overlay') && activeImage && wordmarkPos !== 'hidden') {
+      const L = logoLegib;
+      const busy = L.std > LOGO_MAX_STD;
+      checks.push({
+        ok: L.safe ? 'pass' : 'warn',
+        label: 'Logo legibility over the image',
+        note: L.protected
+          ? `${L.best.toFixed(1)}:1 · protected by a ${L.mode === 'auto' ? 'plate' : L.mode}`
+          : `${L.best.toFixed(1)}:1${busy ? ' · busy background under the mark' : ''}${L.safe ? ' · clean enough to go bare' : ' — the mark will not hold'}`,
+        fix: L.safe ? null : { label: 'Protect the logo', apply: () => setLogoPlate('plate') },
+      });
+    }
+
+    // 5 · Gold discipline (guide) — stated, not measurable.
+    checks.push({ ok: 'pass', label: 'Gold discipline', note: 'gold only as eyebrow, rule, CTA & accents — never a background or body text' });
+
+    // 6 · Photography protection.
+    if (layoutKey === 'overlay' && activeImage) {
+      checks.push({ ok: 'pass', label: 'Photo overlay', note: 'darkening scrim + auto-contrast logo/text protection active' });
+    }
+
+    // 7 · Print readiness.
+    if (isPrint) {
+      checks.push({
+        ok: pdfBleed ? 'pass' : 'warn',
+        label: 'Print bleed',
+        note: pdfBleed ? '3 mm bleed + crop marks on PDF export' : 'no bleed — the printer needs 3 mm to trim into',
+        fix: pdfBleed ? null : { label: 'Turn bleed on', apply: () => setPdfBleed(true) },
+      });
+    }
+
+    return checks;
+  }, [formatKey, wordmarkPos, wordmarkPctOverride, palette, accentColor, mutedBoost, accentSafe, layoutKey, activeImage, pdfBleed, wordmarkOverImage, logoLegib]);
 
   const draw = useCallback(() => {
     const canvas = canvasRef.current;
@@ -2601,12 +3011,13 @@ export default function MedartisBrandGenerator() {
         ? { ...textBackdrop, tint: tintFor(palette.mode) }
         : null;
       layout.draw(ctx, frame, activeContent, activeImage, {
-        palette, accent: BRAND.gold, fit: activeFit,
+        palette, accent: accentColor, fit: activeFit,
         wordmarkPos,
         folioPos: slideShowsFolio ? folioPos : 'hidden',
         formatKey,
         wordmarkOverImage, folioOverImage,
         wordmarkColor, folioColor, folioText, wordmarkPctOverride,
+        logoPlate, legibilityOut: legibRef.current,
         qr: slideShowsQr ? qrConfig : { ...qrConfig, enabled: false },
         qrImage: slideShowsQr ? qrImage : null,
         carouselBg: { ...carouselBg, image: carouselBgImage },
@@ -2614,6 +3025,14 @@ export default function MedartisBrandGenerator() {
         totalSlides: format.multi ? carouselSlides : 1,
         textBackdrop: backdropOpt,
       });
+      // Surface the measured legibility to the BRAND CHECK panel. Identity is
+      // preserved when nothing material changed, so this can't loop.
+      const L = legibRef.current;
+      setLogoLegib((prev) => (
+        prev.safe === L.safe && prev.protected === L.protected && prev.mode === L.mode
+        && Math.abs(prev.best - L.best) < 0.05 && Math.abs(prev.std - L.std) < 0.5
+          ? prev : { ...L }
+      ));
     }
 
     if (format.multi) {
@@ -2629,7 +3048,7 @@ export default function MedartisBrandGenerator() {
         ctx.fill();
       }
     }
-  }, [format, layoutKey, activeContent, activeImage, activeFit, palette, carouselSlides, carouselSlide, wordmarkPos, folioPos, formatKey, wordmarkOverImage, folioOverImage, wordmarkColor, folioColor, folioText, qrConfig, qrImage, carouselBg, carouselBgImage, carouselQrPer, carouselFolioPer, textBackdrop, wordmarkPctOverride, wmReady]);
+  }, [format, layoutKey, activeContent, activeImage, activeFit, palette, carouselSlides, carouselSlide, wordmarkPos, folioPos, formatKey, wordmarkOverImage, folioOverImage, wordmarkColor, folioColor, folioText, qrConfig, qrImage, carouselBg, carouselBgImage, carouselQrPer, carouselFolioPer, textBackdrop, wordmarkPctOverride, wmReady, logoPlate, accentColor]);
 
   useEffect(() => { draw(); }, [draw]);
 
@@ -2749,11 +3168,6 @@ export default function MedartisBrandGenerator() {
     }
   };
 
-  // ── PDF export (optional bleed + crop marks) ────────────────────
-  const [pdfBleed, setPdfBleed] = useState(true);
-  const [pdfCropMarks, setPdfCropMarks] = useState(true);
-  const [pdfVector, setPdfVector] = useState(true);    // vectorise text + wordmark
-  const [pdfCropColor, setPdfCropColor] = useState('auto'); // 'auto' | 'ink' | 'bone'
 
   // Render the current state to an OFFSCREEN canvas with the same pipeline
   // as the live preview, optionally skipping overlays. Used to produce a
@@ -2777,13 +3191,14 @@ export default function MedartisBrandGenerator() {
     const slideShowsFolio = format.multi ? (carouselFolioPer[idx] ?? true) : true;
     const slideShowsQr    = format.multi ? (carouselQrPer[idx]    ?? true) : true;
     layout.draw(ctx, frame, contentOverride ?? activeContent, imageOverride ?? activeImage, {
-      palette, accent: BRAND.gold,
+      palette, accent: accentColor,
       fit: fitOverride ?? activeFit,
       wordmarkPos,
       folioPos: slideShowsFolio ? folioPos : 'hidden',
       formatKey,
       wordmarkOverImage, folioOverImage,
       wordmarkColor, folioColor, folioText,
+      logoPlate,
       skipOverlays,
       carouselBg: { ...carouselBg, image: carouselBgImage },
       slideIdx: idx,
@@ -2837,10 +3252,11 @@ export default function MedartisBrandGenerator() {
     const measCtx = measCanvas.getContext('2d');
 
     const opts = {
-      palette, accent: BRAND.gold,
+      palette, accent: accentColor,
       fit: slideFit, wordmarkPos, folioPos, formatKey,
       wordmarkOverImage, folioOverImage,
       wordmarkColor, folioColor, folioText, wordmarkPctOverride,
+      logoPlate,
       qr: qrConfig,
     };
 
@@ -3167,6 +3583,7 @@ export default function MedartisBrandGenerator() {
     wordmarkPos, folioPos,
     wordmarkOverImage, folioOverImage,
     wordmarkColor, folioColor, folioText, wordmarkPctOverride,
+    logoPlate,
     qrConfig,
     carouselBg: carouselBg.imageSrc?.startsWith('data:')
       ? { ...carouselBg, imageSrc: null }   // skip giant data URLs in preset
@@ -3199,6 +3616,7 @@ export default function MedartisBrandGenerator() {
     if (preset.folioColor)    setFolioColor(preset.folioColor);
     if (typeof preset.folioText === 'string') setFolioText(preset.folioText);
     if (preset.wordmarkPctOverride !== undefined) setWordmarkPctOverride(preset.wordmarkPctOverride);
+    if (preset.logoPlate) setLogoPlate(preset.logoPlate);
     if (preset.qrConfig) setQrConfig({ ...DEFAULT_QR, ...preset.qrConfig });
     if (preset.carouselBg) setCarouselBg(preset.carouselBg);
     if (Array.isArray(preset.carouselQrPer))    setCarouselQrPer(preset.carouselQrPer);
@@ -3650,7 +4068,56 @@ export default function MedartisBrandGenerator() {
             fontSize: 12, fontWeight: 300, color: BRAND.ink600,
             marginTop: 8, letterSpacing: '-0.01em'
           }}>Edition Three · v1.2 · MMXXVI</div>
+
+          {/* Panel controls: collapse/expand all + Solo (one panel open at a time) */}
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: 6, marginTop: 14,
+            paddingTop: 12, borderTop: `1px solid ${BRAND.ink100}`,
+          }}>
+            <button
+              onClick={() => setAllCollapsed(!allSectionsCollapsed)}
+              title={allSectionsCollapsed ? 'Expand all panels' : 'Collapse all panels'}
+              style={{
+                flex: 1, display: 'flex', alignItems: 'center', gap: 6,
+                padding: '6px 8px', fontSize: 10, letterSpacing: '0.08em',
+                fontFamily: BRAND.mono, textTransform: 'uppercase',
+                color: BRAND.ink, background: BRAND.paper,
+                border: `1px solid ${BRAND.ink100}`, borderRadius: 5, cursor: 'pointer',
+              }}
+            >
+              <span style={{ fontSize: 9 }}>{allSectionsCollapsed ? '▸' : '▾'}</span>
+              {allSectionsCollapsed ? 'Expand all' : 'Collapse all'}
+            </button>
+            <button
+              onClick={toggleAccordion}
+              title="Solo: keep only one panel open at a time"
+              style={{
+                display: 'flex', alignItems: 'center', gap: 6,
+                padding: '6px 8px', fontSize: 10, letterSpacing: '0.08em',
+                fontFamily: BRAND.mono, textTransform: 'uppercase',
+                color: accordion ? BRAND.bone00 : BRAND.ink600,
+                background: accordion ? BRAND.ink : BRAND.paper,
+                border: `1px solid ${accordion ? BRAND.ink : BRAND.ink100}`,
+                borderRadius: 5, cursor: 'pointer',
+              }}
+            >
+              <span style={{
+                width: 18, height: 10, borderRadius: 5, position: 'relative',
+                background: accordion ? BRAND.gold : BRAND.ink100,
+                display: 'inline-block', transition: 'background 0.12s',
+              }}>
+                <span style={{
+                  position: 'absolute', top: 1, left: accordion ? 9 : 1,
+                  width: 8, height: 8, borderRadius: '50%', background: BRAND.paper,
+                  transition: 'left 0.12s',
+                }} />
+              </span>
+              Solo
+            </button>
+          </div>
         </div>
+
+        <SideGroup n="1" label="Canvas" />
 
         <Section label="§ 01 — FORMAT" {...sp('FORMAT')}>
           {Object.entries(
@@ -3704,6 +4171,8 @@ export default function MedartisBrandGenerator() {
             </SidebarBtn>
           ))}
         </Section>
+
+        <SideGroup n="2" label="Story" />
 
         <Section label="§ 03 — CONTENT TEMPLATE" {...sp('TEMPLATE')}>
           {contentEdited.current && (
@@ -3825,33 +4294,63 @@ export default function MedartisBrandGenerator() {
             touchAction: 'none'
           }} />
 
-        {format.multi && (
-          <div style={{
-            position: 'absolute', bottom: 28, left: 0, right: 0,
-            display: 'flex', justifyContent: 'center', gap: 10, alignItems: 'center'
-          }}>
-            <CarouselNav onClick={() => setCarouselSlide(Math.max(0, carouselSlide - 1))} disabled={carouselSlide === 0}>←</CarouselNav>
+        {/* FRAME BAR — one control for both models: slides (screen) / pages (print).
+            Always visible, so adding a second frame is always one click away. */}
+        {(() => {
+          const isPages = format.supportsPages;
+          const count   = isPages ? pageCount : carouselSlides;
+          const idx     = isPages ? curPage : carouselSlide;
+          const goTo    = isPages ? setPageIdx : setCarouselSlide;
+          const add     = isPages ? addPage : () => setSlideCount(carouselSlides + 1);
+          const remove  = isPages ? () => deletePage(pageCount - 1) : () => setSlideCount(carouselSlides - 1);
+          const noun    = isPages ? 'PAGE' : 'SLIDE';
+          const hasImg  = (i) => (isPages ? !!pageImages[i] : !!carouselImages[i]);
+          const canAdd  = isPages ? true : carouselSlides < 10;
+          const hint = count > 1
+            ? `${noun} ${idx + 1} / ${count} · CONTENT & IMAGE PANELS EDIT THIS ${noun}`
+            : `SINGLE ${noun} · + ADDS ${isPages ? 'A PAGE' : 'A SLIDE'}`;
+          return (
             <div style={{
-              color: BRAND.bone00, fontSize: 11, padding: '0 12px', minWidth: 100,
-              textAlign: 'center', fontFamily: BRAND.mono, letterSpacing: '0.1em'
-            }}>SLIDE {carouselSlide + 1} / {carouselSlides}</div>
-            <CarouselNav onClick={() => setCarouselSlide(Math.min(carouselSlides - 1, carouselSlide + 1))} disabled={carouselSlide === carouselSlides - 1}>→</CarouselNav>
-          </div>
-        )}
-
-        {pages && !format.multi && (
-          <div style={{
-            position: 'absolute', bottom: 28, left: 0, right: 0,
-            display: 'flex', justifyContent: 'center', gap: 10, alignItems: 'center'
-          }}>
-            <CarouselNav onClick={() => setPageIdx(Math.max(0, curPage - 1))} disabled={curPage === 0}>←</CarouselNav>
-            <div style={{
-              color: BRAND.bone00, fontSize: 11, padding: '0 12px', minWidth: 100,
-              textAlign: 'center', fontFamily: BRAND.mono, letterSpacing: '0.1em'
-            }}>PAGE {curPage + 1} / {pages.length}</div>
-            <CarouselNav onClick={() => setPageIdx(Math.min(pages.length - 1, curPage + 1))} disabled={curPage === pages.length - 1}>→</CarouselNav>
-          </div>
-        )}
+              position: 'absolute', bottom: 22, left: 0, right: 0,
+              display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 7
+            }}>
+              <div style={{
+                color: 'rgba(250,248,240,0.55)', fontSize: 9.5, fontFamily: BRAND.mono,
+                letterSpacing: '0.16em', textTransform: 'uppercase'
+              }}>{hint}</div>
+              <div style={{ display: 'flex', justifyContent: 'center', gap: 6, alignItems: 'center' }}>
+                <CarouselNav onClick={() => goTo(Math.max(0, idx - 1))} disabled={idx === 0}>←</CarouselNav>
+                {Array.from({ length: count }).map((_, i) => (
+                  <button key={i} onClick={() => goTo(i)}
+                    title={`${noun} ${i + 1}${hasImg(i) ? ' · has image' : ''}`}
+                    style={{
+                      minWidth: 32, height: 32, borderRadius: 16, cursor: 'pointer',
+                      background: i === idx ? BRAND.gold : 'rgba(250,248,240,0.10)',
+                      color: i === idx ? BRAND.coal : 'rgba(250,248,240,0.85)',
+                      border: `1px solid ${i === idx ? BRAND.gold : (hasImg(i) ? 'rgba(207,171,92,0.7)' : 'rgba(250,248,240,0.28)')}`,
+                      fontFamily: BRAND.display, fontSize: 12.5, fontWeight: 700,
+                    }}>{i + 1}</button>
+                ))}
+                <button onClick={add} disabled={!canAdd}
+                  title={isPages ? 'Add a page (inserts a page break in the body)' : 'Add a slide'}
+                  style={{
+                    minWidth: 32, height: 32, borderRadius: 16, cursor: canAdd ? 'pointer' : 'not-allowed',
+                    background: 'transparent', color: 'rgba(250,248,240,0.85)',
+                    border: '1px dashed rgba(250,248,240,0.45)', fontSize: 15, lineHeight: 1,
+                  }}>+</button>
+                <button onClick={remove} disabled={count <= 1}
+                  title={isPages ? 'Delete the last page' : 'Remove the last slide'}
+                  style={{
+                    minWidth: 32, height: 32, borderRadius: 16,
+                    cursor: count > 1 ? 'pointer' : 'not-allowed',
+                    background: 'transparent', color: 'rgba(250,248,240,0.55)',
+                    border: '1px dashed rgba(250,248,240,0.3)', fontSize: 15, lineHeight: 1,
+                  }}>−</button>
+                <CarouselNav onClick={() => goTo(Math.min(count - 1, idx + 1))} disabled={idx === count - 1}>→</CarouselNav>
+              </div>
+            </div>
+          );
+        })()}
       </div>
 
       {/* RIGHT SIDEBAR — widened so the agenda editor has room to breathe */}
@@ -3859,6 +4358,8 @@ export default function MedartisBrandGenerator() {
         width: 'clamp(380px, 30vw, 560px)', flexShrink: 0, background: BRAND.bone00, padding: '24px 22px',
         overflowY: 'auto', borderLeft: `1px solid ${BRAND.ink100}`
       }}>
+        <SideGroup n="3" label="Brand system" />
+
         <Section label="§ 04 — SURFACE" {...sp('SURFACE')}>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', gap: 4 }}>
             {Object.entries(palettes).map(([name, p]) => (
@@ -3899,6 +4400,46 @@ export default function MedartisBrandGenerator() {
           }}>
             GUIDE · WORDMARK TR · SENDER BL · BL→TR DIAGONAL
           </div>
+          {/* Logo protection over imagery — measured, not guessed. */}
+          <div style={{
+            fontSize: 9.5, color: BRAND.ink600, marginBottom: 6,
+            fontFamily: BRAND.mono, letterSpacing: '0.1em', textTransform: 'uppercase',
+            display: 'flex', justifyContent: 'space-between', alignItems: 'baseline',
+          }}>
+            <span>LOGO ON IMAGE · PROTECTION</span>
+            <span style={{ color: logoLegib.safe ? '#0A7D3E' : '#C8200A', letterSpacing: 0 }}>
+              {logoLegib.best.toFixed(1)}:1{logoLegib.protected ? ' ✓' : ''}
+            </span>
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 3, marginBottom: 4 }}>
+            {[
+              ['auto', 'Auto', 'Measure what is under the mark and only add a backdrop when it actually fails'],
+              ['plate', 'Plate', 'Solid panel in the surface colour — absolute guarantee'],
+              ['frosted', 'Frost', 'Blurred glass — protects while keeping the photo present'],
+              ['scrim', 'Scrim', 'Soft directional wash — lightest touch'],
+              ['off', 'Off', 'Trust auto-contrast alone (can fail on busy photos)'],
+            ].map(([k, label, hint]) => (
+              <button key={k} onClick={() => setLogoPlate(k)} title={hint} style={{
+                padding: '6px 2px', cursor: 'pointer', borderRadius: 0,
+                background: logoPlate === k ? BRAND.ink : BRAND.paper,
+                color: logoPlate === k ? BRAND.bone00 : BRAND.ink600,
+                border: `1px solid ${logoPlate === k ? BRAND.ink : BRAND.ink100}`,
+                fontFamily: BRAND.mono, fontSize: 9, letterSpacing: '0.06em',
+                textTransform: 'uppercase',
+              }}>{label}</button>
+            ))}
+          </div>
+          <div style={{
+            fontSize: 9, color: BRAND.ink300, marginBottom: 10,
+            fontFamily: BRAND.mono, letterSpacing: '0.04em', lineHeight: 1.5,
+          }}>
+            {logoPlate === 'auto'
+              ? 'AUTO · BARE ON A CLEAN PHOTO · BACKDROP THE MOMENT CONTRAST OR BUSYNESS FAILS'
+              : logoPlate === 'off'
+                ? 'OFF · AUTO-CONTRAST ONLY — NOT GUARANTEED ON A BUSY PHOTO'
+                : 'ALWAYS ON · THE MARK IS PROTECTED REGARDLESS OF THE PHOTO'}
+          </div>
+
           <div style={{
             fontSize: 9.5, color: BRAND.ink600, marginBottom: 6,
             fontFamily: BRAND.mono, letterSpacing: '0.1em', textTransform: 'uppercase'
@@ -4371,6 +4912,8 @@ export default function MedartisBrandGenerator() {
 
         {/* Image library + upload — disabled when spanning bg replaces the image area */}
         {(() => null)()}
+        <SideGroup n="4" label="Imagery" />
+
         <Section label={`§ 06 — IMAGE${format.multi ? ` · SLIDE ${carouselSlide + 1}` : ''}`} {...sp('IMAGE')}>
         {perSlideImageDisabled && (
           <div style={{
@@ -4447,6 +4990,17 @@ export default function MedartisBrandGenerator() {
         </div>
         </Section>
 
+        {/* Generative AI (local ComfyUI) */}
+        <div style={{ opacity: perSlideImageDisabled ? 0.4 : 1, pointerEvents: perSlideImageDisabled ? 'none' : 'auto' }}>
+          <GenerateSection
+            format={format}
+            surface={palette.mode === 'dark' ? 'dark' : (layoutKey === 'overlay' ? 'overlay' : 'light')}
+            onPickImage={applyImage}
+            onSaveToLibrary={saveImageToLibrary}
+            sectionProps={sp('GENERATE')}
+          />
+        </div>
+
         {/* Canto search */}
         <div style={{ opacity: perSlideImageDisabled ? 0.4 : 1, pointerEvents: perSlideImageDisabled ? 'none' : 'auto' }}>
           <CantoSection onPickImage={applyImage} onSaveToLibrary={saveImageToLibrary} sectionProps={sp('CANTO')} />
@@ -4474,8 +5028,83 @@ export default function MedartisBrandGenerator() {
         )}
         </Section>
 
+        {/* Live brand compliance — derived from the guide, recomputed on every change.
+            Each row states the real measurement and, where a machine can safely
+            resolve it, offers a one-click fix. */}
+        <SideGroup n="5" label="Output" />
+
+        <Section label="§ 09 — BRAND CHECK" {...sp('CHECK')}>
+          {(() => {
+            const fails = brandChecks.filter((c) => c.ok !== 'pass');
+            const fixable = fails.filter((c) => c.fix);
+            return (
+              <>
+                <div style={{
+                  display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8,
+                  fontFamily: BRAND.mono, fontSize: 10, letterSpacing: '0.08em',
+                  textTransform: 'uppercase',
+                  color: fails.length === 0 ? '#0A7D3E' : BRAND.ink600,
+                }}>
+                  {fails.length === 0
+                    ? '✓ On brand · all checks pass'
+                    : `${fails.length} issue${fails.length === 1 ? '' : 's'} to review`}
+                </div>
+
+                {fixable.length > 0 && (
+                  <button
+                    onClick={() => fixable.forEach((c) => c.fix.apply())}
+                    style={{
+                      width: '100%', padding: '9px 12px', marginBottom: 8, cursor: 'pointer',
+                      background: BRAND.ink, color: BRAND.bone00, border: 'none', borderRadius: 0,
+                      fontFamily: BRAND.mono, fontSize: 10.5, fontWeight: 500,
+                      letterSpacing: '0.12em', textTransform: 'uppercase',
+                    }}
+                  >⚡ Auto-fix {fixable.length} issue{fixable.length === 1 ? '' : 's'}</button>
+                )}
+
+                {brandChecks.map((c, i) => (
+                  <div key={i} style={{
+                    display: 'flex', gap: 8, alignItems: 'flex-start',
+                    padding: '7px 0', borderBottom: `1px solid ${BRAND.ink100}`,
+                  }}>
+                    <span style={{
+                      fontSize: 11, lineHeight: '15px', flexShrink: 0, fontWeight: 700,
+                      color: c.ok === 'pass' ? '#0A7D3E' : c.ok === 'warn' ? BRAND.gold500 : '#C8200A',
+                    }}>{c.ok === 'pass' ? '✓' : c.ok === 'warn' ? '△' : '✗'}</span>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 11, fontWeight: 500, color: BRAND.ink800, lineHeight: 1.35 }}>{c.label}</div>
+                      <div style={{ fontSize: 10, color: BRAND.ink600, lineHeight: 1.45 }}>{c.note}</div>
+                      {c.fix && c.ok !== 'pass' && (
+                        <button onClick={() => c.fix.apply()} style={{
+                          marginTop: 5, padding: '4px 9px', cursor: 'pointer',
+                          background: 'transparent', color: BRAND.ink,
+                          border: `1px solid ${BRAND.gold500}`, borderRadius: 0,
+                          fontFamily: BRAND.mono, fontSize: 9.5, fontWeight: 500,
+                          letterSpacing: '0.1em', textTransform: 'uppercase',
+                        }}>⚡ {c.fix.label}</button>
+                      )}
+                    </div>
+                  </div>
+                ))}
+
+                {(mutedBoost || accentSafe) && (
+                  <button
+                    onClick={() => { setMutedBoost(false); setAccentSafe(false); }}
+                    style={{
+                      marginTop: 8, padding: 0, cursor: 'pointer', background: 'transparent',
+                      color: BRAND.ink600, border: 'none', fontFamily: BRAND.mono,
+                      fontSize: 9.5, letterSpacing: '0.08em', textTransform: 'uppercase',
+                      textDecoration: 'underline',
+                    }}
+                  >↺ Drop accessibility overrides</button>
+                )}
+              </>
+            );
+          })()}
+        </Section>
+
         {/* Export */}
-        <Section label="§ 09 — EXPORT" {...sp('EXPORT')}>
+        <Section label="§ 10 — EXPORT" {...sp('EXPORT')}>
           <button onClick={download} style={{
             width: '100%', padding: '14px', background: BRAND.ink,
             color: BRAND.bone00, border: 'none', borderRadius: 0,
@@ -4697,6 +5326,25 @@ export default function MedartisBrandGenerator() {
 }
 
 // ── UI atoms ──────────────────────────────────────────────────────────
+// Numbered sidebar group heading — turns a long flat panel list into a handful
+// of legible stages (1 Canvas · 2 Story · 3 Brand · 4 Imagery · 5 Output).
+const SideGroup = ({ n, label, hint }) => (
+  <div style={{ margin: '18px 2px 10px', display: 'flex', alignItems: 'center', gap: 9, flexShrink: 0 }}>
+    <span style={{
+      width: 20, height: 20, borderRadius: 10, background: BRAND.ink,
+      color: BRAND.bone00, fontSize: 10.5, fontWeight: 700,
+      display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+      fontFamily: BRAND.display, flexShrink: 0,
+    }}>{n}</span>
+    <span style={{
+      fontSize: 11, fontWeight: 700, letterSpacing: '0.14em',
+      textTransform: 'uppercase', color: BRAND.ink, fontFamily: BRAND.display,
+    }}>{label}</span>
+    <span style={{ flex: 1, height: 2, background: BRAND.gold, opacity: 0.85, borderRadius: 1 }} />
+    {hint && <span style={{ fontSize: 9, color: BRAND.ink300, fontFamily: BRAND.mono }}>{hint}</span>}
+  </div>
+);
+
 const Section = ({ label, children, collapsed, onToggle }) => {
   const isCollapsible = typeof onToggle === 'function';
   return (
@@ -4934,6 +5582,60 @@ const ImageFitControls = ({ image, fit, onChange, showFrameRatio, isWide, defaul
       <FitSlider label="Pan X"    value={f.offsetX}  min={-200} max={200} step={1}    onChange={(v) => onChange({ offsetX: v })}  format={(v) => v.toFixed(0) + '%'} />
       <FitSlider label="Pan Y"    value={f.offsetY}  min={-200} max={200} step={1}    onChange={(v) => onChange({ offsetY: v })}  format={(v) => v.toFixed(0) + '%'} />
       <FitSlider label="Rotation" value={f.rotation} min={-180} max={180} step={1}    onChange={(v) => onChange({ rotation: v })} format={(v) => v.toFixed(0) + '°'} />
+
+      {/* FRAME EDGES — move each edge; the image re-fits, the background fills. */}
+      {(() => {
+        const ins = normalizeFrameInset(f.frameInset);
+        const set = (k, v) => onChange({ frameInset: { ...ins, [k]: v } });
+        return (
+          <>
+            <div style={{
+              display: 'flex', justifyContent: 'space-between', marginTop: 10,
+              fontSize: 9.5, color: BRAND.ink600, fontFamily: BRAND.mono,
+              letterSpacing: '0.08em', textTransform: 'uppercase',
+            }}>
+              <span>Frame edges · move</span>
+              <span style={{ color: BRAND.ink300 }}>+ in · − out</span>
+            </div>
+            {['top', 'right', 'bottom', 'left'].map((k) => (
+              <FitSlider key={k} label={`${k[0].toUpperCase()}${k.slice(1)} edge`}
+                value={ins[k]} min={INSET_MIN} max={INSET_MAX} step={0.005}
+                onChange={(v) => set(k, v)} format={(v) => (v * 100).toFixed(1) + '%'} />
+            ))}
+            <div style={{
+              fontSize: 9, color: BRAND.ink300, fontFamily: BRAND.mono,
+              letterSpacing: '0.04em', lineHeight: 1.5, marginTop: 2,
+            }}>MOVES THE FRAME EDGE · IMAGE RE-FITS · BACKGROUND FILLS THE FREED SPACE</div>
+          </>
+        );
+      })()}
+
+      {/* FRAME TILT — diagonal cuts; the wedge shows the background through. */}
+      {(() => {
+        const tl = normalizeFrameTilt(f.frameTilt);
+        const set = (k, v) => onChange({ frameTilt: { ...tl, [k]: v } });
+        return (
+          <>
+            <div style={{
+              display: 'flex', justifyContent: 'space-between', marginTop: 10,
+              fontSize: 9.5, color: BRAND.ink600, fontFamily: BRAND.mono,
+              letterSpacing: '0.08em', textTransform: 'uppercase',
+            }}>
+              <span>Frame tilt · diagonal edges</span>
+              <span style={{ color: BRAND.ink300 }}>±{TILT_MAX}°</span>
+            </div>
+            {['top', 'right', 'bottom', 'left'].map((k) => (
+              <FitSlider key={k} label={`Tilt ${k}`}
+                value={tl[k]} min={-TILT_MAX} max={TILT_MAX} step={0.5}
+                onChange={(v) => set(k, v)} format={(v) => v.toFixed(1) + '°'} />
+            ))}
+            <div style={{
+              fontSize: 9, color: BRAND.ink300, fontFamily: BRAND.mono,
+              letterSpacing: '0.04em', lineHeight: 1.5, marginTop: 2,
+            }}>CUTS MOVE INTO THE IMAGE · BACKGROUND SHOWS THROUGH THE WEDGE</div>
+          </>
+        );
+      })()}
 
       {/* Edge fade — gradient mask per edge */}
       <EdgeFadeBlock fade={f.edgeFade} onChange={(edgeFade) => onChange({ edgeFade })} />
@@ -5190,6 +5892,272 @@ const DualRangeSlider = ({ start, end, onChange }) => {
 };
 
 // ── Canto search section ─────────────────────────────────────────────
+// ── Generative AI (local ComfyUI) ────────────────────────────────────
+// The user never reaches the model directly: the server compiles the house look,
+// the realism block and the negative around the subject. See vite-plugin-genai.js.
+//
+// The negative-prompt honesty problem, surfaced in the UI:
+// FLUX.1 [dev] is guidance-distilled — its graph runs a BasicGuider, which has no
+// negative input at all, so a negative prompt is IGNORED, not merely weakened.
+// "Strict negatives" swaps in a CFGGuider to give the sampler a real negative
+// branch (~2× slower). SDXL / Turbo always honour it. We report what actually
+// happened rather than implying the negative did something it didn't.
+const GenerateSection = ({ sectionProps = {}, format, surface, onPickImage, onSaveToLibrary }) => {
+  const [status, setStatus] = useState(null);
+  const [prompt, setPrompt] = useState('');
+  const [extraNegative, setExtraNegative] = useState('');
+  const [realism, setRealism] = useState(true);
+  const [strictNegative, setStrictNegative] = useState(false);
+  const [engine, setEngine] = useState('flux');
+  const [busy, setBusy] = useState(false);
+  const [job, setJob] = useState(null);
+  const [jobId, setJobId] = useState(null);
+  const [elapsed, setElapsed] = useState(0);
+  const [error, setError] = useState(null);
+  const [results, setResults] = useState([]);
+  const [lastMeta, setLastMeta] = useState(null);
+
+  // Prefer an engine whose output can actually be published.
+  useEffect(() => {
+    if (status?.engines?.includes('sdxl')) setEngine((e) => (e === 'flux' ? 'sdxl' : e));
+  }, [status?.engines?.join(',')]);
+
+  // Wall-clock ticker — a bar with no numbers is indistinguishable from a hang.
+  useEffect(() => {
+    if (!busy) { setElapsed(0); return; }
+    const t0 = Date.now();
+    const id = setInterval(() => setElapsed(Math.round((Date.now() - t0) / 1000)), 250);
+    return () => clearInterval(id);
+  }, [busy]);
+
+  const probe = useCallback(() => fetch('/api/gen/status')
+    .then((r) => r.json())
+    .then(setStatus)
+    .catch(() => setStatus({ providers: [], comfyError: 'Generative plugin not reachable.' })), []);
+  useEffect(() => { probe(); }, [probe]);
+
+  // ComfyUI may be booted after the app — keep looking instead of latching "absent".
+  const local = status?.providers?.includes('local');
+  useEffect(() => {
+    if (local) return;
+    const id = setInterval(probe, 5000);
+    return () => clearInterval(id);
+  }, [local, probe]);
+
+  const poll = async (id) => {
+    for (;;) {
+      await new Promise((r) => setTimeout(r, 700));
+      const j = await fetch(`/api/gen/job/${id}`).then((r) => r.json()).catch(() => null);
+      if (!j) continue;
+      setJob(j);
+      if (j.status === 'done') return j;
+      if (j.status === 'error') throw new Error(j.error || 'Generation failed.');
+    }
+  };
+
+  const generate = async () => {
+    setBusy(true); setError(null); setJob({ status: 'queued', progress: 0 });
+    try {
+      const r = await fetch('/api/gen/image', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          prompt, surface, engine, realism, strictNegative, extraNegative,
+          w: format.w, h: format.h,
+        }),
+      });
+      const sub = await r.json();
+      if (!r.ok) throw new Error(sub.error || 'Request rejected.');
+      setJobId(sub.jobId);
+      const done = await poll(sub.jobId);
+      setLastMeta(done);
+      setResults((done.images || []).concat(results).slice(0, 8));
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusy(false); setJob(null); setJobId(null);
+    }
+  };
+
+  const cancel = () => { if (jobId) fetch(`/api/gen/cancel/${jobId}`, { method: 'POST' }).catch(() => {}); };
+
+  // Will the negative actually reach the sampler with the current choices?
+  const negWorks = engine !== 'flux' || strictNegative;
+
+  const btn = (on) => ({
+    padding: '6px 4px', cursor: 'pointer', borderRadius: 0,
+    background: on ? BRAND.ink : BRAND.paper, color: on ? BRAND.bone00 : BRAND.ink600,
+    border: `1px solid ${on ? BRAND.ink : BRAND.ink100}`,
+    fontFamily: BRAND.mono, fontSize: 9, letterSpacing: '0.06em', textTransform: 'uppercase',
+  });
+
+  return (
+    <Section label="§ 08 — GENERATE · AI" {...sectionProps}>
+      <div style={{
+        padding: '9px 10px', marginBottom: 10, background: BRAND.bone,
+        borderLeft: `3px solid ${BRAND.gold}`,
+        fontFamily: BRAND.mono, fontSize: 9, color: BRAND.ink600,
+        letterSpacing: '0.04em', lineHeight: 1.6,
+      }}>
+        FLUX.1 [DEV] · NON-COMMERCIAL — CONCEPTING AND INTERNAL USE ONLY.<br />
+        ENVIRONMENT · PRODUCT · TEXTURE · ATMOSPHERE. CLINICAL IMAGERY STAYS REAL PHOTOGRAPHY.
+      </div>
+
+      {!status && <div style={{ fontFamily: BRAND.mono, fontSize: 10, color: BRAND.ink300 }}>CHECKING BACKENDS…</div>}
+
+      {status && !local && (
+        <div style={{ fontFamily: BRAND.mono, fontSize: 10, color: BRAND.ink600, lineHeight: 1.6 }}>
+          {status.comfyError || 'NO LOCAL COMFYUI.'}
+          <div style={{ color: BRAND.ink300, marginTop: 6 }}>
+            START COMFYUI (DEFAULT http://127.0.0.1:8188) — THIS PANEL WILL PICK IT UP AUTOMATICALLY.
+          </div>
+        </div>
+      )}
+
+      {local && (
+        <>
+          <textarea
+            value={prompt}
+            onChange={(e) => setPrompt(e.target.value)}
+            rows={3}
+            placeholder="Subject only — e.g. “instrument tray on a brushed-steel bench, morning light”. The house look, realism and negative are added for you."
+            style={{ width: '100%', boxSizing: 'border-box', marginBottom: 8 }}
+          />
+
+          {/* Engine */}
+          <div style={{ fontSize: 9.5, color: BRAND.ink600, marginBottom: 5, fontFamily: BRAND.mono, letterSpacing: '0.1em', textTransform: 'uppercase' }}>Engine</div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 3, marginBottom: 10 }}>
+            {[
+              ['flux', 'Flux', 'Best look · guidance-distilled: IGNORES the negative unless Strict is on · non-commercial'],
+              ['sdxl', 'SDXL', 'Licensable output · always honours the negative'],
+              ['sdxl-turbo', 'Turbo', '4 steps, seconds · always honours the negative · lower fidelity'],
+            ].filter(([k]) => !status.engines || status.engines.includes(k) || k === 'flux')
+              .map(([k, label, hint]) => (
+                <button key={k} onClick={() => setEngine(k)} title={hint} style={btn(engine === k)}>{label}</button>
+              ))}
+          </div>
+
+          {/* Realism + strict negatives */}
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 3, marginBottom: 6 }}>
+            <button onClick={() => setRealism((v) => !v)} style={btn(realism)}
+              title="Append the photoreal block: full-frame optics, physically accurate light, real skin texture, sensor grain. This is what actually drives realism on Flux.">
+              ✦ Realism
+            </button>
+            <button onClick={() => setStrictNegative((v) => !v)} style={btn(strictNegative)}
+              title="Give Flux a REAL negative branch (CFGGuider, cfg>1). Roughly 2× slower. SDXL/Turbo honour the negative regardless.">
+              ⛔ Strict negatives
+            </button>
+          </div>
+
+          {/* The honesty line — never imply the negative did something it didn't. */}
+          <div style={{
+            fontSize: 9, fontFamily: BRAND.mono, lineHeight: 1.55, marginBottom: 8,
+            letterSpacing: '0.04em',
+            color: negWorks ? '#0A7D3E' : '#C8200A',
+          }}>
+            {negWorks
+              ? '✓ THE NEGATIVE PROMPT REACHES THE SAMPLER WITH THESE SETTINGS.'
+              : '⚠ FLUX AT CFG 1 IGNORES THE NEGATIVE ENTIRELY. TURN ON STRICT NEGATIVES (SLOWER), OR SWITCH TO SDXL — OTHERWISE REALISM COMES ONLY FROM THE POSITIVE BLOCK.'}
+          </div>
+
+          <div style={{ fontSize: 9.5, color: BRAND.ink600, marginBottom: 5, fontFamily: BRAND.mono, letterSpacing: '0.1em', textTransform: 'uppercase' }}>
+            Extra negative <span style={{ color: BRAND.ink300, letterSpacing: 0, textTransform: 'none' }}>· appended to the house negative</span>
+          </div>
+          <input
+            value={extraNegative}
+            onChange={(e) => setExtraNegative(e.target.value)}
+            placeholder="e.g. reflections, fingerprints, blue tint"
+            style={{ width: '100%', boxSizing: 'border-box', marginBottom: 10 }}
+          />
+
+          <button onClick={busy ? cancel : generate} disabled={!busy && !prompt.trim()}
+            style={{
+              width: '100%', padding: '12px', cursor: (busy || prompt.trim()) ? 'pointer' : 'not-allowed',
+              background: busy ? BRAND.paper : BRAND.ink, color: busy ? BRAND.ink : BRAND.bone00,
+              border: `1px solid ${BRAND.ink}`, borderRadius: 0,
+              fontFamily: BRAND.mono, fontSize: 11, fontWeight: 500,
+              letterSpacing: '0.14em', textTransform: 'uppercase',
+              opacity: (!busy && !prompt.trim()) ? 0.4 : 1,
+            }}>
+            {busy ? `✕ Cancel · ${elapsed}s` : '✦ Generate'}
+          </button>
+
+          {/* Real steps from ComfyUI's socket — not a fake bar */}
+          {busy && job && (
+            <div style={{ marginTop: 8 }}>
+              <div style={{ height: 4, background: BRAND.ink100, overflow: 'hidden' }}>
+                <div style={{
+                  height: '100%', width: `${Math.round((job.progress || 0) * 100)}%`,
+                  background: BRAND.gold, transition: 'width 0.2s',
+                }} />
+              </div>
+              <div style={{ fontSize: 9, fontFamily: BRAND.mono, color: BRAND.ink600, marginTop: 4, letterSpacing: '0.06em' }}>
+                {job.steps ? `STEP ${job.step ?? 0} / ${job.steps}` : (job.status || 'QUEUED').toUpperCase()}
+                {job.node ? ` · ${String(job.node).toUpperCase()}` : ''}
+              </div>
+            </div>
+          )}
+
+          {error && (
+            <div style={{ marginTop: 8, fontSize: 10.5, color: '#C8200A', fontFamily: BRAND.mono, lineHeight: 1.5 }}>
+              ERROR · {error}
+            </div>
+          )}
+
+          {/* What the run ACTUALLY did */}
+          {lastMeta && !busy && (
+            <div style={{ marginTop: 8, fontSize: 9, fontFamily: BRAND.mono, color: BRAND.ink600, letterSpacing: '0.04em', lineHeight: 1.55 }}>
+              {String(lastMeta.engine || '').toUpperCase()}
+              {lastMeta.lora ? ` · LORA ${lastMeta.lora}` : ' · NO HOUSE LORA'}
+              {' · NEGATIVE '}
+              <span style={{ color: lastMeta.negativeHonoured ? '#0A7D3E' : '#C8200A' }}>
+                {lastMeta.negativeHonoured ? 'APPLIED' : 'IGNORED BY THIS ENGINE'}
+              </span>
+              {lastMeta.realism ? ' · REALISM ON' : ''}
+            </div>
+          )}
+
+          {results.length > 0 && (
+            <>
+              <div style={{ fontSize: 9, color: BRAND.ink300, margin: '10px 0 6px', fontFamily: BRAND.mono, letterSpacing: '0.06em' }}>
+                CLICK TO USE · <span style={{ color: BRAND.gold }}>+LIB</span> SAVES IT
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4 }}>
+                {results.map((src, i) => (
+                  <div key={i} style={{
+                    position: 'relative', aspectRatio: '1', overflow: 'hidden',
+                    border: `1px solid ${BRAND.ink100}`, cursor: 'pointer', background: BRAND.bone,
+                  }}
+                    onClick={() => { const im = new Image(); im.onload = () => onPickImage(im); im.src = src; }}>
+                    <img src={src} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />
+                    <span style={{
+                      position: 'absolute', top: 3, left: 3, padding: '1px 4px',
+                      background: 'rgba(19,19,16,0.72)', color: BRAND.bone00,
+                      fontSize: 8, fontFamily: BRAND.mono, letterSpacing: '0.06em',
+                    }}>AI</span>
+                    <span
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        const im = new Image();
+                        im.onload = () => onSaveToLibrary(im, `AI · ${prompt.slice(0, 28)}`, 'ai');
+                        im.src = src;
+                      }}
+                      title="Save to the standard library"
+                      style={{
+                        position: 'absolute', top: 3, right: 3, padding: '1px 5px',
+                        background: 'rgba(19,19,16,0.72)', color: BRAND.bone00,
+                        fontSize: 8.5, fontFamily: BRAND.mono, cursor: 'pointer', borderRadius: 2,
+                      }}>+LIB</span>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+        </>
+      )}
+    </Section>
+  );
+};
+
 const CantoSection = ({ onPickImage, onSaveToLibrary, sectionProps = {} }) => {
   const [status, setStatus] = useState(null);
   const [query, setQuery] = useState('');

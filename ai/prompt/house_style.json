@@ -1,0 +1,69 @@
+{
+  "_comment": "The brand-prompt compiler. The Generate panel never sends a raw user prompt to the model — it compiles [trigger] + [subject] + [house look] + [realism] + [surface context] and applies the negative + the safety blocklist. Tune the tokens here; they should DESCRIBE the Medartis library, not fight it.",
+
+  "trigger": "medartishouse",
+  "_trigger_note": "The LoRA trigger word. Only used when a Medartis LoRA is present in ComfyUI; harmless otherwise.",
+
+  "look": [
+    "editorial photograph in the Medartis house style",
+    "precision-engineering environment, clean modern manufacturing and training space",
+    "cool neutral daylight, soft directional key, gentle falloff, controlled specular highlights",
+    "coal black, bone white, warm brushed metal and muted gold palette",
+    "restrained composition, generous negative space, calm, exact, understated",
+    "real hands, real practitioners, documentary rather than staged",
+    "shallow depth of field, natural skin tones, matte surfaces, no gloss"
+  ],
+
+  "_realism_note": "REALISM IS MOSTLY A POSITIVE-PROMPT PROBLEM. FLUX.1 [dev] is guidance-distilled: at CFG 1 it does not read a negative prompt at all, so photorealism has to be ASSERTED here rather than merely forbidden below. These tokens are appended whenever realism is on.",
+  "realism": [
+    "photorealistic, indistinguishable from a real photograph",
+    "shot on a full-frame DSLR, 50mm prime lens at f/2.0, natural depth of field",
+    "physically accurate light transport, believable soft shadows and contact shadows",
+    "true-to-life skin texture with visible pores and fine imperfections",
+    "authentic material response: micro-scratches on metal, real fabric weave, dust in the air",
+    "natural colour science, neutral white balance, unretouched",
+    "subtle sensor noise and fine film grain, slight optical vignetting",
+    "candid unposed moment, imperfect natural framing"
+  ],
+
+  "surfaces": {
+    "dark": "composed for a coal-black layout, darker mid-tones, room for type in the upper third",
+    "light": "composed for a bone-white layout, airy high-key, room for type in the upper third",
+    "overlay": "wide establishing framing with an empty lower third for a text overlay"
+  },
+
+  "programs": {
+    "product": "surgical instruments and implant systems on a clean workbench, macro precision",
+    "manufacturing": "precision manufacturing floor, CNC and metrology, quiet focus",
+    "training": "hands-on training laboratory, instruments and workstations",
+    "congress": "congress hall, booth, conversation between colleagues",
+    "corporate": "modern office and laboratory interiors, architectural calm"
+  },
+
+  "_negative_note": "Grouped by the failure mode each line kills. Order matters little; coverage does. This is honoured by SDXL / SDXL-Turbo, and by Flux ONLY when 'strict negatives' raises CFG above 1 (slower). The server reports which engine actually consumed it, so the panel never lies about it.",
+  "negative": [
+    "3d render, cgi, octane render, unreal engine, blender, ray traced, digital art, illustration, painting, drawing, sketch, cartoon, anime, concept art, matte painting, airbrushed",
+    "plastic skin, waxy skin, rubbery skin, porcelain skin, doll-like, mannequin, uncanny valley, lifeless eyes, dead eyes, smoothed skin, beauty filter, face retouching",
+    "over-saturated, HDR, oversharpened, halo artifacts, excessive clarity, heavy vignette, bloom, glow, lens flare, chromatic aberration, teal and orange grade, instagram filter, heavy colour grade",
+    "stock photo look, corporate handshake cliche, fake smile, staged posing, thumbs up, pointing at camera, isolated on white background, generic business people",
+    "extra fingers, missing fingers, fused fingers, six fingers, deformed hands, malformed limbs, extra limbs, extra arms, distorted anatomy, twisted joints, asymmetric face, disfigured face, mutated",
+    "text, watermark, signature, logo, lettering, caption, subtitles, ui overlay, frame, border, letterboxing",
+    "low quality, low resolution, blurry, out of focus, motion blur, jpeg artifacts, compression artifacts, banding, posterization, pixelated, oversmoothed, denoised to plastic",
+    "cluttered composition, busy distracting background, tilted horizon, cropped head, duplicated subject, cloned objects, warped perspective",
+    "harsh direct flash, blown highlights, crushed blacks, flat lifeless lighting, studio seamless backdrop"
+  ],
+
+  "_safety_note": "Medartis is a medical-device manufacturer. AI imagery that looks like clinical reality is a credibility and regulatory problem, not just a brand one. Generation is for ENVIRONMENT, ABSTRACT, TEXTURE, ARCHITECTURE and ATMOSPHERE. Clinical reality stays real photography. The server refuses any prompt matching the blocklist below; do not soften it without a decision from the brand owner.",
+
+  "blocklist": [
+    "patient", "patients", "wound", "wounds", "incision", "incisions",
+    "bleeding", "blood", "surgical site", "operative field", "operating field",
+    "open surgery", "dissection", "cadaver", "specimen",
+    "x-ray", "xray", "radiograph", "radiography", "ct scan", "mri", "fluoroscopy",
+    "fracture", "bone graft", "amputation",
+    "diagnosis", "pathology", "tumor", "tumour", "lesion",
+    "real person", "portrait of", "photo of dr", "celebrity", "named surgeon"
+  ],
+
+  "blocklist_message": "Generation is limited to environment, abstract and atmospheric imagery. Clinical content — wounds, imaging, patients or identifiable people — must be real photography or Canto, never generated. Implants and instruments may be generated as PRODUCT/ENVIRONMENT imagery, but never presented as clinical documentation."
+}

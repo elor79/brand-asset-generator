@@ -1,0 +1,181 @@
+{
+  "_comment": "ComfyUI API-format workflow \u2014 Flux.1 [dev] + IBRA house LoRA. The genai plugin patches nodes by id: 6.text (positive), 5.width/5.height (from the active canvas format), 25.noise_seed, 10.lora_name + 10.strength_model, 17.steps. Do not renumber the nodes without updating vite-plugin-genai.js.",
+  "12": {
+    "class_type": "UNETLoader",
+    "inputs": {
+      "unet_name": "flux1-dev.safetensors",
+      "weight_dtype": "default"
+    }
+  },
+  "11": {
+    "class_type": "DualCLIPLoader",
+    "inputs": {
+      "clip_name1": "t5xxl_fp16.safetensors",
+      "clip_name2": "clip_l.safetensors",
+      "type": "flux"
+    }
+  },
+  "10": {
+    "class_type": "LoraLoaderModelOnly",
+    "inputs": {
+      "lora_name": "ibra_house_flux.safetensors",
+      "strength_model": 0.85,
+      "model": [
+        "12",
+        0
+      ]
+    }
+  },
+  "13": {
+    "class_type": "VAELoader",
+    "inputs": {
+      "vae_name": "ae.safetensors"
+    }
+  },
+  "6": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "text": "ibrahouse, PROMPT",
+      "clip": [
+        "11",
+        0
+      ]
+    }
+  },
+  "26": {
+    "class_type": "FluxGuidance",
+    "inputs": {
+      "guidance": 3.5,
+      "conditioning": [
+        "6",
+        0
+      ]
+    }
+  },
+  "5": {
+    "class_type": "EmptySD3LatentImage",
+    "inputs": {
+      "width": 1024,
+      "height": 1024,
+      "batch_size": 1
+    }
+  },
+  "25": {
+    "class_type": "RandomNoise",
+    "inputs": {
+      "noise_seed": 0
+    }
+  },
+  "16": {
+    "class_type": "KSamplerSelect",
+    "inputs": {
+      "sampler_name": "euler"
+    }
+  },
+  "17": {
+    "class_type": "BasicScheduler",
+    "inputs": {
+      "scheduler": "simple",
+      "steps": 24,
+      "denoise": 1.0,
+      "model": [
+        "10",
+        0
+      ]
+    }
+  },
+  "22": {
+    "class_type": "BasicGuider",
+    "inputs": {
+      "model": [
+        "10",
+        0
+      ],
+      "conditioning": [
+        "26",
+        0
+      ]
+    }
+  },
+  "13_sampler": {
+    "class_type": "SamplerCustomAdvanced",
+    "inputs": {
+      "noise": [
+        "25",
+        0
+      ],
+      "guider": [
+        "22",
+        0
+      ],
+      "sampler": [
+        "16",
+        0
+      ],
+      "sigmas": [
+        "17",
+        0
+      ],
+      "latent_image": [
+        "5",
+        0
+      ]
+    }
+  },
+  "8": {
+    "class_type": "VAEDecode",
+    "inputs": {
+      "samples": [
+        "13_sampler",
+        0
+      ],
+      "vae": [
+        "13",
+        0
+      ]
+    }
+  },
+  "9": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "filename_prefix": "medartis/gen",
+      "images": [
+        "92",
+        0
+      ]
+    }
+  },
+  "90": {
+    "class_type": "UpscaleModelLoader",
+    "inputs": {
+      "model_name": "RealESRGAN_x4plus.pth"
+    }
+  },
+  "91": {
+    "class_type": "ImageUpscaleWithModel",
+    "inputs": {
+      "upscale_model": [
+        "90",
+        0
+      ],
+      "image": [
+        "8",
+        0
+      ]
+    }
+  },
+  "92": {
+    "class_type": "ImageScale",
+    "inputs": {
+      "image": [
+        "91",
+        0
+      ],
+      "upscale_method": "lanczos",
+      "width": 1080,
+      "height": 1080,
+      "crop": "disabled"
+    }
+  },
+  "_upscale": "Generate NATIVE (Turbo 512, Flux 1024) then upscale to the canvas. Pushing a model past its training resolution is what duplicates subjects. The plugin patches 90.model_name and 92.width/height; if no upscale model is installed it rewires 9.images back to the VAEDecode."
+}
