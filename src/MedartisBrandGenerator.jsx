@@ -6791,6 +6791,7 @@ const GenerateSection = ({
   const [jobId, setJobId] = useState(null);
   const [elapsed, setElapsed] = useState(0);
   const [error, setError] = useState(null);
+  const [blockedTerm, setBlockedTerm] = useState(null);
   const [results, setResults] = useState([]);
   const [lastMeta, setLastMeta] = useState(null);
 
@@ -6833,7 +6834,7 @@ const GenerateSection = ({
   };
 
   const generate = async () => {
-    setBusy(true); setError(null); setJob({ status: 'queued', progress: 0 });
+    setBusy(true); setError(null); setBlockedTerm(null); setJob({ status: 'queued', progress: 0 });
     try {
       const r = await fetch('/api/gen/image', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -6857,7 +6858,13 @@ const GenerateSection = ({
         }),
       });
       const sub = await r.json();
-      if (!r.ok) throw new Error(sub.error || 'Request rejected.');
+      if (!r.ok) {
+        // The server names the exact term that tripped the gate. Throwing it away
+        // turns a precise refusal into a riddle — the user then has to guess which
+        // of twelve innocent-looking words was the problem.
+        if (sub.term) setBlockedTerm(sub.term);
+        throw new Error(sub.error || 'Request rejected.');
+      }
       setJobId(sub.jobId);
       const done = await poll(sub.jobId);
       setLastMeta(done);
@@ -7228,6 +7235,32 @@ const GenerateSection = ({
           {error && (
             <div style={{ marginTop: 8, fontSize: 10.5, color: '#C8200A', fontFamily: BRAND.mono, lineHeight: 1.5 }}>
               ERROR · {error}
+              {/* A refusal that won't say WHICH word it objected to is a riddle.
+                  The server knows; show it, and say what to write instead. */}
+              {blockedTerm && (
+                <div style={{
+                  marginTop: 7, padding: '8px 9px', background: BRAND.paper,
+                  border: `1px solid ${BRAND.ink100}`, color: BRAND.ink600, fontSize: 9.5, lineHeight: 1.6,
+                }}>
+                  <div style={{ color: BRAND.ink, letterSpacing: '0.06em' }}>
+                    TRIGGERED BY: “{String(blockedTerm).toUpperCase()}”
+                  </div>
+                  <div style={{ marginTop: 5, fontFamily: BRAND.display, fontSize: 11, color: BRAND.ink600, letterSpacing: 0 }}>
+                    This is the Medartis safety gate, not the model. A generated human
+                    presented as a surgeon is a regulatory and credibility problem for a
+                    medical-device manufacturer — so people-as-clinicians stay real
+                    photography (Canto, § 07).
+                    <div style={{ marginTop: 6 }}>
+                      Generate the <b>place</b>, not the person: “an empty, immaculate
+                      operating theatre, cool daylight, instruments laid out on a tray”.
+                    </div>
+                    <div style={{ marginTop: 6, color: BRAND.ink300, fontSize: 10 }}>
+                      The rule lives in <code>ai/prompt/house_style.json</code> → <code>blocklist</code>.
+                      Changing it is a brand-owner decision, not a prompt-engineering one.
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
