@@ -311,6 +311,164 @@ async function resolveWorkflow(wf) {
   return { wf, usedLora: haveLora ? lora : null, engine: 'flux' };
 }
 
+// ═══ CONDITIONING ═══════════════════════════════════════════════════════════
+// Text alone cannot hold a house style, and it certainly cannot hold a LAYOUT.
+// Two different problems, two different mechanisms:
+//
+//   1 · IP-ADAPTER — "look like THIS". A reference image from the real Medartis
+//       library steers colour, light and material without any trained LoRA. It
+//       conditions the MODEL branch.
+//
+//   2 · CONTROLNET — "compose like THIS". A control map fixes where things sit.
+//       It conditions the CONDITIONING branch (positive AND negative), which is
+//       why it can hold a composition that the prompt would otherwise wander from.
+//       The layout canvas emits its own map (see buildLayoutControlMap in the
+//       client): the model then composes AROUND the type and the mark, instead of
+//       us cropping a photo afterwards and hoping.
+//
+// Both are OPTIONAL and both DEGRADE HONESTLY: if the custom nodes or the model
+// files are not installed, we run the plain graph and tell the client exactly
+// what was skipped and why. The panel must never imply conditioning it did not get.
+const CONTROL_HINTS = {
+  depth:    ['depth'],
+  canny:    ['canny'],
+  scribble: ['scribble', 'sketch', 'lineart'],
+  pose:     ['openpose', 'pose', 'dwpose'],
+};
+// Preferred preprocessor per type, best first. Only used when the client sends a
+// PHOTO to derive a map from; a synthesized layout map is already a control map
+// and must be passed through untouched.
+const PREPROCESSORS = {
+  depth:    ['DepthAnythingV2Preprocessor', 'DepthAnythingPreprocessor', 'MiDaS-DepthMapPreprocessor', 'Zoe-DepthMapPreprocessor'],
+  canny:    ['CannyEdgePreprocessor', 'Canny'],
+  scribble: ['ScribblePreprocessor', 'Scribble_XDoG_Preprocessor', 'CannyEdgePreprocessor', 'Canny'],
+  pose:     ['DWPreprocessor', 'OpenposePreprocessor'],
+};
+
+async function conditioningCapabilities() {
+  const info = await comfyObjectInfo();
+  const has = (n) => !!info?.[n];
+  const opts = (node, input) => comboOptions(info?.[node]?.input?.required?.[input]);
+  const controlnets = opts('ControlNetLoader', 'control_net_name');
+  const ipFiles     = opts('IPAdapterModelLoader', 'ipadapter_file');
+  return {
+    // Core ships ControlNetApplyAdvanced; the MODELS are the thing people miss.
+    controlNode: has('ControlNetLoader') && has('ControlNetApplyAdvanced'),
+    controlnets,
+    // ComfyUI_IPAdapter_plus. UnifiedLoader resolves the ipadapter + clip_vision
+    // pair itself, which is far more robust than us guessing two filenames.
+    ipNode: has('IPAdapterUnifiedLoader') && has('IPAdapterAdvanced'),
+    ipFiles,
+    preprocessors: Object.fromEntries(
+      Object.entries(PREPROCESSORS).map(([k, list]) => [k, list.find(has) || null])
+    ),
+    controlFor: (type) => {
+      const hints = CONTROL_HINTS[type] || [];
+      return controlnets.find((f) => hints.some((h) => f.toLowerCase().includes(h))) || null;
+    },
+  };
+}
+
+/**
+ * Inject IP-Adapter and/or ControlNet into a resolved SDXL graph.
+ * SDXL only — Flux ControlNets are per-checkpoint and the union models are not
+ * interchangeable, so pretending it works there would just move the failure to
+ * ComfyUI's validator. Returns what was ACTUALLY applied.
+ */
+async function applyConditioning(wf, b, engine) {
+  const out = { ip: false, control: false, controlType: null, controlModel: null, preprocessor: null, notes: [] };
+  const wantIp = !!b.refImage;
+  const wantControl = !!b.controlImage;
+  if (!wantIp && !wantControl) return out;
+
+  if (engine === 'flux') {
+    out.notes.push('Conditioning is SDXL-only — Flux ControlNet/IP-Adapter weights are checkpoint-specific. Switch the engine to SDXL.');
+    return out;
+  }
+  const ks = wf['3'];
+  if (!ks || ks.class_type !== 'KSampler') {
+    out.notes.push('This workflow has no KSampler to condition.');
+    return out;
+  }
+
+  const caps = await conditioningCapabilities();
+
+  // 1 · IP-ADAPTER — conditions the MODEL branch.
+  if (wantIp) {
+    if (!caps.ipNode) {
+      out.notes.push('IP-Adapter skipped: ComfyUI_IPAdapter_plus is not installed (custom_nodes).');
+    } else if (!caps.ipFiles.length) {
+      out.notes.push('IP-Adapter skipped: no IP-Adapter weights in models/ipadapter.');
+    } else {
+      const name = await comfyUploadImage(b.refImage);
+      wf['200'] = { class_type: 'LoadImage', inputs: { image: name, upload: 'image' } };
+      wf['201'] = { class_type: 'IPAdapterUnifiedLoader', inputs: { model: ks.inputs.model, preset: 'STANDARD (medium strength)' } };
+      wf['202'] = {
+        class_type: 'IPAdapterAdvanced',
+        inputs: {
+          model: ['201', 0], ipadapter: ['201', 1], image: ['200', 0],
+          weight: clampNum(b.refStrength ?? 0.65, 0, 1.5),
+          weight_type: 'style transfer',   // steer look, not subject — that is the point
+          combine_embeds: 'concat',
+          start_at: 0.0, end_at: clampNum(b.refEndAt ?? 0.85, 0.1, 1.0),
+          embeds_scaling: 'V only',
+        },
+      };
+      ks.inputs.model = ['202', 0];
+      out.ip = true;
+    }
+  }
+
+  // 2 · CONTROLNET — conditions the CONDITIONING branch (positive AND negative).
+  if (wantControl) {
+    const type = ['depth', 'canny', 'scribble', 'pose'].includes(b.controlType) ? b.controlType : 'depth';
+    const model = caps.controlFor(type);
+    if (!caps.controlNode) {
+      out.notes.push('ControlNet skipped: this ComfyUI has no ControlNetLoader.');
+    } else if (!model) {
+      out.notes.push(`ControlNet skipped: no ${type} model in models/controlnet.`);
+    } else {
+      const name = await comfyUploadImage(b.controlImage);
+      wf['210'] = { class_type: 'LoadImage', inputs: { image: name, upload: 'image' } };
+      let imgRef = ['210', 0];
+
+      // A map the LAYOUT synthesized is already a control map — running a depth
+      // estimator over it would just estimate the depth OF THE DIAGRAM. Only a
+      // photographic source gets preprocessed.
+      const pre = b.controlPreprocess ? caps.preprocessors[type] : null;
+      if (b.controlPreprocess && !pre) {
+        out.notes.push(`No ${type} preprocessor installed — feeding the source image straight to ControlNet.`);
+      } else if (pre) {
+        wf['211'] = pre === 'Canny'
+          ? { class_type: 'Canny', inputs: { image: imgRef, low_threshold: 0.15, high_threshold: 0.4 } }
+          : { class_type: pre, inputs: { image: imgRef, resolution: 1024 } };
+        imgRef = ['211', 0];
+        out.preprocessor = pre;
+      }
+
+      wf['212'] = { class_type: 'ControlNetLoader', inputs: { control_net_name: model } };
+      wf['213'] = {
+        class_type: 'ControlNetApplyAdvanced',
+        inputs: {
+          positive: ks.inputs.positive,
+          negative: ks.inputs.negative,
+          control_net: ['212', 0],
+          image: imgRef,
+          strength: clampNum(b.controlStrength ?? 0.75, 0, 2),
+          start_percent: 0.0,
+          end_percent: clampNum(b.controlEndAt ?? 0.85, 0.1, 1.0),
+        },
+      };
+      ks.inputs.positive = ['213', 0];
+      ks.inputs.negative = ['213', 1];
+      out.control = true;
+      out.controlType = type;
+      out.controlModel = model;
+    }
+  }
+  return out;
+}
+
 async function comfyUploadImage(dataUrl) {
   const [, b64] = dataUrl.split(',');
   const buf = Buffer.from(b64, 'base64');
@@ -540,6 +698,23 @@ export default function genai() {
               if (!out.hasLora) out.missing.push(`${LORA()} — not trained yet · generating with BASE Flux (no house look)`);
               if (!m.unets.includes('flux1-fill-dev.safetensors')) out.missing.push('flux1-fill-dev.safetensors (needed for Expand)');
               out.canExpand = m.unets.includes('flux1-fill-dev.safetensors');
+
+              // What can this ComfyUI actually CONDITION on? The panel offers only
+              // what the box can honour, and names what is missing — a greyed-out
+              // control with a reason beats a control that silently does nothing.
+              try {
+                const caps = await conditioningCapabilities();
+                out.conditioning = {
+                  ip: caps.ipNode && caps.ipFiles.length > 0,
+                  control: caps.controlNode && caps.controlnets.length > 0,
+                  controlTypes: Object.keys(CONTROL_HINTS).filter((t) => !!caps.controlFor(t)),
+                  preprocessors: caps.preprocessors,
+                  controlnets: caps.controlnets,
+                };
+                if (!caps.ipNode) out.conditioning.ipMissing = 'ComfyUI_IPAdapter_plus (custom_nodes)';
+                else if (!caps.ipFiles.length) out.conditioning.ipMissing = 'IP-Adapter weights (models/ipadapter)';
+                if (!out.conditioning.controlTypes.length) out.conditioning.controlMissing = 'ControlNet models (models/controlnet)';
+              } catch { /* conditioning is optional — never break /status over it */ }
             } catch (e) {
               // It IS running — we just couldn't read its node list. Say that.
               out.providers.push('local');
@@ -631,6 +806,17 @@ export default function genai() {
             configureUpscale(wf, target, upscaler);
 
             const { wf: ready, usedLora, engine } = await resolveWorkflow(wf);
+
+            // CONDITIONING — reference look (IP-Adapter) and/or composition
+            // (ControlNet, incl. the map the layout canvas emits). Applied AFTER
+            // resolveWorkflow so it sees the real model/positive/negative wiring.
+            let conditioning = { ip: false, control: false, notes: [] };
+            try {
+              conditioning = await applyConditioning(ready, b, engine);
+            } catch (e) {
+              conditioning = { ip: false, control: false, notes: [`Conditioning failed: ${e.message}`] };
+            }
+
             const id = newJob();
             // negativeHonoured: whether the negative prompt was genuinely consumed.
             // Flux at CFG 1 ignores it entirely — say so rather than pretend.
@@ -638,6 +824,7 @@ export default function genai() {
             const meta = {
               prompt: positive, width, height, target, upscaler, lora: usedLora, engine,
               negative, negativeHonoured, realism: b.realism !== false,
+              conditioning,
             };
             patchJob(id, meta);
             comfyRun(id, ready).catch((e) => patchJob(id, { status: 'error', error: e.message }));

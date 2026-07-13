@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { jsPDF } from 'jspdf';
 import { svg2pdf } from 'svg2pdf.js';
+import { BROCHURE_TYPES, BROCHURE_TYPE_KEYS, defaultBrochurePages, makeBrochurePage } from './brochure';
 import QRCodeStyling from 'qr-code-styling';
 import { readPsd, initializeCanvas } from 'ag-psd';
 
@@ -80,6 +81,8 @@ const FORMATS = {
   // ── PRINT · paged ─────────────────────────────────────────
   // printable + printDpi enable PDF export with bleed + crop marks.
   'a3-portrait':     { label: 'A3 Portrait · 300 dpi', w: 3508, h: 4961, ratio: 'A3',     group: 'Print · paged',   wmPct: 0.27, printable: true, printDpi: 300 },
+  'brochure-a4':     { label: 'Brochure A4 · 300 dpi', w: 2480, h: 3508, ratio: 'A4',    group: 'Print · brochure', wmPct: 0.22, printable: true, printDpi: 300, brochure: true },
+  'brochure-a5':     { label: 'Brochure A5 · 300 dpi', w: 1748, h: 2480, ratio: 'A5',    group: 'Print · brochure', wmPct: 0.22, printable: true, printDpi: 300, brochure: true },
   'a4-portrait':     { label: 'A4 Portrait · 300 dpi', w: 2480, h: 3508, ratio: 'A4',     group: 'Print · paged',   wmPct: 0.27, printable: true, printDpi: 300 },
   'a4-landscape':    { label: 'A4 Landscape · 300 dpi',w: 3508, h: 2480, ratio: 'A4',     group: 'Print · paged',   wmPct: 0.27, printable: true, printDpi: 300 },
   'a5-portrait':     { label: 'A5 Portrait · 300 dpi', w: 1748, h: 2480, ratio: 'A5',     group: 'Print · paged',   wmPct: 0.27, printable: true, printDpi: 300 },
@@ -1435,6 +1438,682 @@ function computeSplitGeom(frame, opts, textPos) {
   };
 }
 
+// ═══ THE LAYOUT AS AN INPUT DEVICE ═══════════════════════════════════
+// Normally the pipeline runs one way: generate a photo, then crop it and hope the
+// headline lands somewhere survivable. This inverts it. The layout — where the
+// type sits, where the mark sits, how the frame is inset and tilted — is turned
+// into a CONTROL MAP, and the model is asked to compose AROUND it.
+//
+// The map is derived, not guessed: we render the live layout with NO photograph,
+// so what remains on the canvas is exactly the type and the mark. Those pixels
+// become KEEP-CLEAR cells. The largest rectangle free of them is the SUBJECT
+// REGION — the only place the picture is allowed to carry its content.
+//
+// One rule this must never break: the map contains NO LETTERFORMS. Feeding the
+// actual glyph edges to a scribble/canny ControlNet would ask the model to draw
+// text-shaped objects — the exact opposite of leaving room for type. So we work
+// from coarse occupancy cells and emit boxes, gradients and guides only.
+
+/** An <img> (upload, Canto, generated) → a PNG data URL we can post to the server. */
+function imgToDataUrl(img, maxEdge = 1024) {
+  if (!img) return null;
+  const w = img.naturalWidth || img.width, h = img.naturalHeight || img.height;
+  const k = Math.min(1, maxEdge / Math.max(w, h));
+  const c = document.createElement('canvas');
+  c.width = Math.max(1, Math.round(w * k));
+  c.height = Math.max(1, Math.round(h * k));
+  c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+  try { return c.toDataURL('image/png'); }
+  catch { return null; }   // a cross-origin image taints the canvas — say nothing, offer upload
+}
+
+const CTRL_COLS = 48;   // occupancy grid on the long edge
+
+/** Coarse occupancy of ink (type + mark) over a photograph-free layout render. */
+function layoutOccupancy(src, bgHex) {
+  const ratio = src.width / src.height;
+  const cols = ratio >= 1 ? CTRL_COLS : Math.max(12, Math.round(CTRL_COLS * ratio));
+  const rows = ratio >= 1 ? Math.max(12, Math.round(CTRL_COLS / ratio)) : CTRL_COLS;
+  const small = document.createElement('canvas');
+  small.width = cols; small.height = rows;
+  const sc = small.getContext('2d', { willReadFrequently: true });
+  sc.drawImage(src, 0, 0, cols, rows);
+  const d = sc.getImageData(0, 0, cols, rows).data;
+  const bg = [1, 3, 5].map((i) => parseInt(bgHex.slice(i, i + 2), 16));
+  const grid = [];
+  for (let y = 0; y < rows; y++) {
+    const row = [];
+    for (let x = 0; x < cols; x++) {
+      const i = (y * cols + x) * 4;
+      const diff = Math.abs(d[i] - bg[0]) + Math.abs(d[i + 1] - bg[1]) + Math.abs(d[i + 2] - bg[2]);
+      row.push(diff > 34 ? 1 : 0);   // 1 = occupied by type/mark → keep clear
+    }
+    grid.push(row);
+  }
+  return { grid, cols, rows };
+}
+
+/** Maximal all-zero rectangle (classic histogram sweep) — the subject region. */
+function largestFreeRect({ grid, cols, rows }) {
+  const heights = new Array(cols).fill(0);
+  let best = { x: 0, y: 0, w: cols, h: rows, area: 0 };
+  for (let y = 0; y < rows; y++) {
+    for (let x = 0; x < cols; x++) heights[x] = grid[y][x] ? 0 : heights[x] + 1;
+    const stack = [];
+    for (let x = 0; x <= cols; x++) {
+      const h = x === cols ? 0 : heights[x];
+      let start = x;
+      while (stack.length && stack[stack.length - 1].h >= h) {
+        const top = stack.pop();
+        const area = top.h * (x - top.x);
+        if (area > best.area) best = { x: top.x, y: y - top.h + 1, w: x - top.x, h: top.h, area };
+        start = top.x;
+      }
+      stack.push({ x: start, h });
+    }
+  }
+  return best;
+}
+
+/**
+ * Build a ControlNet map from the live layout.
+ * @param src   a photograph-free render of the current layout
+ * @param bgHex the palette background it was rendered on
+ * @param kind  'depth' | 'canny' | 'scribble'
+ * Returns a PNG data URL sized for the model, or null.
+ */
+function buildLayoutControlMapFrom(src, bgHex, kind = 'depth') {
+  const occ = layoutOccupancy(src, bgHex);
+  const rect = largestFreeRect(occ);
+  if (rect.area < occ.cols * occ.rows * 0.06) return null;  // no room to compose in
+
+  // Model-side resolution, same aspect as the canvas.
+  const long = 1024;
+  const ar = src.width / src.height;
+  const W = Math.round(ar >= 1 ? long : long * ar);
+  const H = Math.round(ar >= 1 ? long / ar : long);
+  const c = document.createElement('canvas');
+  c.width = W; c.height = H;
+  const ctx = c.getContext('2d');
+
+  const cw = W / occ.cols, ch = H / occ.rows;
+  const R = { x: rect.x * cw, y: rect.y * ch, w: rect.w * cw, h: rect.h * ch };
+  const horizon = R.y + R.h * 0.62;   // where the ground meets the air — a real
+                                      // composition cue, not decoration
+
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, W, H);
+
+  if (kind === 'depth') {
+    // White = NEAR. The subject region gets the near-field; everywhere the type
+    // and the mark live stays black = far and empty, so the model puts recessive
+    // background behind the headline instead of a face.
+    const g = ctx.createRadialGradient(
+      R.x + R.w / 2, horizon, Math.min(R.w, R.h) * 0.05,
+      R.x + R.w / 2, horizon, Math.max(R.w, R.h) * 0.72
+    );
+    g.addColorStop(0, '#FFFFFF');
+    g.addColorStop(0.55, '#9A9A9A');
+    g.addColorStop(1, '#0E0E0E');
+    ctx.fillStyle = g;
+    ctx.fillRect(R.x, R.y, R.w, R.h);
+    // Hard-clear every occupied cell: the type's own area must read as distance.
+    ctx.fillStyle = '#000';
+    for (let y = 0; y < occ.rows; y++) {
+      for (let x = 0; x < occ.cols; x++) {
+        if (occ.grid[y][x]) ctx.fillRect(x * cw - 1, y * ch - 1, cw + 2, ch + 2);
+      }
+    }
+    // Soften — a blocky depth map produces blocky geometry.
+    const blur = document.createElement('canvas');
+    blur.width = W; blur.height = H;
+    const bc = blur.getContext('2d');
+    bc.filter = `blur(${Math.round(long * 0.012)}px)`;
+    bc.drawImage(c, 0, 0);
+    return blur.toDataURL('image/png');
+  }
+
+  // canny / scribble: pure structure. Edges ONLY inside the subject region, so the
+  // keep-clear areas contain no edges at all — nothing for the model to hang
+  // detail on exactly where the headline is going.
+  const stroke = kind === 'scribble' ? Math.max(4, long * 0.006) : Math.max(2, long * 0.002);
+  ctx.strokeStyle = '#FFF';
+  ctx.lineWidth = stroke;
+  ctx.lineCap = 'round';
+  ctx.strokeRect(R.x + stroke, R.y + stroke, R.w - stroke * 2, R.h - stroke * 2);
+  ctx.beginPath();
+  ctx.moveTo(R.x + stroke, horizon);
+  ctx.lineTo(R.x + R.w - stroke, horizon);
+  ctx.stroke();
+  // Rule-of-thirds verticals, short — enough to seat a subject, not to dictate it.
+  ctx.lineWidth = Math.max(1, stroke * 0.6);
+  for (const t of [1 / 3, 2 / 3]) {
+    const x = R.x + R.w * t;
+    ctx.beginPath();
+    ctx.moveTo(x, horizon - R.h * 0.16);
+    ctx.lineTo(x, horizon + R.h * 0.16);
+    ctx.stroke();
+  }
+  return c.toDataURL('image/png');
+}
+
+// ─── BROCHURE PANEL (§ 03) ───────────────────────────────────────────
+// The page list IS the document outline. Reorder here, and the folios, the
+// running heads and the PDF all follow — there is no second source of truth.
+function BrochurePanel({
+  pages, idx, title, onTitle, onGoTo, onAdd, onDelete, onMove, onType, onField, hasImg,
+  partners = [], onAddPartner, onRemovePartner,
+}) {
+  const page = pages[idx];
+  if (!page) return null;
+  const def = BROCHURE_TYPES[page.type] || {};
+  const fld = {
+    width: '100%', padding: '9px 10px', border: `1px solid ${BRAND.ink100}`,
+    background: BRAND.paper, color: BRAND.ink, fontSize: 12,
+    fontFamily: BRAND.display, borderRadius: 0, boxSizing: 'border-box',
+  };
+  const lab = {
+    display: 'block', fontFamily: BRAND.mono, fontSize: 9, letterSpacing: '0.12em',
+    textTransform: 'uppercase', color: BRAND.ink600, marginBottom: 4,
+  };
+  const mini = (active) => ({
+    padding: '4px 7px', fontFamily: BRAND.mono, fontSize: 9.5, cursor: 'pointer',
+    background: active ? BRAND.ink : 'transparent',
+    color: active ? BRAND.bone00 : BRAND.ink600,
+    border: `1px solid ${active ? BRAND.ink : BRAND.ink100}`, borderRadius: 0,
+    letterSpacing: '0.06em',
+  });
+
+  return (
+    <div>
+      <label style={lab}>Running head (appears on every inner page)</label>
+      <input style={{ ...fld, marginBottom: 12 }} value={title} onChange={(e) => onTitle(e.target.value)} />
+
+      {/* OUTLINE ─ the document, in order */}
+      <div style={lab}>Pages · {pages.length}</div>
+      <div style={{
+        border: `1px solid ${BRAND.ink100}`, background: BRAND.paper,
+        maxHeight: 190, overflowY: 'auto', marginBottom: 8,
+      }}>
+        {pages.map((p, i) => (
+          <div key={p.id} onClick={() => onGoTo(i)}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 6, padding: '6px 8px', cursor: 'pointer',
+              background: i === idx ? BRAND.bone : 'transparent',
+              borderLeft: `3px solid ${i === idx ? BRAND.goldDeep : 'transparent'}`,
+              borderBottom: `1px solid ${BRAND.ink100}`,
+            }}>
+            <span style={{ fontFamily: BRAND.mono, fontSize: 10, color: BRAND.ink300, minWidth: 18 }}>
+              {String(i + 1).padStart(2, '0')}
+            </span>
+            <span style={{ flex: 1, fontSize: 11.5, color: BRAND.ink, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {BROCHURE_TYPES[p.type]?.label || p.type}
+              <span style={{ color: BRAND.ink300 }}>{p.f?.headline ? ` · ${p.f.headline}` : ''}</span>
+            </span>
+            {hasImg(i) && <span title="has an image" style={{ fontSize: 9, color: BRAND.goldDeep }}>◗</span>}
+            <button title="Move up"   onClick={(e) => { e.stopPropagation(); onMove(i, -1); }} style={mini(false)}>↑</button>
+            <button title="Move down" onClick={(e) => { e.stopPropagation(); onMove(i, 1); }}  style={mini(false)}>↓</button>
+            <button title="Delete page" onClick={(e) => { e.stopPropagation(); onDelete(i); }} style={mini(false)}>×</button>
+          </div>
+        ))}
+      </div>
+
+      <div style={lab}>Add a page</div>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: 14 }}>
+        {BROCHURE_TYPE_KEYS.map((k) => (
+          <button key={k} onClick={() => onAdd(k)} title={BROCHURE_TYPES[k].hint} style={mini(false)}>
+            + {BROCHURE_TYPES[k].label}
+          </button>
+        ))}
+      </div>
+
+      {/* THIS PAGE */}
+      <div style={{ borderTop: `1px solid ${BRAND.ink100}`, paddingTop: 12 }}>
+        <label style={lab}>Page {idx + 1} · type</label>
+        <select style={{ ...fld, marginBottom: 6 }} value={page.type} onChange={(e) => onType(idx, e.target.value)}>
+          {BROCHURE_TYPE_KEYS.map((k) => <option key={k} value={k}>{BROCHURE_TYPES[k].label}</option>)}
+        </select>
+        <div style={{ fontFamily: BRAND.mono, fontSize: 9.5, color: BRAND.ink300, marginBottom: 12, letterSpacing: '0.04em' }}>
+          {def.hint}{def.image ? ' · § 06 sets this page’s image' : ' · no image on this type'}
+        </div>
+
+        {(def.fields || []).map((fd) => (
+          <div key={fd.key} style={{ marginBottom: 10 }}>
+            <label style={lab}>{fd.label}</label>
+            {fd.multiline
+              ? <textarea style={{ ...fld, resize: 'vertical', lineHeight: 1.5 }} rows={fd.key === 'body' ? 6 : 3}
+                          value={page.f[fd.key] ?? ''} placeholder={fd.default}
+                          onChange={(e) => onField(idx, fd.key, e.target.value)} />
+              : <input style={fld} value={page.f[fd.key] ?? ''} placeholder={fd.default}
+                       onChange={(e) => onField(idx, fd.key, e.target.value)} />}
+          </div>
+        ))}
+
+        {page.type === 'partners' && (
+          <div style={{ borderTop: `1px solid ${BRAND.ink100}`, paddingTop: 10, marginTop: 4 }}>
+            <label style={lab}>Partner logos · {partners.length}</label>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 8 }}>
+              {partners.map((l) => (
+                <div key={l.id} title={l.name} style={{
+                  position: 'relative', width: 74, height: 44, border: `1px solid ${BRAND.ink100}`,
+                  background: BRAND.paper, display: 'flex', alignItems: 'center', justifyContent: 'center',
+                }}>
+                  <img src={l.src} alt={l.name} style={{ maxWidth: '82%', maxHeight: '70%', objectFit: 'contain' }} />
+                  <button onClick={() => onRemovePartner(l.id)} title="Remove" style={{
+                    position: 'absolute', top: -1, right: -1, width: 15, height: 15, lineHeight: '13px',
+                    padding: 0, fontSize: 10, cursor: 'pointer', background: BRAND.ink,
+                    color: BRAND.bone00, border: 'none', borderRadius: 0,
+                  }}>×</button>
+                </div>
+              ))}
+            </div>
+            <label style={{
+              display: 'block', padding: '9px', background: BRAND.paper, textAlign: 'center',
+              border: `1px dashed ${BRAND.ink300}`, cursor: 'pointer',
+              fontFamily: BRAND.mono, fontSize: 9.5, letterSpacing: '0.12em',
+              textTransform: 'uppercase', color: BRAND.ink600,
+            }}>
+              + ADD PARTNER LOGO · PNG / SVG
+              <input type="file" accept="image/*" style={{ display: 'none' }}
+                     onChange={(e) => { const f = e.target.files?.[0]; if (f) onAddPartner(f); e.target.value = ''; }} />
+            </label>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ═══ BROCHURE ENGINE ═════════════════════════════════════════════════
+// Page TYPES carry the layout, so a 40-page document stays on-grid without
+// anyone re-inventing a spread. Pure canvas draws, so the live preview and the
+// print PDF are the same code path. See src/brochure.js for the type model.
+const BR = {
+  margin: 0.085,   // page margin, × page width
+  gutter: 0.042,   // column gutter, × page width
+};
+
+// Word-wrapped paragraph flow. Returns the y AFTER the block, plus any lines that
+// did not fit — which is what lets a letter run from column one into column two.
+function brFlow(ctx, text, x, y, w, size, o = {}) {
+  const {
+    color = BRAND.ink800, weight = 400, family = BRAND.display,
+    italic = false, lh = 1.5, paraGap = 0.55, maxY = Infinity, align = 'left',
+  } = o;
+  ctx.font = `${italic ? 'italic ' : ''}${weight} ${size}px ${family}`;
+  ctx.fillStyle = color;
+  let cy = y;
+  const paras = (text || '').split('\n');
+  const rest = [];
+  let stopped = false;
+  for (let pi = 0; pi < paras.length; pi++) {
+    const p = paras[pi].trim();
+    if (!p) { cy += size * paraGap; continue; }
+    const lines = wrapText(ctx, p, w);
+    for (const line of lines) {
+      if (cy + size > maxY) stopped = true;
+      if (stopped) { rest.push(line); continue; }
+      const lx = align === 'center' ? x + (w - ctx.measureText(line).width) / 2 : x;
+      ctx.fillText(line, lx, cy + size);
+      cy += size * lh;
+    }
+    if (!stopped && pi < paras.length - 1) cy += size * paraGap;
+  }
+  return { y: cy, rest: rest.join(' ') };
+}
+
+// Tracked, uppercase label (mono voice) — section marks, kickers, folios.
+function brLabel(ctx, text, x, y, size, color, o = {}) {
+  const { family = BRAND.mono, weight = 500, tracking = 0.14, align = 'left', maxX = null } = o;
+  ctx.font = `${weight} ${size}px ${family}`;
+  ctx.fillStyle = color;
+  const t = (text || '').toUpperCase();
+  const ls = size * tracking;
+  const total = [...t].reduce((s, ch) => s + ctx.measureText(ch).width + ls, -ls);
+  let cx = align === 'right' ? (maxX ?? x) - total : x;
+  for (const ch of t) { ctx.fillText(ch, cx, y + size); cx += ctx.measureText(ch).width + ls; }
+  return y + size;
+}
+
+// The gold INITIATOR rule: kicker → rule → headline. Never decoration afterwards.
+function brRule(ctx, x, y, w, h, color) { ctx.fillStyle = color; ctx.fillRect(x, y, w, h); }
+
+// Running head + folio. Alternates like a real spread (recto/verso).
+function brFurniture(ctx, frame, page, opts, dark) {
+  const { w, h } = frame;
+  const m = w * BR.margin;
+  const n = opts.pageNumber ?? 1;
+  const recto = n % 2 === 1;
+  const muted = dark ? 'rgba(250,248,240,0.55)' : BRAND.ink600;
+  const size = w * 0.0095;
+  const section = (page.f?.eyebrow || opts.brochureTitle || 'MEDARTIS').toString();
+  brLabel(ctx, section, m, h * 0.045, size, muted, { tracking: 0.16 });
+  ctx.fillStyle = dark ? 'rgba(250,248,240,0.18)' : BRAND.ink100;
+  ctx.fillRect(m, h * 0.045 + size * 2.1, w - m * 2, Math.max(1, w * 0.0008));
+  brLabel(ctx, String(n), recto ? w - m : m, h - h * 0.055, size * 1.05, muted,
+    { align: recto ? 'right' : 'left', maxX: w - m, family: BRAND.display, weight: 600, tracking: 0.06 });
+  brLabel(ctx, 'medartis.com', recto ? m : w - m, h - h * 0.055, size, muted,
+    { align: recto ? 'left' : 'right', maxX: w - m });
+}
+
+function brPartnerWall(ctx, frame, partners, x, y, w, maxH) {
+  const logos = (partners?.logos || []).filter((l) => l && l.img);
+  if (!logos.length) return y;
+  const cols = Math.min(3, logos.length);
+  const cellW = w / cols;
+  const cellH = Math.min(maxH / Math.ceil(logos.length / cols), frame.h * 0.11);
+  logos.forEach((l, i) => {
+    const cx = x + (i % cols) * cellW;
+    const cy = y + Math.floor(i / cols) * cellH;
+    const ar = (l.img.naturalWidth || l.img.width) / (l.img.naturalHeight || l.img.height || 1);
+    let dh = cellH * 0.6, dw = dh * ar;
+    if (dw > cellW * 0.78) { dw = cellW * 0.78; dh = dw / ar; }
+    ctx.drawImage(l.img, cx + (cellW - dw) / 2, cy + (cellH - dh) / 2, dw, dh);
+  });
+  return y + Math.ceil(logos.length / cols) * cellH;
+}
+
+function drawBrochurePage(ctx, frame, image, opts) {
+  const page = opts.brochurePage;
+  if (!page) return;
+  const { w, h } = frame;
+  const bleed = frame.bleedPx || 0;
+  const f = page.f || {};
+  const type = page.type;
+  const fit = opts.fit;
+  const m = w * BR.margin;
+  const gut = w * BR.gutter;
+  const colW = (w - m * 2 - gut) / 2;
+
+  // Dark pages carry the moments; light pages carry the reading.
+  const DARK = ['cover', 'quote', 'stats', 'backCover'].includes(type);
+  const pal = DARK
+    ? { bg: BRAND.coal,  ink: BRAND.bone00, muted: BRAND.cream100, mode: 'dark' }
+    : { bg: BRAND.paper, ink: BRAND.ink,    muted: BRAND.ink600,   mode: 'light' };
+  // The brand gold is only ~2:1 on paper — it FAILS WCAG as a light-surface
+  // accent (see BRAND CHECK). Use the accessible deep gold on light pages.
+  const accent = DARK ? BRAND.gold : BRAND.goldDeep;
+
+  ctx.fillStyle = pal.bg;
+  ctx.fillRect(-bleed, -bleed, w + bleed * 2, h + bleed * 2);
+
+  const body = w * 0.0125;
+  const h1 = w * 0.052;
+  const h2 = w * 0.030;
+  const RULE_H = Math.max(3, w * 0.004);
+  const RULE_W = w * 0.075;
+
+  // kicker → rule → (caller draws the headline). The house sequence, in one place.
+  const initiator = (y, kicker, kickSize = w * 0.010) => {
+    if (!kicker) return y;
+    brLabel(ctx, kicker, m, y, kickSize, accent, { tracking: 0.18 });
+    y += w * 0.030;
+    brRule(ctx, m, y, RULE_W, RULE_H, accent);
+    return y + w * 0.036;
+  };
+
+  if (type === 'cover') {
+    const imgH = h * 0.56;
+    if (image) drawImageFit(ctx, image, -bleed, -bleed, w + bleed * 2, imgH + bleed, fit, pal.bg);
+    else { ctx.fillStyle = BRAND.coal800; ctx.fillRect(-bleed, -bleed, w + bleed * 2, imgH + bleed); }
+    // Scrim so the wordmark always reads, whatever the photo does.
+    const g = ctx.createLinearGradient(0, 0, 0, imgH);
+    g.addColorStop(0, 'rgba(19,19,16,0.60)');
+    g.addColorStop(1, 'rgba(19,19,16,0.15)');
+    ctx.fillStyle = g;
+    ctx.fillRect(-bleed, -bleed, w + bleed * 2, imgH + bleed);
+    drawWordmark(ctx, m, h * 0.055, w * 0.055, BRAND.bone00);
+
+    let y = imgH + h * 0.055;
+    y = initiator(y, f.eyebrow, w * 0.011);
+    ctx.font = `700 ${h1 * 1.35}px ${BRAND.display}`;
+    ctx.fillStyle = pal.ink;
+    for (const line of wrapText(ctx, f.headline || '', w - m * 2)) {
+      ctx.fillText(line, m, y + h1 * 1.35);
+      y += h1 * 1.48;
+    }
+    y += h * 0.012;
+    if (f.subline) y = brFlow(ctx, f.subline, m, y, w - m * 2.6, h2 * 0.72, { color: pal.muted, weight: 300, lh: 1.35 }).y;
+    if (f.cta) brLabel(ctx, f.cta, m, h - h * 0.075, w * 0.0105, pal.muted, { tracking: 0.12 });
+    return;
+  }
+
+  if (type === 'backCover') {
+    drawWordmark(ctx, m, h * 0.14, w * 0.075, BRAND.bone00);
+    let y = h * 0.42;
+    ctx.font = `italic 300 ${h2 * 1.15}px ${BRAND.display}`;
+    ctx.fillStyle = BRAND.bone00;
+    for (const line of wrapText(ctx, f.headline || '', w - m * 2)) { ctx.fillText(line, m, y); y += h2 * 1.55; }
+    brRule(ctx, m, y + h * 0.02, RULE_W, RULE_H, accent);
+    y += h * 0.075;
+    brFlow(ctx, f.body || '', m, y, w * 0.5, body * 1.05, { color: pal.muted, lh: 1.7 });
+    if (f.cta) brLabel(ctx, f.cta, m, h - h * 0.085, w * 0.013, BRAND.bone00, { tracking: 0.14 });
+    return;
+  }
+
+  if (type === 'quote') {
+    brRule(ctx, m, h * 0.30, RULE_W, RULE_H, accent);
+    let y = h * 0.36;
+    ctx.font = `italic 300 ${h1 * 0.92}px ${BRAND.display}`;
+    ctx.fillStyle = BRAND.bone00;
+    for (const line of wrapText(ctx, `“${(f.headline || '').trim()}”`, w - m * 2)) {
+      ctx.fillText(line, m, y + h1 * 0.92);
+      y += h1 * 1.25;
+    }
+    if (f.subline) brLabel(ctx, f.subline, m, y + h * 0.035, w * 0.011, BRAND.cream300, { tracking: 0.14 });
+    brFurniture(ctx, frame, page, opts, true);
+    return;
+  }
+
+  if (type === 'stats') {
+    let y = initiator(h * 0.13, f.eyebrow, w * 0.011);
+    ctx.font = `700 ${h2 * 1.3}px ${BRAND.display}`;
+    ctx.fillStyle = BRAND.bone00;
+    for (const line of wrapText(ctx, f.headline || '', w - m * 2)) { ctx.fillText(line, m, y + h2 * 1.3); y += h2 * 1.6; }
+    y += h * 0.03;
+    const rows = (f.body || '').split('\n').map((l) => l.split('|').map((p) => p.trim())).filter((r) => r[0]);
+    const rowH = Math.min((h * 0.78 - y) / Math.max(1, rows.length), h * 0.14);
+    for (const [value, label] of rows) {
+      ctx.font = `700 ${rowH * 0.52}px ${BRAND.display}`;
+      ctx.fillStyle = accent;
+      ctx.fillText(value, m, y + rowH * 0.52);
+      ctx.font = `300 ${rowH * 0.22}px ${BRAND.display}`;
+      ctx.fillStyle = BRAND.cream100;
+      ctx.fillText(label || '', m + w * 0.30, y + rowH * 0.45);
+      ctx.fillStyle = 'rgba(250,248,240,0.16)';
+      ctx.fillRect(m, y + rowH * 0.78, w - m * 2, Math.max(1, w * 0.0006));
+      y += rowH;
+    }
+    brFurniture(ctx, frame, page, opts, true);
+    return;
+  }
+
+  if (type === 'toc') {
+    let y = h * 0.13;
+    ctx.font = `700 ${h1 * 0.72}px ${BRAND.display}`;
+    ctx.fillStyle = pal.ink;
+    ctx.fillText(f.headline || 'Contents', m, y + h1 * 0.72);
+    y += h1 * 1.0;
+    brRule(ctx, m, y, RULE_W, RULE_H, accent);
+    y += h * 0.045;
+    const entries = (f.body || '').split('\n').map((l) => l.split('|').map((p) => p.trim())).filter((r) => r[0]);
+    for (const [title, pageNo] of entries) {
+      ctx.font = `500 ${body * 1.25}px ${BRAND.display}`;
+      ctx.fillStyle = pal.ink;
+      const tw = ctx.measureText(title).width;
+      ctx.fillText(title, m, y + body * 1.25);
+      const pgTxt = pageNo || '';
+      ctx.font = `600 ${body * 1.2}px ${BRAND.mono}`;
+      const pw = ctx.measureText(pgTxt).width;
+      ctx.fillStyle = BRAND.ink100;                       // dotted leader
+      for (let dx = m + tw + body; dx < w - m - pw - body * 0.6; dx += body * 0.7) {
+        ctx.fillRect(dx, y + body * 0.9, Math.max(1, w * 0.0009), Math.max(1, w * 0.0009));
+      }
+      ctx.fillStyle = accent;
+      ctx.fillText(pgTxt, w - m - pw, y + body * 1.25);
+      y += body * 2.3;
+    }
+    brFurniture(ctx, frame, page, opts, false);
+    return;
+  }
+
+  if (type === 'editorial') {
+    let y = initiator(h * 0.13, f.eyebrow);
+    ctx.font = `700 ${h1 * 0.75}px ${BRAND.display}`;
+    ctx.fillStyle = pal.ink;
+    ctx.fillText(f.headline || '', m, y + h1 * 0.75);
+    y += h1 * 1.15;
+    if (f.salutation) {
+      ctx.font = `italic 300 ${h2 * 0.62}px ${BRAND.display}`;
+      ctx.fillStyle = pal.ink;
+      ctx.fillText(f.salutation, m, y + h2 * 0.62);
+      y += h2 * 1.15;
+    }
+    const maxY = h * 0.82;
+    const left = brFlow(ctx, f.body || '', m, y, colW, body, { color: BRAND.ink800, lh: 1.62, maxY });
+    if (left.rest) brFlow(ctx, left.rest, m + colW + gut, y, colW, body, { color: BRAND.ink800, lh: 1.62, maxY });
+    if (f.signature) {
+      ctx.font = `italic 300 ${body * 1.15}px ${BRAND.display}`;
+      ctx.fillStyle = pal.ink;
+      ctx.fillText(f.signature, m, h * 0.875);
+    }
+    brFurniture(ctx, frame, page, opts, false);
+    return;
+  }
+
+  if (type === 'feature') {
+    const imgH = image ? h * 0.30 : 0;
+    if (image) {
+      drawImageFit(ctx, image, -bleed, h * 0.10, w + bleed * 2, imgH, fit, pal.bg);
+      if (f.caption) brLabel(ctx, f.caption, m, h * 0.10 + imgH + w * 0.010, w * 0.0088, BRAND.ink600, { tracking: 0.08 });
+    }
+    let y = initiator(image ? h * 0.10 + imgH + h * 0.045 : h * 0.13, f.eyebrow);
+    ctx.font = `700 ${h1 * 0.66}px ${BRAND.display}`;
+    ctx.fillStyle = pal.ink;
+    for (const line of wrapText(ctx, f.headline || '', w - m * 2)) { ctx.fillText(line, m, y + h1 * 0.66); y += h1 * 0.82; }
+    y += h * 0.012;
+    if (f.subline) y = brFlow(ctx, f.subline, m, y, w - m * 2, body * 1.5, { color: BRAND.ink600, weight: 300, lh: 1.38 }).y + h * 0.022;
+    const maxY = h * 0.90;
+    const left = brFlow(ctx, f.body || '', m, y, colW, body, { color: BRAND.ink800, lh: 1.6, maxY });
+    if (left.rest) brFlow(ctx, left.rest, m + colW + gut, y, colW, body, { color: BRAND.ink800, lh: 1.6, maxY });
+    brFurniture(ctx, frame, page, opts, false);
+    return;
+  }
+
+  if (type === 'interview') {
+    let y = initiator(h * 0.13, f.eyebrow);
+    ctx.font = `700 ${h1 * 0.62}px ${BRAND.display}`;
+    ctx.fillStyle = pal.ink;
+    for (const line of wrapText(ctx, f.headline || '', image ? w * 0.52 : w - m * 2)) {
+      ctx.fillText(line, m, y + h1 * 0.62);
+      y += h1 * 0.80;
+    }
+    if (image) drawImageFit(ctx, image, w - m - w * 0.30, h * 0.13, w * 0.30, h * 0.26, fit, pal.bg);
+    if (f.subline) { y += h * 0.008; brLabel(ctx, f.subline, m, y, w * 0.0095, BRAND.ink600, { tracking: 0.10 }); y += h * 0.030; }
+    y = Math.max(y, image ? h * 0.42 : y) + h * 0.01;
+    const maxY = h * 0.90;
+    for (const raw of (f.body || '').split('\n')) {
+      const line = raw.trim();
+      if (!line || y > maxY) continue;
+      const isQ = /^q\s*[:.]/i.test(line);
+      const text = line.replace(/^[qa]\s*[:.]\s*/i, '');
+      const r = brFlow(ctx, text, m, y, w - m * 2, body * (isQ ? 1.12 : 1),
+        { color: isQ ? accent : BRAND.ink800, weight: isQ ? 600 : 400, lh: 1.55, maxY });
+      y = r.y + body * (isQ ? 0.45 : 0.9);
+    }
+    brFurniture(ctx, frame, page, opts, false);
+    return;
+  }
+
+  if (type === 'technique') {
+    let y = initiator(h * 0.13, f.eyebrow);
+    ctx.font = `700 ${h1 * 0.60}px ${BRAND.display}`;
+    ctx.fillStyle = pal.ink;
+    for (const line of wrapText(ctx, f.headline || '', w - m * 2)) { ctx.fillText(line, m, y + h1 * 0.60); y += h1 * 0.76; }
+    if (f.subline) { y += h * 0.006; brLabel(ctx, f.subline, m, y, w * 0.0095, BRAND.ink600, { tracking: 0.08 }); y += h * 0.030; }
+    if (f.abstract) {
+      // Abstract sits in a tinted well — it is the "read this if nothing else".
+      const pad = w * 0.018;
+      const probe = brFlow(ctx, f.abstract, -9999, 0, w - m * 2 - pad * 2, body * 1.02, { lh: 1.5 });
+      const boxH = (probe.y - 0) + pad * 2;
+      ctx.fillStyle = BRAND.bone;
+      ctx.fillRect(m, y, w - m * 2, boxH);
+      brRule(ctx, m, y, Math.max(3, w * 0.0035), boxH, accent);
+      brFlow(ctx, f.abstract, m + pad, y + pad, w - m * 2 - pad * 2, body * 1.02, { color: BRAND.ink800, lh: 1.5 });
+      y += boxH + h * 0.030;
+    }
+    if (image) {
+      const ih = h * 0.22;
+      drawImageFit(ctx, image, m, y, w - m * 2, ih, fit, pal.bg);
+      if (f.caption) brLabel(ctx, f.caption, m, y + ih + w * 0.008, w * 0.0088, BRAND.ink600, { tracking: 0.08 });
+      y += ih + h * 0.040;
+    }
+    const maxY = h * 0.90;
+    const left = brFlow(ctx, f.body || '', m, y, colW, body, { color: BRAND.ink800, lh: 1.6, maxY });
+    if (left.rest) brFlow(ctx, left.rest, m + colW + gut, y, colW, body, { color: BRAND.ink800, lh: 1.6, maxY });
+    brFurniture(ctx, frame, page, opts, false);
+    return;
+  }
+
+  if (type === 'figures') {
+    let y = h * 0.10;
+    if (f.eyebrow) { brLabel(ctx, f.eyebrow, m, h * 0.045, w * 0.0095, BRAND.ink600, { tracking: 0.16 }); }
+    const ih = h * 0.62;
+    if (image) drawImageFit(ctx, image, -bleed, y, w + bleed * 2, ih, fit, pal.bg);
+    y += ih + h * 0.030;
+    brRule(ctx, m, y, RULE_W, RULE_H, accent);
+    y += h * 0.025;
+    for (const cap of (f.caption || '').split('\n').map((s) => s.trim()).filter(Boolean)) {
+      const r = brFlow(ctx, cap, m, y, w - m * 2, body * 0.95, { color: BRAND.ink600, lh: 1.5 });
+      y = r.y + body * 0.5;
+    }
+    brFurniture(ctx, frame, page, opts, false);
+    return;
+  }
+
+  if (type === 'courses') {
+    let y = initiator(h * 0.13, f.eyebrow);
+    ctx.font = `700 ${h1 * 0.66}px ${BRAND.display}`;
+    ctx.fillStyle = pal.ink;
+    ctx.fillText(f.headline || '', m, y + h1 * 0.66);
+    y += h1 * 1.05;
+    const rows = (f.body || '').split('\n').map((l) => l.split('|').map((p) => p.trim())).filter((r) => r[0]);
+    for (const [date, course, place] of rows) {
+      ctx.font = `500 ${body * 1.0}px ${BRAND.mono}`;
+      ctx.fillStyle = accent;
+      ctx.fillText(date || '', m, y + body);
+      ctx.font = `500 ${body * 1.15}px ${BRAND.display}`;
+      ctx.fillStyle = pal.ink;
+      ctx.fillText(course || '', m + w * 0.20, y + body);
+      ctx.font = `300 ${body * 1.0}px ${BRAND.display}`;
+      ctx.fillStyle = BRAND.ink600;
+      const pw = ctx.measureText(place || '').width;
+      ctx.fillText(place || '', w - m - pw, y + body);
+      ctx.fillStyle = BRAND.ink100;
+      ctx.fillRect(m, y + body * 1.8, w - m * 2, Math.max(1, w * 0.0006));
+      y += body * 3.0;
+    }
+    if (f.cta) brLabel(ctx, f.cta, m, h - h * 0.10, w * 0.011, accent, { tracking: 0.14 });
+    brFurniture(ctx, frame, page, opts, false);
+    return;
+  }
+
+  if (type === 'partners') {
+    let y = initiator(h * 0.13, f.eyebrow);
+    ctx.font = `700 ${h1 * 0.66}px ${BRAND.display}`;
+    ctx.fillStyle = pal.ink;
+    ctx.fillText(f.headline || '', m, y + h1 * 0.66);
+    y += h1 * 1.05;
+    if (f.body) y = brFlow(ctx, f.body, m, y, w - m * 2, body, { color: BRAND.ink600, lh: 1.6 }).y + h * 0.04;
+    const wallEnd = brPartnerWall(ctx, frame, opts.partners, m, y, w - m * 2, h * 0.55);
+    if (wallEnd === y) {
+      brLabel(ctx, 'Upload partner logos in the Brand system panel', m, y, w * 0.0095, BRAND.ink300, { tracking: 0.08 });
+    }
+    brFurniture(ctx, frame, page, opts, false);
+    return;
+  }
+}
+
 // ─── LAYOUT 1: Image · Text split ────────────────────────────────────
 function drawImageTextSplit(ctx, frame, content, image, opts, textPos) {
   const { w, h, padX, padY } = frame;
@@ -2785,13 +3464,90 @@ export default function MedartisBrandGenerator() {
   //                          in the body, so a long agenda still re-flows itself).
   // `multi` stays the internal flag the render/export paths already understand:
   // it simply means "this canvas currently has more than one slide".
+  // ── BROCHURE ───────────────────────────────────────────────────────
+  // A brochure is a SEQUENCE OF TYPED PAGES, not a pile of free canvases. The
+  // type carries the layout, so a 40-page document stays on-grid. Pages live in
+  // their own state (not in the PAGE_BREAK body) because each page has its own
+  // fields, its own image and its own crop.
+  const [brochurePages, setBrochurePages] = useState(defaultBrochurePages);
+  const [brochureIdx, setBrochureIdx]     = useState(0);
+  const [brochureTitle, setBrochureTitle] = useState('MEDARTIS');
+  const [brochureImgs, setBrochureImgs]   = useState({});  // pageId → HTMLImageElement
+  const [partnerLogos, setPartnerLogos]   = useState([]);  // [{ id, name, src, img }]
+
   const baseFormat = FORMATS[formatKey];
-  const supportsSlides = !baseFormat.printable;
-  const supportsPages = !!baseFormat.printable;
+  const isBrochure = !!baseFormat.brochure;
+  const supportsSlides = !baseFormat.printable && !baseFormat.brochure;
+  const supportsPages = !!baseFormat.printable && !baseFormat.brochure;
   const format = useMemo(
-    () => ({ ...baseFormat, multi: supportsSlides && carouselSlides > 1, supportsSlides, supportsPages }),
+    () => ({ ...baseFormat, multi: supportsSlides && carouselSlides > 1, supportsSlides, supportsPages, isBrochure }),
     [formatKey, carouselSlides] // eslint-disable-line react-hooks/exhaustive-deps
   );
+
+  const curBrochure = Math.min(brochureIdx, Math.max(0, brochurePages.length - 1));
+  const brochurePage = brochurePages[curBrochure] || null;
+  useEffect(() => {
+    if (brochureIdx > brochurePages.length - 1) setBrochureIdx(Math.max(0, brochurePages.length - 1));
+  }, [brochurePages, brochureIdx]);
+
+  const patchBrochure = (i, patch) =>
+    setBrochurePages((ps) => ps.map((p, k) => (k === i ? { ...p, ...patch } : p)));
+  const patchBrochureField = (i, key, v) =>
+    setBrochurePages((ps) => ps.map((p, k) => (k === i ? { ...p, f: { ...p.f, [key]: v } } : p)));
+  const addBrochurePage = (type = 'feature', at = null) => {
+    const page = makeBrochurePage(type);
+    setBrochurePages((ps) => {
+      const next = [...ps];
+      // New pages land BEFORE the back cover — that is almost always the intent.
+      const idx = at != null ? at
+        : (next[next.length - 1]?.type === 'backCover' ? next.length - 1 : next.length);
+      next.splice(idx, 0, page);
+      setBrochureIdx(idx);
+      return next;
+    });
+  };
+  const deleteBrochurePage = (i) => {
+    if (brochurePages.length <= 1) return;
+    const p = brochurePages[i];
+    if (!window.confirm(`Delete page ${i + 1} (${BROCHURE_TYPES[p.type]?.label})?`)) return;
+    setBrochurePages((ps) => ps.filter((_, k) => k !== i));
+    setBrochureImgs((m) => { const n = { ...m }; delete n[p.id]; return n; });
+    setBrochureIdx((idx) => Math.max(0, Math.min(idx, brochurePages.length - 2)));
+  };
+  const moveBrochurePage = (i, d) => {
+    const j = i + d;
+    if (j < 0 || j >= brochurePages.length) return;
+    setBrochurePages((ps) => { const n = [...ps]; [n[i], n[j]] = [n[j], n[i]]; return n; });
+    setBrochureIdx(j);
+  };
+  // The layout, turned into a conditioning signal. § 08 calls this; the model
+  // then composes AROUND the type instead of us cropping a photo afterwards.
+  const makeControlMap = useCallback((kind = 'depth') => {
+    try {
+      const bare = renderOffscreenCanvas(false, undefined, 'none', undefined, 1, undefined, 0);
+      return buildLayoutControlMapFrom(bare, palette.bg, kind);
+    } catch {
+      return null;
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [format, layoutKey, activeContent, palette, wordmarkPos, folioPos, isBrochure, brochurePage, curBrochure]);
+
+  const addPartnerLogo = async (file) => {
+    const dataUrl = await fileToImageDataUrl(file);
+    const img = new Image();
+    img.onload = () => setPartnerLogos((p) => [
+      ...p, { id: `pl-${Date.now()}-${p.length}`, name: file.name.replace(/\.[^.]+$/, ''), src: dataUrl, img },
+    ]);
+    img.src = dataUrl;
+  };
+  const removePartnerLogo = (id) => setPartnerLogos((p) => p.filter((l) => l.id !== id));
+
+  const brochureOpts = () => ({
+    palette, accent: accentColor,
+    fit: brochurePage?.fit || DEFAULT_FIT,
+    brochurePage, pageNumber: curBrochure + 1, brochureTitle,
+    partners: { logos: partnerLogos },
+  });
 
   useEffect(() => {
     const update = () => {
@@ -2858,8 +3614,10 @@ export default function MedartisBrandGenerator() {
   const activeContent = pages
     ? (pages[curPage] || content)
     : (format.multi ? (carouselContent[carouselSlide] || initialContent) : content);
-  const activeImage   = pages ? (pageImages[curPage] || image) : (format.multi ? carouselImages[carouselSlide]   : image);
-  const activeFit     = pages ? (pageFits[curPage] || DEFAULT_FIT) : (format.multi ? (carouselFits[carouselSlide] || DEFAULT_FIT) : imageFit);
+  const activeImage   = isBrochure ? (brochureImgs[brochurePage?.id] || null)
+                      : pages ? (pageImages[curPage] || image) : (format.multi ? carouselImages[carouselSlide]   : image);
+  const activeFit     = isBrochure ? (brochurePage?.fit || DEFAULT_FIT)
+                      : pages ? (pageFits[curPage] || DEFAULT_FIT) : (format.multi ? (carouselFits[carouselSlide] || DEFAULT_FIT) : imageFit);
   // Per-slide image picker is redundant when a spanning bg is covering the image area
   const perSlideImageDisabled = format.multi
     && carouselBg.enabled
@@ -2996,6 +3754,13 @@ export default function MedartisBrandGenerator() {
     const pad = Math.min(format.w, format.h) * 0.07;
     const frame = { w: format.w, h: format.h, padX: pad, padY: pad, formatKey };
 
+    // A brochure page draws itself from its TYPE — none of the poster layouts,
+    // wordmark placement or carousel chrome applies here.
+    if (isBrochure) {
+      drawBrochurePage(ctx, frame, brochureImgs[brochurePage?.id] || null, brochureOpts());
+      return;
+    }
+
     const layout = LAYOUTS[layoutKey];
     if (layout) {
       // Per-slide overrides for carousel mode
@@ -3048,7 +3813,7 @@ export default function MedartisBrandGenerator() {
         ctx.fill();
       }
     }
-  }, [format, layoutKey, activeContent, activeImage, activeFit, palette, carouselSlides, carouselSlide, wordmarkPos, folioPos, formatKey, wordmarkOverImage, folioOverImage, wordmarkColor, folioColor, folioText, qrConfig, qrImage, carouselBg, carouselBgImage, carouselQrPer, carouselFolioPer, textBackdrop, wordmarkPctOverride, wmReady, logoPlate, accentColor]);
+  }, [format, layoutKey, activeContent, activeImage, activeFit, palette, carouselSlides, carouselSlide, wordmarkPos, folioPos, formatKey, wordmarkOverImage, folioOverImage, wordmarkColor, folioColor, folioText, qrConfig, qrImage, carouselBg, carouselBgImage, carouselQrPer, carouselFolioPer, textBackdrop, wordmarkPctOverride, wmReady, logoPlate, accentColor, isBrochure, brochurePage, brochureImgs, brochureTitle, curBrochure, partnerLogos]);
 
   useEffect(() => { draw(); }, [draw]);
 
@@ -3079,7 +3844,11 @@ export default function MedartisBrandGenerator() {
   };
 
   const updateFit = (patch) => {
-    if (pages) {
+    if (isBrochure) {
+      // Each brochure page owns its crop, so § 08 IMAGE FIT edits THIS page.
+      const id = brochurePage?.id;
+      if (id) setBrochurePages((ps) => ps.map((pg) => (pg.id === id ? { ...pg, fit: { ...(pg.fit || DEFAULT_FIT), ...patch } } : pg)));
+    } else if (pages) {
       // Per-page image transform (size/position/rotation/fade) — keyed to this page.
       setPageFits((p) => { const a = [...p]; while (a.length < pages.length) a.push({ ...DEFAULT_FIT }); a[curPage] = { ...(a[curPage] || DEFAULT_FIT), ...patch }; return a; });
     } else if (format.multi) {
@@ -3109,7 +3878,10 @@ export default function MedartisBrandGenerator() {
 
   const applyImage = (imgOrSrc) => {
     const assign = (img) => {
-      if (pages) {
+      if (isBrochure) {
+        const id = brochurePage?.id;
+        if (id) setBrochureImgs((m) => ({ ...m, [id]: img }));
+      } else if (pages) {
         // Per-page image: set just this page's background, leave the others.
         setPageImages((p) => { const a = [...p]; while (a.length < pages.length) a.push(null); a[curPage] = img; return a; });
       } else if (format.multi) {
@@ -3156,6 +3928,18 @@ export default function MedartisBrandGenerator() {
   // A paginated agenda: export one PNG per content page. Rendered off-screen
   // with each page's own content, image and fit, so we don't flicker the live
   // preview and every page keeps its own crop/rotation/fades.
+  const downloadAllBrochurePages = async () => {
+    for (let i = 0; i < brochurePages.length; i++) {
+      const pg = brochurePages[i];
+      const c = renderOffscreenCanvas(false, pg, brochureImgs[pg.id] || null, pg.fit || DEFAULT_FIT, 1, 0, 0);
+      const link = document.createElement('a');
+      link.download = `medartis-brochure-${String(i + 1).padStart(2, '0')}-${pg.type}.png`;
+      link.href = c.toDataURL('image/png');
+      link.click();
+      await new Promise((r) => setTimeout(r, 250));
+    }
+  };
+
   const downloadAllPages = async () => {
     if (!pages) return;
     for (let i = 0; i < pages.length; i++) {
@@ -3186,11 +3970,26 @@ export default function MedartisBrandGenerator() {
     if (bleedPx) ctx.translate(bleedPx, bleedPx);
     const pad = Math.min(trimW, trimH) * 0.07;
     const frame = { w: trimW, h: trimH, padX: pad, padY: pad, bleedPx, formatKey };
+    if (isBrochure) {
+      // contentOverride carries the brochure PAGE when exporting a whole document.
+      const page = (contentOverride && contentOverride.type) ? contentOverride : brochurePage;
+      const pageNo = 1 + brochurePages.findIndex((p) => p.id === page?.id);
+      drawBrochurePage(ctx, frame, imageOverride === 'none' ? null : (imageOverride ?? brochureImgs[page?.id] ?? null), {
+        palette, accent: accentColor,
+        fit: fitOverride ?? page?.fit ?? DEFAULT_FIT,
+        brochurePage: page, pageNumber: pageNo || 1, brochureTitle,
+        partners: { logos: partnerLogos },
+      });
+      return c;
+    }
     const layout = LAYOUTS[layoutKey];
     const idx = slideIdxOverride ?? (format.multi ? carouselSlide : 0);
     const slideShowsFolio = format.multi ? (carouselFolioPer[idx] ?? true) : true;
     const slideShowsQr    = format.multi ? (carouselQrPer[idx]    ?? true) : true;
-    layout.draw(ctx, frame, contentOverride ?? activeContent, imageOverride ?? activeImage, {
+    layout.draw(ctx, frame, contentOverride ?? activeContent,
+      // 'none' means DELIBERATELY no photograph — that is how the control map is
+      // derived: render the layout bare, and what is left is type and mark.
+      imageOverride === 'none' ? null : (imageOverride ?? activeImage), {
       palette, accent: accentColor,
       fit: fitOverride ?? activeFit,
       wordmarkPos,
@@ -3499,7 +4298,17 @@ export default function MedartisBrandGenerator() {
       }
     };
 
-    if (pages) {
+    if (isBrochure) {
+      // One PDF page per brochure page, rendered off-screen at print size so the
+      // live preview never flickers and every page keeps its own image + crop.
+      const bleedPx = Math.round((bleedMm / 25.4) * dpi);
+      for (let i = 0; i < brochurePages.length; i++) {
+        if (i > 0) newPdfPage(pdf, totalWmm, totalHmm);
+        const pg = brochurePages[i];
+        const c = renderOffscreenCanvas(false, pg, brochureImgs[pg.id] || null, pg.fit || DEFAULT_FIT, 1, 0, bleedPx);
+        renderCanvasToPdf(pdf, c, formatDef, bleedMm);
+      }
+    } else if (pages) {
       const restore = pageIdx;
       for (let i = 0; i < pages.length; i++) {
         if (i > 0) newPdfPage(pdf, totalWmm, totalHmm);
@@ -4164,6 +4973,7 @@ export default function MedartisBrandGenerator() {
           })}
         </Section>
 
+        {!isBrochure && (
         <Section label="§ 02 — LAYOUT" {...sp('LAYOUT')}>
           {FORMAT_LAYOUTS[formatKey].map((lk) => (
             <SidebarBtn key={lk} active={layoutKey === lk} onClick={() => setLayoutKey(lk)}>
@@ -4171,9 +4981,41 @@ export default function MedartisBrandGenerator() {
             </SidebarBtn>
           ))}
         </Section>
+        )}
 
         <SideGroup n="2" label="Story" />
 
+        {isBrochure && (
+        <Section label={`§ 03 — BROCHURE · PAGE ${curBrochure + 1} / ${brochurePages.length}`} {...sp('BROCHURE')}>
+          <BrochurePanel
+            pages={brochurePages}
+            idx={curBrochure}
+            title={brochureTitle}
+            onTitle={setBrochureTitle}
+            onGoTo={setBrochureIdx}
+            onAdd={addBrochurePage}
+            onDelete={deleteBrochurePage}
+            onMove={moveBrochurePage}
+            onType={(i, type) => setBrochurePages((ps) => ps.map((pg, k) => (
+              // Changing a page's TYPE keeps every field it shares with the new type —
+              // switching Feature → Interview must never throw the headline away.
+              k !== i ? pg : {
+                ...pg, type,
+                f: Object.fromEntries(BROCHURE_TYPES[type].fields.map((fd) => [
+                  fd.key, pg.f[fd.key] ?? fd.default,
+                ])),
+              }
+            )))}
+            onField={patchBrochureField}
+            hasImg={(i) => !!brochureImgs[brochurePages[i]?.id]}
+            partners={partnerLogos}
+            onAddPartner={addPartnerLogo}
+            onRemovePartner={removePartnerLogo}
+          />
+        </Section>
+        )}
+
+        {!isBrochure && (
         <Section label="§ 03 — CONTENT TEMPLATE" {...sp('TEMPLATE')}>
           {contentEdited.current && (
             <div style={{
@@ -4222,6 +5064,7 @@ export default function MedartisBrandGenerator() {
             );
           })()}
         </Section>
+        )}
 
         <div style={{ flex: 1 }} />
         <button onClick={() => setAssistantOpen(true)} style={{
@@ -4298,17 +5141,23 @@ export default function MedartisBrandGenerator() {
             Always visible, so adding a second frame is always one click away. */}
         {(() => {
           const isPages = format.supportsPages;
-          const count   = isPages ? pageCount : carouselSlides;
-          const idx     = isPages ? curPage : carouselSlide;
-          const goTo    = isPages ? setPageIdx : setCarouselSlide;
-          const add     = isPages ? addPage : () => setSlideCount(carouselSlides + 1);
-          const remove  = isPages ? () => deletePage(pageCount - 1) : () => setSlideCount(carouselSlides - 1);
-          const noun    = isPages ? 'PAGE' : 'SLIDE';
-          const hasImg  = (i) => (isPages ? !!pageImages[i] : !!carouselImages[i]);
-          const canAdd  = isPages ? true : carouselSlides < 10;
-          const hint = count > 1
-            ? `${noun} ${idx + 1} / ${count} · CONTENT & IMAGE PANELS EDIT THIS ${noun}`
-            : `SINGLE ${noun} · + ADDS ${isPages ? 'A PAGE' : 'A SLIDE'}`;
+          const count   = isBrochure ? brochurePages.length : isPages ? pageCount : carouselSlides;
+          const idx     = isBrochure ? curBrochure : isPages ? curPage : carouselSlide;
+          const goTo    = isBrochure ? setBrochureIdx : isPages ? setPageIdx : setCarouselSlide;
+          const add     = isBrochure ? () => addBrochurePage('feature')
+                        : isPages ? addPage : () => setSlideCount(carouselSlides + 1);
+          const remove  = isBrochure ? () => deleteBrochurePage(curBrochure)
+                        : isPages ? () => deletePage(pageCount - 1) : () => setSlideCount(carouselSlides - 1);
+          const noun    = isBrochure ? 'PAGE' : isPages ? 'PAGE' : 'SLIDE';
+          const hasImg  = (i) => (isBrochure ? !!brochureImgs[brochurePages[i]?.id]
+                                : isPages ? !!pageImages[i] : !!carouselImages[i]);
+          const canAdd  = isBrochure ? brochurePages.length < 60 : isPages ? true : carouselSlides < 10;
+          const label   = (i) => (isBrochure ? (BROCHURE_TYPES[brochurePages[i]?.type]?.label || '') : '');
+          const hint = isBrochure
+            ? `PAGE ${idx + 1} / ${count} · ${(BROCHURE_TYPES[brochurePage?.type]?.label || '').toUpperCase()} · § 03 EDITS THIS PAGE`
+            : count > 1
+              ? `${noun} ${idx + 1} / ${count} · CONTENT & IMAGE PANELS EDIT THIS ${noun}`
+              : `SINGLE ${noun} · + ADDS ${isPages ? 'A PAGE' : 'A SLIDE'}`;
           return (
             <div style={{
               position: 'absolute', bottom: 22, left: 0, right: 0,
@@ -4322,7 +5171,7 @@ export default function MedartisBrandGenerator() {
                 <CarouselNav onClick={() => goTo(Math.max(0, idx - 1))} disabled={idx === 0}>←</CarouselNav>
                 {Array.from({ length: count }).map((_, i) => (
                   <button key={i} onClick={() => goTo(i)}
-                    title={`${noun} ${i + 1}${hasImg(i) ? ' · has image' : ''}`}
+                    title={`${noun} ${i + 1}${label(i) ? ` · ${label(i)}` : ''}${hasImg(i) ? ' · has image' : ''}`}
                     style={{
                       minWidth: 32, height: 32, borderRadius: 16, cursor: 'pointer',
                       background: i === idx ? BRAND.gold : 'rgba(250,248,240,0.10)',
@@ -4332,14 +5181,16 @@ export default function MedartisBrandGenerator() {
                     }}>{i + 1}</button>
                 ))}
                 <button onClick={add} disabled={!canAdd}
-                  title={isPages ? 'Add a page (inserts a page break in the body)' : 'Add a slide'}
+                  title={isBrochure ? 'Add a page (choose its type in § 03)'
+                       : isPages ? 'Add a page (inserts a page break in the body)' : 'Add a slide'}
                   style={{
                     minWidth: 32, height: 32, borderRadius: 16, cursor: canAdd ? 'pointer' : 'not-allowed',
                     background: 'transparent', color: 'rgba(250,248,240,0.85)',
                     border: '1px dashed rgba(250,248,240,0.45)', fontSize: 15, lineHeight: 1,
                   }}>+</button>
                 <button onClick={remove} disabled={count <= 1}
-                  title={isPages ? 'Delete the last page' : 'Remove the last slide'}
+                  title={isBrochure ? 'Delete this page'
+                       : isPages ? 'Delete the last page' : 'Remove the last slide'}
                   style={{
                     minWidth: 32, height: 32, borderRadius: 16,
                     cursor: count > 1 ? 'pointer' : 'not-allowed',
@@ -4882,7 +5733,8 @@ export default function MedartisBrandGenerator() {
           </Section>
         )}
 
-        {/* Content fields */}
+        {/* Content fields — a brochure page carries its own fields (§ 03) */}
+        {!isBrochure && (
         <Section label={`§ 05 — CONTENT${format.multi ? ` · SLIDE ${carouselSlide + 1}` : ''}`} {...sp('CONTENT')}>
           {template.fields.map(field => (
             <div key={field.key} style={{ marginBottom: 14 }}>
@@ -4909,6 +5761,7 @@ export default function MedartisBrandGenerator() {
             </div>
           ))}
         </Section>
+        )}
 
         {/* Image library + upload — disabled when spanning bg replaces the image area */}
         {(() => null)()}
@@ -4997,6 +5850,9 @@ export default function MedartisBrandGenerator() {
             surface={palette.mode === 'dark' ? 'dark' : (layoutKey === 'overlay' ? 'overlay' : 'light')}
             onPickImage={applyImage}
             onSaveToLibrary={saveImageToLibrary}
+            makeControlMap={makeControlMap}
+            library={savedLibrary}
+            currentImage={activeImage}
             sectionProps={sp('GENERATE')}
           />
         </div>
@@ -5111,7 +5967,16 @@ export default function MedartisBrandGenerator() {
             fontSize: 11, fontWeight: 500, cursor: 'pointer',
             fontFamily: BRAND.mono, marginBottom: 6,
             letterSpacing: '0.16em', textTransform: 'uppercase'
-          }}>DOWNLOAD PNG{pages ? ` · PAGE ${curPage + 1}` : ''}</button>
+          }}>DOWNLOAD PNG{isBrochure ? ` · PAGE ${curBrochure + 1}` : pages ? ` · PAGE ${curPage + 1}` : ''}</button>
+          {isBrochure && brochurePages.length > 1 && (
+            <button onClick={downloadAllBrochurePages} style={{
+              width: '100%', padding: '12px', background: BRAND.paper,
+              color: BRAND.ink, border: `1px solid ${BRAND.ink}`, borderRadius: 0,
+              fontSize: 10.5, fontWeight: 500, cursor: 'pointer',
+              fontFamily: BRAND.mono, letterSpacing: '0.16em', textTransform: 'uppercase',
+              marginBottom: 6
+            }}>DOWNLOAD ALL {brochurePages.length} PAGES PNG</button>
+          )}
           {format.multi && (
             <button onClick={downloadAllSlides} style={{
               width: '100%', padding: '12px', background: BRAND.paper,
@@ -5902,8 +6767,20 @@ const DualRangeSlider = ({ start, end, onChange }) => {
 // "Strict negatives" swaps in a CFGGuider to give the sampler a real negative
 // branch (~2× slower). SDXL / Turbo always honour it. We report what actually
 // happened rather than implying the negative did something it didn't.
-const GenerateSection = ({ sectionProps = {}, format, surface, onPickImage, onSaveToLibrary }) => {
+const GenerateSection = ({
+  sectionProps = {}, format, surface, onPickImage, onSaveToLibrary,
+  makeControlMap, library = [], currentImage = null,
+}) => {
   const [status, setStatus] = useState(null);
+  // ── CONDITIONING ────────────────────────────────────────────────
+  // refImage  : "look like THIS"    (IP-Adapter → the MODEL branch)
+  // ctrlImage : "compose like THIS" (ControlNet → the CONDITIONING branch)
+  const [refImage, setRefImage] = useState(null);
+  const [refStrength, setRefStrength] = useState(0.65);
+  const [ctrlImage, setCtrlImage] = useState(null);
+  const [ctrlSource, setCtrlSource] = useState('layout');   // 'layout' | 'photo'
+  const [ctrlType, setCtrlType] = useState('depth');
+  const [ctrlStrength, setCtrlStrength] = useState(0.75);
   const [prompt, setPrompt] = useState('');
   const [extraNegative, setExtraNegative] = useState('');
   const [realism, setRealism] = useState(true);
@@ -5963,6 +6840,16 @@ const GenerateSection = ({ sectionProps = {}, format, surface, onPickImage, onSa
         body: JSON.stringify({
           prompt, surface, engine, realism, strictNegative, extraNegative,
           w: format.w, h: format.h,
+          // Conditioning. The server reports back what it could actually honour.
+          refImage: canCondition && refImage ? refImage : null,
+          refStrength,
+          controlImage: canCondition && ctrlImage ? ctrlImage : null,
+          controlType: ctrlType,
+          controlStrength: ctrlStrength,
+          // A map WE synthesized from the layout is already a control map —
+          // running a depth estimator over it would estimate the depth of a
+          // diagram. Only a photographic source gets preprocessed.
+          controlPreprocess: ctrlSource === 'photo',
         }),
       });
       const sub = await r.json();
@@ -5982,6 +6869,40 @@ const GenerateSection = ({ sectionProps = {}, format, surface, onPickImage, onSa
 
   // Will the negative actually reach the sampler with the current choices?
   const negWorks = engine !== 'flux' || strictNegative;
+
+  // Conditioning is SDXL-only: Flux ControlNet/IP-Adapter weights are tied to a
+  // specific checkpoint, so offering them on Flux would only move the failure
+  // into ComfyUI's validator. Say that plainly rather than let the control lie.
+  const isSdxl = engine === 'sdxl' || engine === 'sdxl-turbo';
+  const canIp      = isSdxl && !!status?.conditioning?.ip;
+  const canControl = isSdxl && !!status?.conditioning?.control;
+  const canCondition = canIp || canControl;
+  const controlTypes = status?.conditioning?.controlTypes || [];
+  // Pose has no meaning as a layout map — it needs a human to trace.
+  const layoutKinds = ['depth', 'canny', 'scribble'].filter((k) => controlTypes.includes(k));
+
+  useEffect(() => {
+    if (controlTypes.length && !controlTypes.includes(ctrlType)) setCtrlType(controlTypes[0]);
+  }, [controlTypes.join(','), ctrlType]);
+
+  const refreshLayoutMap = () => {
+    const map = makeControlMap?.(ctrlType);
+    if (!map) {
+      setError('The layout leaves no room to compose in — free up some space, then rebuild the map.');
+      return;
+    }
+    setError(null);
+    setCtrlImage(map);
+  };
+  // Keep the map in step with the type; a depth map fed to a canny net is noise.
+  useEffect(() => {
+    if (ctrlSource === 'layout' && ctrlImage) refreshLayoutMap();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ctrlType]);
+
+  const readFileAsDataUrl = async (file, set) => {
+    try { set(await fileToImageDataUrl(file)); } catch (e) { setError(e.message); }
+  };
 
   const btn = (on) => ({
     padding: '6px 4px', cursor: 'pointer', borderRadius: 0,
@@ -6069,6 +6990,160 @@ const GenerateSection = ({ sectionProps = {}, format, surface, onPickImage, onSa
             style={{ width: '100%', boxSizing: 'border-box', marginBottom: 10 }}
           />
 
+          {/* ── CONDITIONING ──────────────────────────────────────────
+              Text can describe a look. It cannot hold one, and it certainly
+              cannot hold a LAYOUT. These two do. */}
+          <div style={{
+            border: `1px solid ${BRAND.ink100}`, background: BRAND.bone,
+            padding: '10px 10px 12px', marginBottom: 10,
+          }}>
+            <div style={{
+              fontFamily: BRAND.mono, fontSize: 9.5, letterSpacing: '0.14em',
+              textTransform: 'uppercase', color: BRAND.ink, marginBottom: 8,
+            }}>◈ Conditioning</div>
+
+            {!isSdxl && (
+              <div style={{ fontFamily: BRAND.mono, fontSize: 9, color: '#C8200A', lineHeight: 1.55, letterSpacing: '0.04em' }}>
+                ⚠ CONDITIONING IS SDXL-ONLY — FLUX CONTROLNET / IP-ADAPTER WEIGHTS ARE
+                CHECKPOINT-SPECIFIC. SWITCH THE ENGINE TO SDXL TO USE A REFERENCE OR A LAYOUT MAP.
+              </div>
+            )}
+
+            {isSdxl && (
+              <>
+                {/* 1 · REFERENCE LOOK — IP-Adapter */}
+                <div style={{ fontSize: 9.5, color: BRAND.ink600, marginBottom: 5, fontFamily: BRAND.mono, letterSpacing: '0.1em', textTransform: 'uppercase' }}>
+                  1 · Reference look
+                  <span style={{ color: BRAND.ink300, letterSpacing: 0, textTransform: 'none' }}> · IP-Adapter · steers colour, light, material</span>
+                </div>
+                {!canIp ? (
+                  <div style={{ fontFamily: BRAND.mono, fontSize: 9, color: BRAND.ink300, lineHeight: 1.5, marginBottom: 10, letterSpacing: '0.04em' }}>
+                    UNAVAILABLE · MISSING {String(status?.conditioning?.ipMissing || 'IP-ADAPTER').toUpperCase()}
+                  </div>
+                ) : (
+                  <>
+                    <div style={{ display: 'flex', gap: 6, alignItems: 'flex-start', marginBottom: 6 }}>
+                      <div style={{
+                        width: 56, height: 56, flexShrink: 0, border: `1px solid ${BRAND.ink100}`,
+                        background: BRAND.paper, display: 'flex', alignItems: 'center', justifyContent: 'center',
+                        fontFamily: BRAND.mono, fontSize: 8, color: BRAND.ink300,
+                      }}>
+                        {refImage
+                          ? <img src={refImage} alt="reference" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                          : 'NONE'}
+                      </div>
+                      <div style={{ display: 'grid', gap: 4, flex: 1 }}>
+                        <button style={btn(false)} disabled={!currentImage}
+                          onClick={() => { const d = imgToDataUrl(currentImage); d ? setRefImage(d) : setError('That image is cross-origin and cannot be read back — upload it instead.'); }}>
+                          Use the image on the canvas
+                        </button>
+                        <label style={{ ...btn(false), textAlign: 'center' }}>
+                          Upload / pick from the library
+                          <input type="file" accept="image/*" style={{ display: 'none' }}
+                            onChange={(e) => { const f = e.target.files?.[0]; if (f) readFileAsDataUrl(f, setRefImage); e.target.value = ''; }} />
+                        </label>
+                        {refImage && <button style={btn(false)} onClick={() => setRefImage(null)}>Clear reference</button>}
+                      </div>
+                    </div>
+                    {library.length > 0 && (
+                      <div style={{ display: 'flex', gap: 4, overflowX: 'auto', marginBottom: 6, paddingBottom: 2 }}>
+                        {library.slice(0, 12).map((it, i) => (
+                          <img key={i} src={it.src || it} alt="" onClick={() => setRefImage(it.src || it)}
+                            title="Condition on this library image"
+                            style={{
+                              width: 40, height: 40, objectFit: 'cover', cursor: 'pointer', flexShrink: 0,
+                              border: `1px solid ${refImage === (it.src || it) ? BRAND.goldDeep : BRAND.ink100}`,
+                            }} />
+                        ))}
+                      </div>
+                    )}
+                    {refImage && (
+                      <label style={{ display: 'block', fontFamily: BRAND.mono, fontSize: 9, color: BRAND.ink600, marginBottom: 10, letterSpacing: '0.04em' }}>
+                        STRENGTH {refStrength.toFixed(2)}
+                        <input type="range" min="0" max="1.2" step="0.05" value={refStrength}
+                          onChange={(e) => setRefStrength(Number(e.target.value))}
+                          style={{ width: '100%' }} />
+                      </label>
+                    )}
+                  </>
+                )}
+
+                {/* 2 · COMPOSITION — ControlNet, fed by the layout itself */}
+                <div style={{ fontSize: 9.5, color: BRAND.ink600, marginBottom: 5, fontFamily: BRAND.mono, letterSpacing: '0.1em', textTransform: 'uppercase' }}>
+                  2 · Composition
+                  <span style={{ color: BRAND.ink300, letterSpacing: 0, textTransform: 'none' }}> · ControlNet · the layout becomes the input</span>
+                </div>
+                {!canControl ? (
+                  <div style={{ fontFamily: BRAND.mono, fontSize: 9, color: BRAND.ink300, lineHeight: 1.5, letterSpacing: '0.04em' }}>
+                    UNAVAILABLE · MISSING {String(status?.conditioning?.controlMissing || 'CONTROLNET MODELS').toUpperCase()}
+                  </div>
+                ) : (
+                  <>
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4, marginBottom: 6 }}>
+                      <button style={btn(ctrlSource === 'layout')} onClick={() => { setCtrlSource('layout'); setCtrlImage(null); }}>
+                        From the layout
+                      </button>
+                      <button style={btn(ctrlSource === 'photo')} onClick={() => { setCtrlSource('photo'); setCtrlImage(null); }}>
+                        From a photo
+                      </button>
+                    </div>
+
+                    <div style={{
+                      display: 'grid',
+                      gridTemplateColumns: `repeat(${Math.max(1, (ctrlSource === 'layout' ? layoutKinds : controlTypes).length)}, 1fr)`,
+                      gap: 4, marginBottom: 6,
+                    }}>
+                      {(ctrlSource === 'layout' ? layoutKinds : controlTypes).map((k) => (
+                        <button key={k} style={btn(ctrlType === k)} onClick={() => setCtrlType(k)}>{k}</button>
+                      ))}
+                    </div>
+
+                    <div style={{ display: 'flex', gap: 6, alignItems: 'flex-start', marginBottom: 6 }}>
+                      <div style={{
+                        width: 56, height: 56, flexShrink: 0, border: `1px solid ${BRAND.ink100}`,
+                        background: '#000', display: 'flex', alignItems: 'center', justifyContent: 'center',
+                        fontFamily: BRAND.mono, fontSize: 8, color: BRAND.ink300,
+                      }}>
+                        {ctrlImage
+                          ? <img src={ctrlImage} alt="control map" style={{ width: '100%', height: '100%', objectFit: 'contain' }} />
+                          : 'NO MAP'}
+                      </div>
+                      <div style={{ display: 'grid', gap: 4, flex: 1 }}>
+                        {ctrlSource === 'layout' ? (
+                          <button style={btn(false)} onClick={refreshLayoutMap}>
+                            {ctrlImage ? '↻ Rebuild from the current layout' : '⌗ Build a map from the current layout'}
+                          </button>
+                        ) : (
+                          <label style={{ ...btn(false), textAlign: 'center' }}>
+                            Upload a reference photo
+                            <input type="file" accept="image/*" style={{ display: 'none' }}
+                              onChange={(e) => { const f = e.target.files?.[0]; if (f) readFileAsDataUrl(f, setCtrlImage); e.target.value = ''; }} />
+                          </label>
+                        )}
+                        {ctrlImage && <button style={btn(false)} onClick={() => setCtrlImage(null)}>Clear map</button>}
+                      </div>
+                    </div>
+
+                    {ctrlImage && (
+                      <label style={{ display: 'block', fontFamily: BRAND.mono, fontSize: 9, color: BRAND.ink600, marginBottom: 6, letterSpacing: '0.04em' }}>
+                        STRENGTH {ctrlStrength.toFixed(2)}
+                        <input type="range" min="0" max="1.5" step="0.05" value={ctrlStrength}
+                          onChange={(e) => setCtrlStrength(Number(e.target.value))}
+                          style={{ width: '100%' }} />
+                      </label>
+                    )}
+
+                    <div style={{ fontFamily: BRAND.mono, fontSize: 8.5, color: BRAND.ink300, lineHeight: 1.55, letterSpacing: '0.03em' }}>
+                      {ctrlSource === 'layout'
+                        ? 'THE MAP IS DERIVED FROM WHERE THE TYPE AND THE MARK ACTUALLY SIT. THE MODEL COMPOSES INTO THE SPACE THAT IS LEFT — IT NEVER SEES A LETTERFORM.'
+                        : 'THE PHOTO IS RUN THROUGH A PREPROCESSOR ON THE SERVER, THEN USED AS THE CONTROL MAP.'}
+                    </div>
+                  </>
+                )}
+              </>
+            )}
+          </div>
+
           <button onClick={busy ? cancel : generate} disabled={!busy && !prompt.trim()}
             style={{
               width: '100%', padding: '12px', cursor: (busy || prompt.trim()) ? 'pointer' : 'not-allowed',
@@ -6113,6 +7188,23 @@ const GenerateSection = ({ sectionProps = {}, format, surface, onPickImage, onSa
                 {lastMeta.negativeHonoured ? 'APPLIED' : 'IGNORED BY THIS ENGINE'}
               </span>
               {lastMeta.realism ? ' · REALISM ON' : ''}
+              {/* Conditioning, reported by the server — never by the checkbox.
+                  If a model file was missing, the run silently fell back, and the
+                  only honest thing to do is say which one and why. */}
+              {lastMeta.conditioning && (
+                <>
+                  {lastMeta.conditioning.ip && <span style={{ color: '#0A7D3E' }}> · REFERENCE APPLIED</span>}
+                  {lastMeta.conditioning.control && (
+                    <span style={{ color: '#0A7D3E' }}>
+                      {' · '}{String(lastMeta.conditioning.controlType || '').toUpperCase()} CONTROL APPLIED
+                      {lastMeta.conditioning.controlModel ? ` (${lastMeta.conditioning.controlModel})` : ''}
+                    </span>
+                  )}
+                  {(lastMeta.conditioning.notes || []).map((n, i) => (
+                    <div key={i} style={{ color: '#C8200A' }}>⚠ {n.toUpperCase()}</div>
+                  ))}
+                </>
+              )}
             </div>
           )}
 
