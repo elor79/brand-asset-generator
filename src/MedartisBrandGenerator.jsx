@@ -2227,7 +2227,7 @@ function drawImageTextSplit(ctx, frame, content, image, opts, textPos) {
   // Reserve vertical clearance so wordmark/folio inside the safe area never
   // overlap the text block.
   const clearance = brandBarClearance(ctx, frame, { ...opts, safeArea });
-  const adjTextY = textRectY + clearance.top;
+  const adjTextY = Math.max(textRectY, clearance.topY);
   // Backdrop ALWAYS draws (image-composition layer) — even in PDF skipOverlays mode
   drawTextBackdropOnly(ctx, content, textRectX, adjTextY, textRectW, palette, accent, frame, 'top', opts.textBackdrop);
   if (!opts.skipOverlays) drawTextBlock(ctx, content, textRectX, adjTextY, textRectW, palette, accent, frame, 'top', null);
@@ -2273,7 +2273,7 @@ function drawFullBleedOverlay(ctx, frame, content, image, opts) {
   const overlayPalette = { bg: BRAND.coal, ink: BRAND.bone00, muted: BRAND.cream100, accent, mode: 'dark' };
   const overlaySafeArea = { x: 0, y: 0, w, h };
   const clearance = brandBarClearance(ctx, frame, { ...opts, safeArea: overlaySafeArea });
-  const textBottomY = h - padY * 1.7 - clearance.bottom;
+  const textBottomY = Math.min(h - padY * 1.7, clearance.bottomY);
   // Intelligent text colour — same idea as the wordmark auto-contrast. The
   // image + darkening gradient are already painted, so sample the actual pixels
   // behind the lower text band and flip the whole text block to ink or bone for
@@ -3075,22 +3075,39 @@ function brandBarClearance(ctx, frame, opts) {
   const wmBox  = computeWordmarkBox(frame, wmPos, opts.formatKey, opts.safeArea, opts.wordmarkPctOverride);
   const flBox  = computeFolioBox(ctx, frame, flPos, opts.formatKey, opts.safeArea, opts.folioText);
   const gap    = frame.padY * 0.5;
-  let top = 0, bottom = 0;
-  // Reserve the mark's height PLUS its clear space. A gap of padY/2 let the
-  // headline sit inside the keep-clear zone — the rule is about every side, not
-  // only the canvas edges, and type is the thing most likely to crowd it.
-  if (wmBox && (wmBox.pos === 'tl' || wmBox.pos === 'tr')) {
+  const sa     = opts.safeArea || { x: 0, y: 0, w: frame.w, h: frame.h };
+
+  // ABSOLUTE canvas Y, not a delta. Returning "distance from the safe-area top"
+  // and then having the caller ADD it to textRectY (which already contains the
+  // padding) counted the padding twice and shoved the whole text block down —
+  // far enough to overrun the folio. Boundaries are positions; keep them
+  // positions, and let the caller take the max/min.
+  let topY = sa.y;                      // text may not start above this
+  let bottomY = sa.y + sa.h;            // text may not run below this
+
+  // The mark's clear space is part of the mark. Type entering it breaks the rule
+  // just as surely as a canvas edge does — and type is what crowds it in practice.
+  if (wmBox) {
     const cb = wmClearBox(wmBox);
-    top = Math.max(top, cb.y + cb.h - (opts.safeArea?.y ?? 0));
+    if (wmBox.pos === 'tl' || wmBox.pos === 'tr') topY    = Math.max(topY,    cb.y + cb.h);
+    if (wmBox.pos === 'bl' || wmBox.pos === 'br') bottomY = Math.min(bottomY, cb.y);
   }
-  if (wmBox && (wmBox.pos === 'bl' || wmBox.pos === 'br')) {
-    const cb = wmClearBox(wmBox);
-    const saBottom = (opts.safeArea?.y ?? 0) + (opts.safeArea?.h ?? frame.h);
-    bottom = Math.max(bottom, saBottom - cb.y);
+  if (flBox) {
+    // computeFolioBox returns a BASELINE, not a top edge: the glyphs occupy
+    // (y - h) … y. Treating y as the top would misplace the boundary by a whole
+    // line — which is precisely how "medartis.com" ended up sitting under the
+    // subline instead of clear of it.
+    const flTop = flBox.y - flBox.h;
+    if (flBox.pos === 'tl' || flBox.pos === 'tr') topY    = Math.max(topY,    flBox.y + gap);
+    if (flBox.pos === 'bl' || flBox.pos === 'br') bottomY = Math.min(bottomY, flTop - gap);
   }
-  if (flBox && (flBox.pos === 'tl' || flBox.pos === 'tr')) top    = Math.max(top,    flBox.h + gap);
-  if (flBox && (flBox.pos === 'bl' || flBox.pos === 'br')) bottom = Math.max(bottom, flBox.h + gap);
-  return { top, bottom };
+  return {
+    topY, bottomY,
+    // Legacy deltas, still measured from the safe area — kept so nothing silently
+    // reads a field that no longer exists.
+    top: Math.max(0, topY - sa.y),
+    bottom: Math.max(0, (sa.y + sa.h) - bottomY),
+  };
 }
 
 function drawBrandBar(ctx, frame, palette, accent, overlay, opts = {}) {
