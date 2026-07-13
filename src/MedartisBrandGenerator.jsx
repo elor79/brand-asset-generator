@@ -3340,17 +3340,6 @@ export default function MedartisBrandGenerator() {
     });
   };
   // Shorthand: pass to a <Section> to make it collapsible by id
-  // The numbering counts only the sections that are ACTUALLY RENDERED for this
-  // canvas. A poster has no carousel panels, so it must not have a § 08-shaped
-  // hole where they would have been.
-  const secNo = useMemo(
-    () => sectionNumbers(visibleSections({ isBrochure, isCarousel: !!format.multi })),
-    [isBrochure, format.multi]
-  );
-  /** "§ 07 — CANTO DAM" — the number is never written by hand, and never counts
-      a panel you cannot see. */
-  const SEC = (key, label) => `§ ${secNo[key] || '--'} — ${label}`;
-
   const sp = (k, label) => ({
     collapsed: collapsed.has('sec:' + k),
     onToggle: () => toggleCollapsed('sec:' + k),
@@ -3493,6 +3482,21 @@ export default function MedartisBrandGenerator() {
     () => ({ ...baseFormat, multi: supportsSlides && carouselSlides > 1, supportsSlides, supportsPages, isBrochure }),
     [formatKey, carouselSlides] // eslint-disable-line react-hooks/exhaustive-deps
   );
+
+  // The numbering counts only the sections ACTUALLY RENDERED for this canvas — a
+  // poster has no carousel panels, so it must not have a § 08-shaped hole where
+  // they would have been.
+  //
+  // This sits BELOW `isBrochure` and `format` on purpose: a hook's dependency
+  // array is evaluated at RENDER time, so it cannot name a const declared further
+  // down the component. Putting it up with the other sidebar plumbing threw
+  // "can't access 'isBrochure' before initialization" on the first paint.
+  const secNo = useMemo(
+    () => sectionNumbers(visibleSections({ isBrochure, isCarousel: !!format.multi })),
+    [isBrochure, format.multi]
+  );
+  /** "§ 07 — CANTO DAM" — never typed by hand, never counts a panel you can't see. */
+  const SEC = (key, label) => `§ ${secNo[key] || '--'} — ${label}`;
 
   const curBrochure = Math.min(brochureIdx, Math.max(0, brochurePages.length - 1));
   const brochurePage = brochurePages[curBrochure] || null;
