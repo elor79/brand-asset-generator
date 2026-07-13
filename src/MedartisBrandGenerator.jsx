@@ -1516,18 +1516,29 @@ function largestFreeRect({ grid, cols, rows }) {
 }
 
 /**
- * Build a ControlNet map from the live layout.
- * @param src   a photograph-free render of the current layout
+ * Build a DEPTH control map from the live layout.
+ *
+ * Depth, and only depth — this is a correction to my own first attempt, which
+ * also emitted canny/scribble maps and made the output measurably WORSE.
+ *
+ * A canny net reproduces the edge structure it is handed. A bare layout has
+ * almost no edges in it, so the net reads "no structure anywhere" and returns a
+ * flat, empty, distant scene; and the subject rectangle I drew into the map came
+ * back as a literal rectangle in the picture. Edges must come from something that
+ * HAS edges — a photograph, or a hand sketch.
+ *
+ * What a layout genuinely knows is spatial: "type is going HERE, so this region
+ * must stay empty and far; the picture belongs THERE." That is a depth statement.
+ *
+ * @param src   a photograph-free render of the current layout (type + mark only)
  * @param bgHex the palette background it was rendered on
- * @param kind  'depth' | 'canny' | 'scribble'
- * Returns a PNG data URL sized for the model, or null.
+ * Returns a PNG data URL sized for the model, or null when there is no room.
  */
-function buildLayoutControlMapFrom(src, bgHex, kind = 'depth') {
+function buildLayoutControlMapFrom(src, bgHex) {
   const occ = layoutOccupancy(src, bgHex);
   const rect = largestFreeRect(occ);
   if (rect.area < occ.cols * occ.rows * 0.06) return null;  // no room to compose in
 
-  // Model-side resolution, same aspect as the canvas.
   const long = 1024;
   const ar = src.width / src.height;
   const W = Math.round(ar >= 1 ? long : long * ar);
@@ -1538,63 +1549,52 @@ function buildLayoutControlMapFrom(src, bgHex, kind = 'depth') {
 
   const cw = W / occ.cols, ch = H / occ.rows;
   const R = { x: rect.x * cw, y: rect.y * ch, w: rect.w * cw, h: rect.h * ch };
-  const horizon = R.y + R.h * 0.62;   // where the ground meets the air — a real
-                                      // composition cue, not decoration
+  const horizon = R.y + R.h * 0.60;
 
-  ctx.fillStyle = '#000';
+  // WHITE = NEAR, BLACK = FAR.
+  //
+  // The base is mid-dark, not black: black means "infinitely far", and a subject
+  // floating in a void is exactly the empty, lifeless frame we are trying not to
+  // produce. Mid-dark says "a real room continues here, at a distance".
+  ctx.fillStyle = '#2E2E2E';
   ctx.fillRect(0, 0, W, H);
 
-  if (kind === 'depth') {
-    // White = NEAR. The subject region gets the near-field; everywhere the type
-    // and the mark live stays black = far and empty, so the model puts recessive
-    // background behind the headline instead of a face.
-    const g = ctx.createRadialGradient(
-      R.x + R.w / 2, horizon, Math.min(R.w, R.h) * 0.05,
-      R.x + R.w / 2, horizon, Math.max(R.w, R.h) * 0.72
-    );
-    g.addColorStop(0, '#FFFFFF');
-    g.addColorStop(0.55, '#9A9A9A');
-    g.addColorStop(1, '#0E0E0E');
-    ctx.fillStyle = g;
-    ctx.fillRect(R.x, R.y, R.w, R.h);
-    // Hard-clear every occupied cell: the type's own area must read as distance.
-    ctx.fillStyle = '#000';
-    for (let y = 0; y < occ.rows; y++) {
-      for (let x = 0; x < occ.cols; x++) {
-        if (occ.grid[y][x]) ctx.fillRect(x * cw - 1, y * ch - 1, cw + 2, ch + 2);
-      }
+  // The subject region carries the near field. Elliptical rather than a hard box:
+  // a rectangle in a depth map is a rectangular object.
+  const g = ctx.createRadialGradient(
+    R.x + R.w / 2, horizon, Math.min(R.w, R.h) * 0.04,
+    R.x + R.w / 2, horizon, Math.max(R.w, R.h) * 0.62
+  );
+  g.addColorStop(0, '#FFFFFF');
+  g.addColorStop(0.45, '#C4C4C4');
+  g.addColorStop(0.80, '#6E6E6E');
+  g.addColorStop(1, '#2E2E2E');
+  ctx.save();
+  ctx.beginPath();
+  ctx.ellipse(R.x + R.w / 2, horizon, R.w * 0.60, R.h * 0.62, 0, 0, Math.PI * 2);
+  ctx.clip();
+  ctx.fillStyle = g;
+  ctx.fillRect(R.x - R.w, R.y - R.h, R.w * 3, R.h * 3);
+  ctx.restore();
+
+  // Where the type and the mark actually sit: push it AWAY. Not to pure black —
+  // just clearly behind the subject, so the model puts recessive background under
+  // the headline instead of a face.
+  ctx.fillStyle = '#141414';
+  for (let y = 0; y < occ.rows; y++) {
+    for (let x = 0; x < occ.cols; x++) {
+      if (occ.grid[y][x]) ctx.fillRect(x * cw - 1, y * ch - 1, cw + 2, ch + 2);
     }
-    // Soften — a blocky depth map produces blocky geometry.
-    const blur = document.createElement('canvas');
-    blur.width = W; blur.height = H;
-    const bc = blur.getContext('2d');
-    bc.filter = `blur(${Math.round(long * 0.012)}px)`;
-    bc.drawImage(c, 0, 0);
-    return blur.toDataURL('image/png');
   }
 
-  // canny / scribble: pure structure. Edges ONLY inside the subject region, so the
-  // keep-clear areas contain no edges at all — nothing for the model to hang
-  // detail on exactly where the headline is going.
-  const stroke = kind === 'scribble' ? Math.max(4, long * 0.006) : Math.max(2, long * 0.002);
-  ctx.strokeStyle = '#FFF';
-  ctx.lineWidth = stroke;
-  ctx.lineCap = 'round';
-  ctx.strokeRect(R.x + stroke, R.y + stroke, R.w - stroke * 2, R.h - stroke * 2);
-  ctx.beginPath();
-  ctx.moveTo(R.x + stroke, horizon);
-  ctx.lineTo(R.x + R.w - stroke, horizon);
-  ctx.stroke();
-  // Rule-of-thirds verticals, short — enough to seat a subject, not to dictate it.
-  ctx.lineWidth = Math.max(1, stroke * 0.6);
-  for (const t of [1 / 3, 2 / 3]) {
-    const x = R.x + R.w * t;
-    ctx.beginPath();
-    ctx.moveTo(x, horizon - R.h * 0.16);
-    ctx.lineTo(x, horizon + R.h * 0.16);
-    ctx.stroke();
-  }
-  return c.toDataURL('image/png');
+  // Soften hard — a blocky depth map produces blocky geometry, and the occupancy
+  // grid is coarse by design (it must never leak letterforms into the map).
+  const blur = document.createElement('canvas');
+  blur.width = W; blur.height = H;
+  const bc = blur.getContext('2d');
+  bc.filter = `blur(${Math.round(long * 0.018)}px)`;
+  bc.drawImage(c, 0, 0);
+  return blur.toDataURL('image/png');
 }
 
 // ─── BROCHURE PANEL (§ 03) ───────────────────────────────────────────
@@ -4007,7 +4007,7 @@ export default function MedartisBrandGenerator() {
   const makeControlMap = useCallback((kind = 'depth') => {
     try {
       const bare = renderOffscreenCanvas(false, undefined, 'none', undefined, 1, undefined, 0);
-      return buildLayoutControlMapFrom(bare, palette.bg, kind);
+      return buildLayoutControlMapFrom(bare, palette.bg);
     } catch {
       return null;
     }
@@ -6780,7 +6780,7 @@ const GenerateSection = ({
   const [ctrlImage, setCtrlImage] = useState(null);
   const [ctrlSource, setCtrlSource] = useState('layout');   // 'layout' | 'photo'
   const [ctrlType, setCtrlType] = useState('depth');
-  const [ctrlStrength, setCtrlStrength] = useState(0.75);
+  const [ctrlStrength, setCtrlStrength] = useState(0.55);
   const [prompt, setPrompt] = useState('');
   const [extraNegative, setExtraNegative] = useState('');
   const [realism, setRealism] = useState(true);
@@ -6846,6 +6846,10 @@ const GenerateSection = ({
           controlImage: canCondition && ctrlImage ? ctrlImage : null,
           controlType: ctrlType,
           controlStrength: ctrlStrength,
+          // Hold the composition through the early steps, then LET GO. A control
+          // that runs to the end of the denoise doesn't just place the subject —
+          // it keeps overruling the detail pass, and the image comes out flat.
+          controlEndAt: ctrlSource === 'layout' ? 0.55 : 0.85,
           // A map WE synthesized from the layout is already a control map —
           // running a depth estimator over it would estimate the depth of a
           // diagram. Only a photographic source gets preprocessed.
@@ -6878,8 +6882,24 @@ const GenerateSection = ({
   const canControl = isSdxl && !!status?.conditioning?.control;
   const canCondition = canIp || canControl;
   const controlTypes = status?.conditioning?.controlTypes || [];
-  // Pose has no meaning as a layout map — it needs a human to trace.
-  const layoutKinds = ['depth', 'canny', 'scribble'].filter((k) => controlTypes.includes(k));
+  // A LAYOUT MAP IS A DEPTH STATEMENT, NOT AN EDGE STATEMENT.
+  // This is the correction to my own first design. A canny/scribble net expects
+  // DENSE edge structure and reproduces what it is given; a map derived from a
+  // bare layout has almost no edges in it, so the net reads "no structure
+  // anywhere" and returns a flat, empty, distant scene — and any rectangle drawn
+  // into the map comes back as a literal rectangle in the picture.
+  //
+  // What the layout actually knows is: "this region must stay EMPTY and FAR,
+  // because type is going on top of it, and the picture belongs over HERE."
+  // That is depth. So from-the-layout offers depth only. Edges come from a photo
+  // (or, later, from a hand sketch), where there is real structure to trace.
+  const layoutKinds = ['depth'].filter((k) => controlTypes.includes(k));
+  useEffect(() => {
+    if (ctrlSource === 'layout' && layoutKinds.length && !layoutKinds.includes(ctrlType)) {
+      setCtrlType(layoutKinds[0]);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ctrlSource, layoutKinds.join(',')]);
 
   useEffect(() => {
     if (controlTypes.length && !controlTypes.includes(ctrlType)) setCtrlType(controlTypes[0]);
@@ -7126,31 +7146,36 @@ const GenerateSection = ({
                       ))}
                     </div>
 
-                    <div style={{ display: 'flex', gap: 6, alignItems: 'flex-start', marginBottom: 6 }}>
-                      <div style={{
-                        width: 56, height: 56, flexShrink: 0, border: `1px solid ${BRAND.ink100}`,
-                        background: '#000', display: 'flex', alignItems: 'center', justifyContent: 'center',
-                        fontFamily: BRAND.mono, fontSize: 8, color: BRAND.ink300,
-                      }}>
-                        {ctrlImage
-                          ? <img src={ctrlImage} alt="control map" style={{ width: '100%', height: '100%', objectFit: 'contain' }} />
-                          : 'NO MAP'}
-                      </div>
-                      <div style={{ display: 'grid', gap: 4, flex: 1 }}>
-                        {ctrlSource === 'layout' ? (
-                          <button style={btn(false)} onClick={refreshLayoutMap}>
-                            {ctrlImage ? '↻ Rebuild from the current layout' : '⌗ Build a map from the current layout'}
-                          </button>
-                        ) : (
-                          <label style={{ ...btn(false), textAlign: 'center' }}>
-                            Upload a reference photo
-                            <input type="file" accept="image/*" style={{ display: 'none' }}
-                              onChange={(e) => { const f = e.target.files?.[0]; if (f) readFileAsDataUrl(f, setCtrlImage); e.target.value = ''; }} />
-                          </label>
-                        )}
-                        {ctrlImage && <button style={btn(false)} onClick={() => setCtrlImage(null)}>Clear map</button>}
-                      </div>
+                    <div style={{ display: 'grid', gap: 4, marginBottom: 6 }}>
+                      {ctrlSource === 'layout' ? (
+                        <button style={btn(false)} onClick={refreshLayoutMap}>
+                          {ctrlImage ? '↻ Rebuild from the current layout' : '⌗ Build a map from the current layout'}
+                        </button>
+                      ) : (
+                        <label style={{ ...btn(false), textAlign: 'center' }}>
+                          Upload a reference photo
+                          <input type="file" accept="image/*" style={{ display: 'none' }}
+                            onChange={(e) => { const f = e.target.files?.[0]; if (f) readFileAsDataUrl(f, setCtrlImage); e.target.value = ''; }} />
+                        </label>
+                      )}
                     </div>
+                    {/* Full width, at the canvas's aspect. A 56px chip of a mostly-dark
+                        depth map is indistinguishable from a bug — you have to be able
+                        to SEE what you are sending the model. */}
+                    {ctrlImage && (
+                      <>
+                        <img src={ctrlImage} alt="control map"
+                          title="This is what the model is given. Click to open it full size."
+                          onClick={() => { const w = window.open(); if (w) w.document.write(`<img src="${ctrlImage}" style="width:100%">`); }}
+                          style={{
+                            width: '100%', display: 'block', cursor: 'zoom-in',
+                            border: `1px solid ${BRAND.ink100}`, background: '#000', marginBottom: 4,
+                            aspectRatio: `${format.w} / ${format.h}`, objectFit: 'contain',
+                          }} />
+                        <button style={{ ...btn(false), width: '100%', marginBottom: 6 }}
+                          onClick={() => setCtrlImage(null)}>Clear map</button>
+                      </>
+                    )}
 
                     {ctrlImage && (
                       <label style={{ display: 'block', fontFamily: BRAND.mono, fontSize: 9, color: BRAND.ink600, marginBottom: 6, letterSpacing: '0.04em' }}>
@@ -7163,7 +7188,7 @@ const GenerateSection = ({
 
                     <div style={{ fontFamily: BRAND.mono, fontSize: 8.5, color: BRAND.ink300, lineHeight: 1.55, letterSpacing: '0.03em' }}>
                       {ctrlSource === 'layout'
-                        ? 'THE MAP IS DERIVED FROM WHERE THE TYPE AND THE MARK ACTUALLY SIT. THE MODEL COMPOSES INTO THE SPACE THAT IS LEFT — IT NEVER SEES A LETTERFORM.'
+                        ? 'DEPTH ONLY — WHITE IS NEAR, DARK IS FAR. THE MAP IS DERIVED FROM WHERE THE TYPE AND THE MARK ACTUALLY SIT: THE PICTURE GOES IN THE LIGHT AREA, THE HEADLINE GETS RECESSIVE BACKGROUND. IT NEVER SEES A LETTERFORM. AN EDGE MAP (CANNY/SCRIBBLE) NEEDS SOMETHING WITH REAL EDGES — USE “FROM A PHOTO”.'
                         : 'THE PHOTO IS RUN THROUGH A PREPROCESSOR ON THE SERVER, THEN USED AS THE CONTROL MAP.'}
                     </div>
                   </>
@@ -7216,22 +7241,25 @@ const GenerateSection = ({
                 {lastMeta.negativeHonoured ? 'APPLIED' : 'IGNORED BY THIS ENGINE'}
               </span>
               {lastMeta.realism ? ' · REALISM ON' : ''}
-              {/* Conditioning, reported by the server — never by the checkbox.
-                  If a model file was missing, the run silently fell back, and the
-                  only honest thing to do is say which one and why. */}
+              {/* Conditioning, reported by the SERVER — never by the checkbox. One
+                  line per input, present or absent. Buried in a wrapping sentence
+                  you cannot tell "the reference was ignored" from "the text ran off
+                  the edge", and those are very different facts. */}
               {lastMeta.conditioning && (
-                <>
-                  {lastMeta.conditioning.ip && <span style={{ color: '#0A7D3E' }}> · REFERENCE APPLIED</span>}
-                  {lastMeta.conditioning.control && (
-                    <span style={{ color: '#0A7D3E' }}>
-                      {' · '}{String(lastMeta.conditioning.controlType || '').toUpperCase()} CONTROL APPLIED
-                      {lastMeta.conditioning.controlModel ? ` (${lastMeta.conditioning.controlModel})` : ''}
-                    </span>
-                  )}
+                <div style={{ marginTop: 5, borderTop: `1px solid ${BRAND.ink100}`, paddingTop: 5 }}>
+                  <div style={{ color: lastMeta.conditioning.ip ? '#0A7D3E' : BRAND.ink300 }}>
+                    {lastMeta.conditioning.ip ? '✓' : '·'} REFERENCE (IP-ADAPTER) {lastMeta.conditioning.ip ? 'APPLIED' : 'NOT USED'}
+                  </div>
+                  <div style={{ color: lastMeta.conditioning.control ? '#0A7D3E' : BRAND.ink300 }}>
+                    {lastMeta.conditioning.control ? '✓' : '·'} COMPOSITION (CONTROLNET){' '}
+                    {lastMeta.conditioning.control
+                      ? `${String(lastMeta.conditioning.controlType || '').toUpperCase()} · ${lastMeta.conditioning.controlModel || ''}`
+                      : 'NOT USED'}
+                  </div>
                   {(lastMeta.conditioning.notes || []).map((n, i) => (
                     <div key={i} style={{ color: '#C8200A' }}>⚠ {n.toUpperCase()}</div>
                   ))}
-                </>
+                </div>
               )}
             </div>
           )}
