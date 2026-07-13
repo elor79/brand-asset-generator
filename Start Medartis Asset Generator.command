@@ -253,6 +253,13 @@ if [ -n "$COMFY_PID" ]; then
   ) &
 fi
 
+# Tell the app WHERE the models are. It reads each checkpoint's safetensors header
+# to know its real architecture — filenames cannot be trusted, and an SD 1.5 file
+# in an SDXL graph renders garbage instead of failing.
+COMFY_DIR_FOUND="$(find_comfy || true)"
+[ -n "$COMFY_DIR_FOUND" ] && export COMFY_HOME="$COMFY_DIR_FOUND"
+export WEBUI_HOME="${WEBUI_HOME:-$HOME/Documents/my_apps/stable-diffusion-webui}"
+
 echo "→ Starting the app → http://localhost:$APP_PORT"
 echo "  (leave this window open · Ctrl+C stops both)"
 echo ""

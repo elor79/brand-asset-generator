@@ -215,6 +215,76 @@ function comboOptions(spec) {
   return [];
 }
 
+
+// ═══ WHAT ARCHITECTURE IS THAT CHECKPOINT, REALLY? ═══════════════════════════
+// Filenames lie. "epicrealism_naturalSinRC1VAE" is an SD 1.5 model; load it into
+// an SDXL graph and you get 1024px latents, an SDXL VAE and an SDXL LoRA applied
+// to a 1.5 UNet — which comes back as a rainbow-fried face, not as an error.
+// ComfyUI will not stop you: every checkpoint is just a file to CheckpointLoader.
+//
+// So we read the file. A .safetensors begins with an 8-byte little-endian length,
+// then that many bytes of JSON listing every tensor. The tensor NAMES tell you the
+// architecture with certainty:
+//
+//   SDXL      two text encoders → conditioner.embedders.1 (OpenCLIP-G)
+//   SD 1.x/2  one              → cond_stage_model / conditioner.embedders.0 only
+//   no CLIP   neither          → UNet-only export, Flux, SD3, video models
+//
+// Reading ~1 MB per file, cached. Cheap, and it is the difference between a
+// picker that lists what works and one that lists what happens to be on disk.
+const CKPT_CACHE = new Map();
+
+const MODEL_DIRS = () => {
+  const dirs = [];
+  const add = (d) => { try { if (d && fs.statSync(d).isDirectory()) dirs.push(d); } catch {} };
+  if (process.env.COMFY_HOME) add(path.join(process.env.COMFY_HOME, 'models', 'checkpoints'));
+  if (process.env.WEBUI_HOME) add(path.join(process.env.WEBUI_HOME, 'models', 'Stable-diffusion'));
+  add(path.join(process.env.HOME || '', 'Documents/my_apps/stable-diffusion-webui/models/Stable-diffusion'));
+  return dirs;
+};
+
+function findCkptFile(name) {
+  for (const dir of MODEL_DIRS()) {
+    const direct = path.join(dir, name);
+    if (fs.existsSync(direct)) return direct;
+    // ComfyUI reports "subfolder/name.safetensors" — and A1111 nests too.
+    try {
+      for (const sub of fs.readdirSync(dir, { withFileTypes: true })) {
+        if (!sub.isDirectory()) continue;
+        const p2 = path.join(dir, sub.name, path.basename(name));
+        if (fs.existsSync(p2)) return p2;
+      }
+    } catch {}
+  }
+  return null;
+}
+
+/** 'sdxl' | 'sd15' | 'no-clip' | 'unknown' — read from the tensor index itself. */
+function checkpointArch(name) {
+  if (CKPT_CACHE.has(name)) return CKPT_CACHE.get(name);
+  let arch = 'unknown';
+  const file = findCkptFile(name);
+  if (file && /\.safetensors$/i.test(file)) {
+    try {
+      const fd = fs.openSync(file, 'r');
+      const lenBuf = Buffer.alloc(8);
+      fs.readSync(fd, lenBuf, 0, 8, 0);
+      const headerLen = Number(lenBuf.readBigUInt64LE(0));
+      if (headerLen > 0 && headerLen < 100e6) {
+        const hdr = Buffer.alloc(headerLen);
+        fs.readSync(fd, hdr, 0, headerLen, 8);
+        const keys = Object.keys(JSON.parse(hdr.toString('utf8')));
+        const hasClipG = keys.some((k) => k.includes('conditioner.embedders.1'));
+        const hasClipL = keys.some((k) => k.includes('conditioner.embedders.0') || k.startsWith('cond_stage_model.'));
+        arch = hasClipG ? 'sdxl' : hasClipL ? 'sd15' : 'no-clip';
+      }
+      fs.closeSync(fd);
+    } catch { /* unreadable → stay 'unknown' and let the name-based guess stand */ }
+  }
+  CKPT_CACHE.set(name, arch);
+  return arch;
+}
+
 async function comfyModels() {
   const info = await comfyObjectInfo();
   const pick = (node, input) => comboOptions(info?.[node]?.input?.required?.[input]);
@@ -714,22 +784,25 @@ export default function genai() {
               // same IP-Adapter. Which one you load is the single biggest lever
               // on realism, so let the panel offer them all rather than hard-wiring
               // sd_xl_base and quietly ignoring a better model sitting right there.
-              // Keep out of the picker anything that CANNOT work in this graph.
-              // The graph is SDXL + CLIPTextEncode: it needs a checkpoint with a
-              // BUILT-IN text encoder. These families keep theirs in separate
-              // files, so loading one produces "clip input is invalid: None" —
-              // an error that reads like a bug and is really a wrong file.
-              const NO_CLIP = /flux|sd3|stable[-_ ]?cascade|hunyuan|wan2|mochi|ltx|cogvideo|pixart|auraflow|unet|diffusion[-_ ]?only/i;
-              const NOT_BASE = /refiner|inpaint|turbo|lightning|lcm/i;   // wrong role, not wrong family
-              out.sdxlCkpts = m.ckpts.filter((f) => !NO_CLIP.test(f) && !NOT_BASE.test(f));
-              out.excludedCkpts = m.ckpts.filter((f) => NO_CLIP.test(f) || NOT_BASE.test(f));
+              // Classify by READING THE FILE, not by guessing from its name. An SD
+              // 1.5 checkpoint in an SDXL graph does not error — it silently
+              // produces garbage, which is far worse.
+              const NOT_BASE = /refiner|inpaint/i;      // wrong ROLE, not wrong family
+              out.ckptArch = Object.fromEntries(m.ckpts.map((f) => [f, checkpointArch(f)]));
+              out.sdxlCkpts = m.ckpts.filter((f) => out.ckptArch[f] === 'sdxl' && !NOT_BASE.test(f));
+              out.excludedCkpts = m.ckpts
+                .filter((f) => !out.sdxlCkpts.includes(f))
+                .map((f) => ({ file: f, why: out.ckptArch[f] === 'sd15' ? 'SD 1.5 — wrong architecture for this pipeline'
+                  : out.ckptArch[f] === 'no-clip' ? 'no text encoder (UNet-only / Flux / SD3 / video)'
+                  : NOT_BASE.test(f) ? 'refiner or inpaint model — not a base checkpoint'
+                  : 'could not read the file' }));
 
               // SPEED LORAS. This is how you actually get Lightning/LCM: as a
               // LoRA ON TOP of a full checkpoint — so the checkpoint still brings
               // the text encoder, and the look still comes from Juggernaut rather
               // than from a stripped-down speed model.
               out.fastLoras = m.loras.filter((f) => /lightning|lcm|hyper|turbo/i.test(f));
-              out.photorealCkpts = out.sdxlCkpts.filter((f) => /juggernaut|realvis|epicrealism|photon|dreamshaper/i.test(f));
+              out.photorealCkpts = out.sdxlCkpts.filter((f) => /juggernaut|realvis|zavychroma|photon|dreamshaper|copax/i.test(f));
               out.hasSdxlLora = m.loras.includes(SDXL_LORA());
               if (!out.hasSdxlBase) out.missing.push('sd_xl_base_1.0.safetensors — the commercially licensable engine · npm run models');
               out.upscalers = m.upscalers;
@@ -801,7 +874,23 @@ export default function genai() {
               // whatever name sits here, so a photoreal fine-tune (Juggernaut XL,
               // RealVisXL) is a drop-in: same architecture, same LoRA, same
               // ControlNet/IP-Adapter — a very different picture.
-              if (b.ckpt) wf['4'].inputs.ckpt_name = b.ckpt;
+              if (b.ckpt) {
+                // A wrong-architecture checkpoint does not fail — it renders a
+                // rainbow-fried mess. Refuse it here, where we can say why.
+                const arch = checkpointArch(b.ckpt);
+                if (arch === 'sd15') {
+                  return send(res, 422, { error:
+                    `“${b.ckpt}” is an SD 1.5 checkpoint, not SDXL. In this pipeline it would be given ` +
+                    `1024px latents, an SDXL VAE and SDXL LoRAs — the result is the melted, rainbow-coloured ` +
+                    `output you have already seen, not an error. Pick an SDXL checkpoint (Juggernaut XL, RealVisXL).` });
+                }
+                if (arch === 'no-clip') {
+                  return send(res, 422, { error:
+                    `“${b.ckpt}” has no built-in text encoder (UNet-only, Flux, SD3 or a video model), ` +
+                    `so the prompt cannot be encoded. Pick a full SDXL checkpoint.` });
+                }
+                wf['4'].inputs.ckpt_name = b.ckpt;
+              }
 
               // ── FAST (Lightning / LCM) ──────────────────────────────────
               // A distilled few-step LoRA. It is NOT just "fewer steps": these

@@ -7150,11 +7150,35 @@ const GenerateSection = ({
                   </option>
                 ))}
               </select>
-              <div style={{ fontFamily: BRAND.mono, fontSize: 8.5, color: BRAND.ink300, lineHeight: 1.5, letterSpacing: '0.03em', marginBottom: 10 }}>
+              <div style={{ fontFamily: BRAND.mono, fontSize: 8.5, color: BRAND.ink300, lineHeight: 1.5, letterSpacing: '0.03em', marginBottom: 6 }}>
                 {(status.photorealCkpts || []).includes(ckpt)
                   ? '★ PHOTOREAL FINE-TUNE. CHECK ITS LICENCE BEFORE COMMERCIAL USE — SDXL BASE IS OPENRAIL++, A CIVITAI FINE-TUNE CARRIES ITS OWN TERMS.'
                   : 'STOCK SDXL BASE IS A GENERAL-PURPOSE MODEL. A PHOTOREAL FINE-TUNE WILL BEAT ANY PROMPT WORDING YOU CAN WRITE.'}
               </div>
+              {/* Say what was left out and WHY. A checkpoint that silently vanished
+                  from the list is indistinguishable from a bug — and the reason is
+                  the useful part: the architecture was read from the file, not
+                  guessed from the name. */}
+              {(status.excludedCkpts || []).length > 0 && (
+                <details style={{ marginBottom: 10 }}>
+                  <summary style={{ cursor: 'pointer', fontFamily: BRAND.mono, fontSize: 8.5, color: BRAND.ink300, letterSpacing: '0.06em' }}>
+                    {status.excludedCkpts.length} CHECKPOINT{status.excludedCkpts.length === 1 ? '' : 'S'} NOT LISTED — WHY?
+                  </summary>
+                  <div style={{ marginTop: 5, padding: '7px 8px', background: BRAND.paper, border: `1px solid ${BRAND.ink100}` }}>
+                    {status.excludedCkpts.map((x) => (
+                      <div key={x.file} style={{ fontFamily: BRAND.mono, fontSize: 8.5, color: BRAND.ink600, lineHeight: 1.6 }}>
+                        {String(x.file).replace(/\.safetensors$/i, '')}
+                        <span style={{ color: BRAND.ink300 }}> — {x.why}</span>
+                      </div>
+                    ))}
+                    <div style={{ fontFamily: BRAND.display, fontSize: 10, color: BRAND.ink300, marginTop: 6, lineHeight: 1.5 }}>
+                      Architecture is read from each file’s safetensors header, not guessed from its
+                      name. An SD 1.5 model in this SDXL pipeline does not error — it returns a
+                      melted, rainbow-coloured image.
+                    </div>
+                  </div>
+                </details>
+              )}
             </>
           )}
 
