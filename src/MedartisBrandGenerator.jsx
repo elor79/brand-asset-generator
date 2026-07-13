@@ -51,25 +51,33 @@ const BRAND = {
 // fraction of the short side — Brand Guide §logo_placement: 0.27 paged /
 // 0.30 poster / 0.10 sensible digital default.
 const FORMATS = {
-  // ── SOCIAL · square + tall ────────────────────────────────
-  'ig-post':         { label: 'Instagram Post',        w: 1080, h: 1080, ratio: '1:1',    group: 'Social · square', wmPct: 0.10 },
-  'ig-story':        { label: 'Instagram Story',       w: 1080, h: 1920, ratio: '9:16',   group: 'Social · square', wmPct: 0.10 },
-  'ig-reel':         { label: 'Instagram Reel cover',  w: 1080, h: 1920, ratio: '9:16',   group: 'Social · square', wmPct: 0.10 },
-  'ig-carousel':     { label: 'Instagram Carousel',    w: 1080, h: 1080, ratio: '1:1',    group: 'Social · square', wmPct: 0.10, multi: true },
-  'tiktok':          { label: 'TikTok',                w: 1080, h: 1920, ratio: '9:16',   group: 'Social · square', wmPct: 0.10 },
-  'pinterest-pin':   { label: 'Pinterest Pin',         w: 1000, h: 1500, ratio: '2:3',    group: 'Social · square', wmPct: 0.10 },
+  // ─── SOCIAL ───────────────────────────────────────────────
+  // Grouped by PLATFORM, not by shape. The old groups were named for shape
+  // ("square", "wide") but sorted by platform, so LinkedIn Post — a 1:1 — sat
+  // under "wide", and Instagram Story — a 9:16 — sat under "square". Two axes
+  // wearing one label: whichever you believed, the list lied to you.
+  //
+  // Platform is the axis people actually choose along ("I need a LinkedIn ad"),
+  // and the shape is never hidden — the ratio is printed on every row.
+  'ig-post':         { label: 'Instagram Post',        w: 1080, h: 1080, ratio: '1:1',    group: 'Social · Instagram', wmPct: 0.10 },
+  'ig-story':        { label: 'Instagram Story',       w: 1080, h: 1920, ratio: '9:16',   group: 'Social · Instagram', wmPct: 0.10 },
+  'ig-reel':         { label: 'Instagram Reel cover',  w: 1080, h: 1920, ratio: '9:16',   group: 'Social · Instagram', wmPct: 0.10 },
+  'ig-carousel':     { label: 'Instagram Carousel',    w: 1080, h: 1080, ratio: '1:1',    group: 'Social · Instagram', wmPct: 0.10, multi: true },
 
-  // ── SOCIAL · wide / banner ────────────────────────────────
-  'li-post':         { label: 'LinkedIn Post',         w: 1200, h: 1200, ratio: '1:1',    group: 'Social · wide',   wmPct: 0.10 },
-  'li-ad':           { label: 'LinkedIn Ad',           w: 1200, h: 628,  ratio: '1.91:1', group: 'Social · wide',   wmPct: 0.09 },
-  'li-carousel':     { label: 'LinkedIn Carousel',     w: 1080, h: 1080, ratio: '1:1',    group: 'Social · wide',   wmPct: 0.10, multi: true },
-  'li-banner':       { label: 'LinkedIn Page Banner',  w: 1584, h: 396,  ratio: '4:1',    group: 'Social · wide',   wmPct: 0.09 },
-  'fb-post':         { label: 'Facebook Post',         w: 1200, h: 630,  ratio: '1.91:1', group: 'Social · wide',   wmPct: 0.09 },
-  'fb-cover':        { label: 'Facebook Cover',        w: 851,  h: 315,  ratio: '2.7:1',  group: 'Social · wide',   wmPct: 0.09 },
-  'x-post':          { label: 'X / Twitter Post',      w: 1200, h: 675,  ratio: '16:9',   group: 'Social · wide',   wmPct: 0.10 },
-  'x-header':        { label: 'X / Twitter Header',    w: 1500, h: 500,  ratio: '3:1',    group: 'Social · wide',   wmPct: 0.09 },
-  'yt-thumb':        { label: 'YouTube Thumbnail',     w: 1280, h: 720,  ratio: '16:9',   group: 'Social · wide',   wmPct: 0.10 },
-  'yt-banner':       { label: 'YouTube Banner',        w: 2560, h: 1440, ratio: '16:9',   group: 'Social · wide',   wmPct: 0.08 },
+  'li-post':         { label: 'LinkedIn Post',         w: 1200, h: 1200, ratio: '1:1',    group: 'Social · LinkedIn',  wmPct: 0.10 },
+  'li-ad':           { label: 'LinkedIn Ad',           w: 1200, h: 628,  ratio: '1.91:1', group: 'Social · LinkedIn',  wmPct: 0.09 },
+  'li-carousel':     { label: 'LinkedIn Carousel',     w: 1080, h: 1080, ratio: '1:1',    group: 'Social · LinkedIn',  wmPct: 0.10, multi: true },
+  'li-banner':       { label: 'LinkedIn Page Banner',  w: 1584, h: 396,  ratio: '4:1',    group: 'Social · LinkedIn',  wmPct: 0.09 },
+
+  'fb-post':         { label: 'Facebook Post',         w: 1200, h: 630,  ratio: '1.91:1', group: 'Social · Facebook & X', wmPct: 0.09 },
+  'fb-cover':        { label: 'Facebook Cover',        w: 851,  h: 315,  ratio: '2.7:1',  group: 'Social · Facebook & X', wmPct: 0.09 },
+  'x-post':          { label: 'X / Twitter Post',      w: 1200, h: 675,  ratio: '16:9',   group: 'Social · Facebook & X', wmPct: 0.10 },
+  'x-header':        { label: 'X / Twitter Header',    w: 1500, h: 500,  ratio: '3:1',    group: 'Social · Facebook & X', wmPct: 0.09 },
+
+  'yt-thumb':        { label: 'YouTube Thumbnail',     w: 1280, h: 720,  ratio: '16:9',   group: 'Social · Video & discovery', wmPct: 0.10 },
+  'yt-banner':       { label: 'YouTube Banner',        w: 2560, h: 1440, ratio: '16:9',   group: 'Social · Video & discovery', wmPct: 0.08 },
+  'tiktok':          { label: 'TikTok',                w: 1080, h: 1920, ratio: '9:16',   group: 'Social · Video & discovery', wmPct: 0.10 },
+  'pinterest-pin':   { label: 'Pinterest Pin',         w: 1000, h: 1500, ratio: '2:3',    group: 'Social · Video & discovery', wmPct: 0.10 },
 
   // ── DIGITAL SURFACE ───────────────────────────────────────
   'screensaver':     { label: '16:9 Screensaver',      w: 1920, h: 1080, ratio: '16:9',   group: 'Digital surface', wmPct: 0.10 },
@@ -3334,7 +3342,11 @@ export default function MedartisBrandGenerator() {
   // Collapsible sidebar groups — persisted to localStorage. Format-category
   // groups (keys starting with 'fmt:') behave as an ACCORDION: opening one
   // closes the others. Default: all format groups COLLAPSED (clean sidebar).
-  const COLLAPSE_KEY = 'medartis-bag-collapsed-v3';
+  // v4: the format groups were renamed (shape → platform), so the stored
+// collapse state keys no longer match. Bumping the key resets them to the
+// intended default (all format groups collapsed) instead of leaving every
+// group hanging open because none of the old keys resolve.
+const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
   const ACCORDION_KEY = 'medartis-bag-accordion-v1';
   // Derived from FORMATS so the two can never drift apart.
   const FMT_GROUPS = [...new Set(Object.values(FORMATS).map(f => f.group || 'Other'))];
