@@ -7003,10 +7003,22 @@ const GenerateSection = ({
             }}>◈ Conditioning</div>
 
             {!isSdxl && (
-              <div style={{ fontFamily: BRAND.mono, fontSize: 9, color: '#C8200A', lineHeight: 1.55, letterSpacing: '0.04em' }}>
-                ⚠ CONDITIONING IS SDXL-ONLY — FLUX CONTROLNET / IP-ADAPTER WEIGHTS ARE
-                CHECKPOINT-SPECIFIC. SWITCH THE ENGINE TO SDXL TO USE A REFERENCE OR A LAYOUT MAP.
-              </div>
+              <>
+                <div style={{ fontFamily: BRAND.mono, fontSize: 9, color: '#C8200A', lineHeight: 1.55, letterSpacing: '0.04em', marginBottom: 7 }}>
+                  ⚠ CONDITIONING IS SDXL-ONLY — FLUX CONTROLNET / IP-ADAPTER WEIGHTS ARE
+                  CHECKPOINT-SPECIFIC, SO OFFERING THEM HERE WOULD ONLY FAIL INSIDE COMFYUI.
+                </div>
+                {/* A warning that tells you what to do but makes you do it elsewhere is
+                    half a warning. Fix it from where it is raised. */}
+                <button
+                  style={{ ...btn(false), width: '100%', padding: '8px' }}
+                  disabled={!status?.engines?.includes('sdxl')}
+                  onClick={() => setEngine('sdxl')}>
+                  {status?.engines?.includes('sdxl')
+                    ? '→ Switch the engine to SDXL'
+                    : 'SDXL base is not installed — npm run models'}
+                </button>
+              </>
             )}
 
             {isSdxl && (
@@ -7017,8 +7029,16 @@ const GenerateSection = ({
                   <span style={{ color: BRAND.ink300, letterSpacing: 0, textTransform: 'none' }}> · IP-Adapter · steers colour, light, material</span>
                 </div>
                 {!canIp ? (
-                  <div style={{ fontFamily: BRAND.mono, fontSize: 9, color: BRAND.ink300, lineHeight: 1.5, marginBottom: 10, letterSpacing: '0.04em' }}>
+                  <div style={{
+                    fontFamily: BRAND.mono, fontSize: 9, color: BRAND.ink600, lineHeight: 1.6,
+                    marginBottom: 10, letterSpacing: '0.04em',
+                    padding: '7px 8px', background: BRAND.paper, border: `1px solid ${BRAND.ink100}`,
+                  }}>
                     UNAVAILABLE · MISSING {String(status?.conditioning?.ipMissing || 'IP-ADAPTER').toUpperCase()}
+                    <div style={{ color: BRAND.ink300, marginTop: 4, textTransform: 'none', letterSpacing: 0, fontSize: 9 }}>
+                      Install once: <code>bash ai/tools/setup_conditioning.sh /path/to/ComfyUI</code> — then restart
+                      ComfyUI. It clones ComfyUI_IPAdapter_plus and fetches the SDXL IP-Adapter + CLIP-Vision weights.
+                    </div>
                   </div>
                 ) : (
                   <>
@@ -7074,8 +7094,16 @@ const GenerateSection = ({
                   <span style={{ color: BRAND.ink300, letterSpacing: 0, textTransform: 'none' }}> · ControlNet · the layout becomes the input</span>
                 </div>
                 {!canControl ? (
-                  <div style={{ fontFamily: BRAND.mono, fontSize: 9, color: BRAND.ink300, lineHeight: 1.5, letterSpacing: '0.04em' }}>
+                  <div style={{
+                    fontFamily: BRAND.mono, fontSize: 9, color: BRAND.ink600, lineHeight: 1.6,
+                    letterSpacing: '0.04em',
+                    padding: '7px 8px', background: BRAND.paper, border: `1px solid ${BRAND.ink100}`,
+                  }}>
                     UNAVAILABLE · MISSING {String(status?.conditioning?.controlMissing || 'CONTROLNET MODELS').toUpperCase()}
+                    <div style={{ color: BRAND.ink300, marginTop: 4, textTransform: 'none', letterSpacing: 0, fontSize: 9 }}>
+                      Install once: <code>bash ai/tools/setup_conditioning.sh /path/to/ComfyUI</code> — then restart
+                      ComfyUI. It fetches the SDXL depth / canny ControlNets into models/controlnet.
+                    </div>
                   </div>
                 ) : (
                   <>
