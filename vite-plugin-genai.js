@@ -87,12 +87,16 @@ function compilePrompt({ prompt, surface, program, realism = true, extraNegative
   };
 }
 
-// The hard gate. IBRA is a surgical-education association: clinical-looking
-// synthetic imagery is a credibility problem, not a style problem.
+// The prompt gate. OFF by default — removed at the brand owner's instruction.
+// The mechanism stays because a switch is worth more than a deletion: flip
+// blocklist_enabled in ai/prompt/house_style.json and put terms back in
+// `blocklist`, and it refuses again. The archived list is in the same file.
 function safetyCheck(prompt) {
   const s = STYLE();
+  const list = s.blocklist_enabled === true ? (s.blocklist || []) : [];
+  if (!list.length) return { ok: true };
   const text = ` ${(prompt || '').toLowerCase()} `;
-  const hit = s.blocklist.find((w) => text.includes(` ${w} `) || text.includes(` ${w},`) || text.includes(` ${w}.`));
+  const hit = list.find((w) => text.includes(` ${w} `) || text.includes(` ${w},`) || text.includes(` ${w}.`));
   return hit ? { ok: false, term: hit, message: s.blocklist_message } : { ok: true };
 }
 

@@ -1,9 +1,7 @@
 {
-  "_comment": "The brand-prompt compiler. The Generate panel never sends a raw user prompt to the model — it compiles [trigger] + [subject] + [house look] + [realism] + [surface context] and applies the negative + the safety blocklist. Tune the tokens here; they should DESCRIBE the Medartis library, not fight it.",
-
+  "_comment": "The brand-prompt compiler. The Generate panel compiles [trigger] + [subject] + [house look] + [realism] + [surface context] and attaches the negative. Tune the tokens here; they should DESCRIBE the Medartis library, not fight it. There is no prompt gate: see _safety_note.",
   "trigger": "medartishouse",
   "_trigger_note": "The LoRA trigger word. Only used when a Medartis LoRA is present in ComfyUI; harmless otherwise.",
-
   "look": [
     "editorial photograph in the Medartis house style",
     "precision-engineering environment, clean modern manufacturing and training space",
@@ -13,7 +11,6 @@
     "real hands, real practitioners, documentary rather than staged",
     "shallow depth of field, natural skin tones, matte surfaces, no gloss"
   ],
-
   "_realism_note": "REALISM IS MOSTLY A POSITIVE-PROMPT PROBLEM. FLUX.1 [dev] is guidance-distilled: at CFG 1 it does not read a negative prompt at all, so photorealism has to be ASSERTED here rather than merely forbidden below. These tokens are appended whenever realism is on.",
   "realism": [
     "photorealistic, indistinguishable from a real photograph",
@@ -25,13 +22,11 @@
     "subtle sensor noise and fine film grain, slight optical vignetting",
     "candid unposed moment, imperfect natural framing"
   ],
-
   "surfaces": {
     "dark": "composed for a coal-black layout, darker mid-tones, room for type in the upper third",
     "light": "composed for a bone-white layout, airy high-key, room for type in the upper third",
     "overlay": "wide establishing framing with an empty lower third for a text overlay"
   },
-
   "programs": {
     "product": "surgical instruments and implant systems on a clean workbench, macro precision",
     "manufacturing": "precision manufacturing floor, CNC and metrology, quiet focus",
@@ -39,7 +34,6 @@
     "congress": "congress hall, booth, conversation between colleagues",
     "corporate": "modern office and laboratory interiors, architectural calm"
   },
-
   "_negative_note": "Grouped by the failure mode each line kills. Order matters little; coverage does. This is honoured by SDXL / SDXL-Turbo, and by Flux ONLY when 'strict negatives' raises CFG above 1 (slower). The server reports which engine actually consumed it, so the panel never lies about it.",
   "negative": [
     "3d render, cgi, octane render, unreal engine, blender, ray traced, digital art, illustration, painting, drawing, sketch, cartoon, anime, concept art, matte painting, airbrushed",
@@ -52,22 +46,45 @@
     "cluttered composition, busy distracting background, tilted horizon, cropped head, duplicated subject, cloned objects, warped perspective",
     "harsh direct flash, blown highlights, crushed blacks, flat lifeless lighting, studio seamless backdrop"
   ],
-
-  "_safety_note": "Medartis is a medical-device manufacturer. AI imagery that looks like CLINICAL REALITY is a credibility and regulatory problem, not merely a brand one. That is the line this gate defends, and it is narrower than it first was.",
-
-  "_people_note": "PEOPLE ARE NOW ALLOWED — removed at the brand owner's instruction (Eddie, 13 Jul 2026). Generic, invented people (a surgeon at a workbench, colleagues at a congress, hands on an instrument) are ordinary editorial imagery and the model may make them. What remains blocked is not 'people': it is (a) clinical content — wounds, operative fields, patient imaging — regardless of who is in it, and (b) prompts that name or reconstruct a REAL, IDENTIFIABLE individual, which is a likeness and consent problem, not a brand one. Those two are separate rules and should be reasoned about separately. If a generated person is ever presented as a named surgeon, a real KOL, or clinical documentation, that is a fabrication — no blocklist can prevent that downstream, only editorial discipline can.",
-
-  "blocklist": [
-    "patient", "patients", "wound", "wounds", "incision", "incisions",
-    "bleeding", "blood", "surgical site", "operative field", "operating field",
-    "open surgery", "dissection", "cadaver", "specimen",
-    "x-ray", "xray", "radiograph", "radiography", "ct scan", "mri", "fluoroscopy",
-    "fracture", "bone graft", "amputation",
-    "diagnosis", "pathology", "tumor", "tumour", "lesion",
-    "photo of dr", "celebrity", "named surgeon", "real person"
+  "_safety_note": "PROMPT GATE: OFF. Removed at the brand owner's instruction (Eddie, 13 Jul 2026). The generator no longer refuses any prompt. The former list is preserved below as 'blocklist_archived' so this is a switch, not an excavation: set blocklist_enabled to true and copy the terms you want back into 'blocklist'.",
+  "blocklist": [],
+  "blocklist_message": "",
+  "blocklist_enabled": false,
+  "blocklist_archived": [
+    "patient",
+    "patients",
+    "wound",
+    "wounds",
+    "incision",
+    "incisions",
+    "bleeding",
+    "blood",
+    "surgical site",
+    "operative field",
+    "operating field",
+    "open surgery",
+    "dissection",
+    "cadaver",
+    "specimen",
+    "x-ray",
+    "xray",
+    "radiograph",
+    "radiography",
+    "ct scan",
+    "mri",
+    "fluoroscopy",
+    "fracture",
+    "bone graft",
+    "amputation",
+    "diagnosis",
+    "pathology",
+    "tumor",
+    "tumour",
+    "lesion",
+    "photo of dr",
+    "celebrity",
+    "named surgeon",
+    "real person"
   ],
-
-  "_identity_note": "The four identity terms above are kept deliberately NARROW: they catch 'photo of Dr Krimmer' and 'portrait of a celebrity', not 'a surgeon'. Generic people pass. 'portrait of' was removed — it blocked ordinary portraiture of invented people, which was never the risk.",
-
-  "blocklist_message": "Generation is limited to environment, product, atmosphere and generic (invented) people. Two things stay out: CLINICAL CONTENT — wounds, operative fields, patient imaging, pathology — which must be real photography or Canto; and any REAL, IDENTIFIABLE individual, which is a likeness and consent matter. A generated person must never be presented as a named surgeon, a KOL, or clinical documentation."
+  "_editorial_note": "The gate is gone; the judgement it encoded is not. It is now a matter of editorial discipline rather than a refusal: a generated image presented as clinical documentation, or a generated person presented as a named surgeon or KOL, is a fabrication — and no prompt filter could have prevented that downstream anyway, only the person placing the asset can. Generated frames are still flagged ai_generated end to end."
 }
