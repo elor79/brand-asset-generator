@@ -1674,7 +1674,7 @@ function BrochurePanel({
           {BROCHURE_TYPE_KEYS.map((k) => <option key={k} value={k}>{BROCHURE_TYPES[k].label}</option>)}
         </select>
         <div style={{ fontFamily: BRAND.mono, fontSize: 9.5, color: BRAND.ink300, marginBottom: 12, letterSpacing: '0.04em' }}>
-          {def.hint}{def.image ? ' · § 06 sets this page’s image' : ' · no image on this type'}
+          {def.hint}{def.image ? ` · § ${SECTION_NO.IMAGE} sets this page’s image` : ' · no image on this type'}
         </div>
 
         {(def.fields || []).map((fd) => (
@@ -3276,11 +3276,9 @@ export default function MedartisBrandGenerator() {
   const FMT_GROUPS = [...new Set(Object.values(FORMATS).map(f => f.group || 'Other'))];
   const ALL_FMT_KEYS = FMT_GROUPS.map(g => 'fmt:' + g);
   // Every collapsible <Section> id — keep in sync with the sp('…') calls below.
-  const SECTION_KEYS = [
-    'FORMAT', 'LAYOUT', 'TEMPLATE', 'CONTENT', 'CAROUSEL', 'CAROUSEL_BG', 'SURFACE',
-    'BRANDBAR', 'CHECK', 'IMAGE', 'IMAGEFIT', 'GENERATE', 'TEXTBG', 'QR',
-    'EXPORT', 'PRESETS', 'CANTO',
-  ];
+  // Collapse/Solo operate on the SAME list the numbers come from — a second,
+  // hand-maintained copy is how the two drift apart.
+  const SECTION_KEYS = SECTION_ORDER;
   const ALL_SEC_KEYS = SECTION_KEYS.map(k => 'sec:' + k);
   const ALL_KEYS = [...ALL_SEC_KEYS, ...ALL_FMT_KEYS];
   const [collapsed, setCollapsed] = useState(() => {
@@ -4928,7 +4926,7 @@ export default function MedartisBrandGenerator() {
 
         <SideGroup n="1" label="Canvas" />
 
-        <Section label="§ 01 — FORMAT" {...sp('FORMAT')}>
+        <Section label={SEC('FORMAT', 'FORMAT')} {...sp('FORMAT')}>
           {Object.entries(
             Object.entries(FORMATS).reduce((acc, [key, fmt]) => {
               const g = fmt.group || 'Other';
@@ -4974,7 +4972,7 @@ export default function MedartisBrandGenerator() {
         </Section>
 
         {!isBrochure && (
-        <Section label="§ 02 — LAYOUT" {...sp('LAYOUT')}>
+        <Section label={SEC('LAYOUT', 'LAYOUT')} {...sp('LAYOUT')}>
           {FORMAT_LAYOUTS[formatKey].map((lk) => (
             <SidebarBtn key={lk} active={layoutKey === lk} onClick={() => setLayoutKey(lk)}>
               {LAYOUTS[lk].label}
@@ -4986,7 +4984,7 @@ export default function MedartisBrandGenerator() {
         <SideGroup n="2" label="Story" />
 
         {isBrochure && (
-        <Section label={`§ 03 — BROCHURE · PAGE ${curBrochure + 1} / ${brochurePages.length}`} {...sp('BROCHURE')}>
+        <Section label={SEC('BROCHURE', `BROCHURE · PAGE ${curBrochure + 1} / ${brochurePages.length}`)} {...sp('BROCHURE')}>
           <BrochurePanel
             pages={brochurePages}
             idx={curBrochure}
@@ -5016,7 +5014,7 @@ export default function MedartisBrandGenerator() {
         )}
 
         {!isBrochure && (
-        <Section label="§ 03 — CONTENT TEMPLATE" {...sp('TEMPLATE')}>
+        <Section label={SEC('TEMPLATE', 'CONTENT TEMPLATE')} {...sp('TEMPLATE')}>
           {contentEdited.current && (
             <div style={{
               fontSize: 10, fontFamily: BRAND.mono, color: BRAND.ink600,
@@ -5154,7 +5152,7 @@ export default function MedartisBrandGenerator() {
           const canAdd  = isBrochure ? brochurePages.length < 60 : isPages ? true : carouselSlides < 10;
           const label   = (i) => (isBrochure ? (BROCHURE_TYPES[brochurePages[i]?.type]?.label || '') : '');
           const hint = isBrochure
-            ? `PAGE ${idx + 1} / ${count} · ${(BROCHURE_TYPES[brochurePage?.type]?.label || '').toUpperCase()} · § 03 EDITS THIS PAGE`
+            ? `PAGE ${idx + 1} / ${count} · ${(BROCHURE_TYPES[brochurePage?.type]?.label || '').toUpperCase()} · § ${SECTION_NO.BROCHURE} EDITS THIS PAGE`
             : count > 1
               ? `${noun} ${idx + 1} / ${count} · CONTENT & IMAGE PANELS EDIT THIS ${noun}`
               : `SINGLE ${noun} · + ADDS ${isPages ? 'A PAGE' : 'A SLIDE'}`;
@@ -5181,7 +5179,7 @@ export default function MedartisBrandGenerator() {
                     }}>{i + 1}</button>
                 ))}
                 <button onClick={add} disabled={!canAdd}
-                  title={isBrochure ? 'Add a page (choose its type in § 03)'
+                  title={isBrochure ? `Add a page (choose its type in § ${SECTION_NO.BROCHURE})`
                        : isPages ? 'Add a page (inserts a page break in the body)' : 'Add a slide'}
                   style={{
                     minWidth: 32, height: 32, borderRadius: 16, cursor: canAdd ? 'pointer' : 'not-allowed',
@@ -5211,7 +5209,7 @@ export default function MedartisBrandGenerator() {
       }}>
         <SideGroup n="3" label="Brand system" />
 
-        <Section label="§ 04 — SURFACE" {...sp('SURFACE')}>
+        <Section label={SEC('SURFACE', 'SURFACE')} {...sp('SURFACE')}>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', gap: 4 }}>
             {Object.entries(palettes).map(([name, p]) => (
               <button key={name} onClick={() => setPaletteName(name)}
@@ -5244,7 +5242,7 @@ export default function MedartisBrandGenerator() {
         </Section>
 
         {/* Brand bar placement — per brand guide §logo_placement */}
-        <Section label="§ 04B — BRAND BAR" {...sp('BRANDBAR')}>
+        <Section label={SEC('BRANDBAR', 'BRAND BAR')} {...sp('BRANDBAR')}>
           <div style={{
             fontSize: 10, color: BRAND.ink600, marginBottom: 8,
             fontFamily: BRAND.mono, letterSpacing: '0.06em', lineHeight: 1.5
@@ -5386,7 +5384,7 @@ export default function MedartisBrandGenerator() {
         </Section>
 
         {/* Frosted-glass / solid backdrop behind text */}
-        <Section label="§ 04E — TEXT BACKDROP" {...sp('TEXTBG')}>
+        <Section label={SEC('TEXTBG', 'TEXT BACKDROP')} {...sp('TEXTBG')}>
           <label style={{
             display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10,
             fontFamily: BRAND.mono, fontSize: 11, color: BRAND.ink, cursor: 'pointer',
@@ -5453,7 +5451,7 @@ export default function MedartisBrandGenerator() {
         </Section>
 
         {/* QR code overlay */}
-        <Section label="§ 04C — QR CODE" {...sp('QR')}>
+        <Section label={SEC('QR', 'QR CODE')} {...sp('QR')}>
           <label style={{
             display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10,
             fontFamily: BRAND.mono, fontSize: 11, color: BRAND.ink, cursor: 'pointer',
@@ -5536,7 +5534,7 @@ export default function MedartisBrandGenerator() {
 
         {/* Carousel slide count + tabs */}
         {format.multi && (
-          <Section label="§ 04A — CAROUSEL" {...sp('CAROUSEL')}>
+          <Section label={SEC('CAROUSEL', 'CAROUSEL')} {...sp('CAROUSEL')}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
               <span style={{
                 fontSize: 10, fontFamily: BRAND.mono, color: BRAND.ink600,
@@ -5593,7 +5591,7 @@ export default function MedartisBrandGenerator() {
                 {!qrConfig.enabled && (
                   <>
                     <br/>
-                    <span style={{ color: BRAND.gold }}>QR PER-SLIDE TOGGLE NEEDS GLOBAL QR ON IN § 04C</span>
+                    <span style={{ color: BRAND.gold }}>QR PER-SLIDE TOGGLE NEEDS GLOBAL QR ON IN § {SECTION_NO.QR}</span>
                   </>
                 )}
               </div>
@@ -5603,7 +5601,7 @@ export default function MedartisBrandGenerator() {
 
         {/* Carousel spanning background — only for multi-slide formats */}
         {format.multi && (
-          <Section label="§ 04D — SPANNING BG" {...sp('CAROUSEL_BG')}>
+          <Section label={SEC('CAROUSEL_BG', 'SPANNING BG')} {...sp('CAROUSEL_BG')}>
             <label style={{
               display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8,
               fontFamily: BRAND.mono, fontSize: 11, color: BRAND.ink, cursor: 'pointer',
@@ -5733,9 +5731,9 @@ export default function MedartisBrandGenerator() {
           </Section>
         )}
 
-        {/* Content fields — a brochure page carries its own fields (§ 03) */}
+        {/* Content fields — a brochure page carries its own fields (§ 03 BROCHURE) */}
         {!isBrochure && (
-        <Section label={`§ 05 — CONTENT${format.multi ? ` · SLIDE ${carouselSlide + 1}` : ''}`} {...sp('CONTENT')}>
+        <Section label={SEC('CONTENT', `CONTENT${format.multi ? ` · SLIDE ${carouselSlide + 1}` : ''}`)} {...sp('CONTENT')}>
           {template.fields.map(field => (
             <div key={field.key} style={{ marginBottom: 14 }}>
               <label style={{
@@ -5767,7 +5765,7 @@ export default function MedartisBrandGenerator() {
         {(() => null)()}
         <SideGroup n="4" label="Imagery" />
 
-        <Section label={`§ 06 — IMAGE${format.multi ? ` · SLIDE ${carouselSlide + 1}` : ''}`} {...sp('IMAGE')}>
+        <Section label={SEC('IMAGE', `IMAGE${format.multi ? ` · SLIDE ${carouselSlide + 1}` : ''}`)} {...sp('IMAGE')}>
         {perSlideImageDisabled && (
           <div style={{
             padding: '10px 12px', background: BRAND.bone, border: `1px solid ${BRAND.ink100}`,
@@ -5863,7 +5861,7 @@ export default function MedartisBrandGenerator() {
         </div>
 
         {/* Image fit controls */}
-        <Section label="§ 08 — IMAGE FIT" {...sp('IMAGEFIT')}>
+        <Section label={SEC('IMAGEFIT', 'IMAGE FIT')} {...sp('IMAGEFIT')}>
         {perSlideImageDisabled ? (
           <div style={{
             padding: '10px 12px', background: BRAND.bone, border: `1px solid ${BRAND.ink100}`,
@@ -5889,7 +5887,7 @@ export default function MedartisBrandGenerator() {
             resolve it, offers a one-click fix. */}
         <SideGroup n="5" label="Output" />
 
-        <Section label="§ 09 — BRAND CHECK" {...sp('CHECK')}>
+        <Section label={SEC('CHECK', 'BRAND CHECK')} {...sp('CHECK')}>
           {(() => {
             const fails = brandChecks.filter((c) => c.ok !== 'pass');
             const fixable = fails.filter((c) => c.fix);
@@ -5960,7 +5958,7 @@ export default function MedartisBrandGenerator() {
         </Section>
 
         {/* Export */}
-        <Section label="§ 10 — EXPORT" {...sp('EXPORT')}>
+        <Section label={SEC('EXPORT', 'EXPORT')} {...sp('EXPORT')}>
           <button onClick={download} style={{
             width: '100%', padding: '14px', background: BRAND.ink,
             color: BRAND.bone00, border: 'none', borderRadius: 0,
@@ -6056,7 +6054,7 @@ export default function MedartisBrandGenerator() {
         </Section>
 
         {/* Presets — save / load full state */}
-        <Section label="§ 10 — PRESETS" {...sp('PRESETS')}>
+        <Section label={SEC('PRESETS', 'PRESETS')} {...sp('PRESETS')}>
           <div style={{ display: 'flex', gap: 4, marginBottom: 4 }}>
             <input
               type="text"
@@ -6209,6 +6207,42 @@ const SideGroup = ({ n, label, hint }) => (
     {hint && <span style={{ fontSize: 9, color: BRAND.ink300, fontFamily: BRAND.mono }}>{hint}</span>}
   </div>
 );
+
+// ─── SIDEBAR SECTIONS ────────────────────────────────────────────────
+// ONE ordered list, and the numbers are DERIVED from it. They used to be typed
+// into each label by hand, which is why the sidebar drifted to 04 · 04B · 04E ·
+// 04C · … · 06 · 08 · 07 · 08 · 09 · 10 · 10 — two § 08s, two § 10s, and the
+// B/C/E suffixes reading out of order. Numbering by hand across a file this size
+// is a promise nobody can keep; numbering from the list is free.
+//
+// The order here IS the order on screen. Move a line, and the number, the label
+// and every "see § 07" reference in the UI move with it.
+const SECTION_ORDER = [
+  // 1 · Canvas
+  'FORMAT', 'LAYOUT',
+  // 2 · Story — TEMPLATE and BROCHURE are alternates: same slot, same number.
+  'TEMPLATE', 'BROCHURE',
+  // 3 · Brand system
+  'SURFACE', 'BRANDBAR', 'TEXTBG', 'QR', 'CAROUSEL', 'CAROUSEL_BG', 'CONTENT',
+  // 4 · Imagery
+  'IMAGE', 'GENERATE', 'CANTO', 'IMAGEFIT',
+  // 5 · Output
+  'CHECK', 'EXPORT', 'PRESETS',
+];
+// TEMPLATE and BROCHURE never appear together — they are the same slot in the
+// story step — so they share a number instead of leaving a hole in the sequence.
+const SECTION_ALIAS = { BROCHURE: 'TEMPLATE' };
+const SECTION_NO = (() => {
+  const map = {};
+  let n = 0;
+  for (const k of SECTION_ORDER) {
+    if (SECTION_ALIAS[k]) { map[k] = map[SECTION_ALIAS[k]]; continue; }
+    map[k] = String(++n).padStart(2, '0');
+  }
+  return map;
+})();
+/** "§ 07 — CANTO DAM" — the number is never written by hand. */
+const SEC = (key, label) => `§ ${SECTION_NO[key] || '--'} — ${label}`;
 
 const Section = ({ label, children, collapsed, onToggle }) => {
   const isCollapsible = typeof onToggle === 'function';
@@ -6950,7 +6984,7 @@ const GenerateSection = ({
   });
 
   return (
-    <Section label="§ 08 — GENERATE · AI" {...sectionProps}>
+    <Section label={SEC('GENERATE', 'GENERATE · AI')} {...sectionProps}>
       <div style={{
         padding: '9px 10px', marginBottom: 10, background: BRAND.bone,
         borderLeft: `3px solid ${BRAND.gold}`,
@@ -7294,7 +7328,7 @@ const GenerateSection = ({
                     This is the Medartis safety gate, not the model. A generated human
                     presented as a surgeon is a regulatory and credibility problem for a
                     medical-device manufacturer — so people-as-clinicians stay real
-                    photography (Canto, § 07).
+                    photography (Canto, § {SECTION_NO.CANTO}).
                     <div style={{ marginTop: 6 }}>
                       Generate the <b>place</b>, not the person: “an empty, immaculate
                       operating theatre, cool daylight, instruments laid out on a tray”.
@@ -7436,7 +7470,7 @@ const CantoSection = ({ onPickImage, onSaveToLibrary, sectionProps = {} }) => {
   };
 
   return (
-    <Section label="§ 07 — CANTO DAM" {...sectionProps}>
+    <Section label={SEC('CANTO', 'CANTO DAM')} {...sectionProps}>
       {!status && (
         <div style={{ fontSize: 11, color: BRAND.ink600, fontFamily: BRAND.mono }}>
           checking status…

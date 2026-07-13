@@ -37,9 +37,9 @@ IBRA generator's ComfyUI, and `~/ComfyUI`. One backend, shared — the weights a
 | command | what it does |
 | --- | --- |
 | `npm start` | ComfyUI + the app (this is the one you want) |
-| `npm run dev` | the app only — § 08 GENERATE will report no backend |
+| `npm run dev` | the app only — § 12 GENERATE will report no backend |
 | `npm run comfy` | ComfyUI only |
-| `npm run setup:conditioning` | one-time: IP-Adapter + ControlNet, for § 08 |
+| `npm run setup:conditioning` | one-time: IP-Adapter + ControlNet, for § 12 |
 
 Ports are pinned (`strictPort`). If 5173 is taken, the app says so rather than
 quietly moving to 5174 and leaving you looking at a stale tab.

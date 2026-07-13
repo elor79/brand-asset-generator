@@ -17,7 +17,7 @@
 #
 #   bash ai/tools/setup_conditioning.sh /path/to/ComfyUI
 #
-# Then restart ComfyUI and reopen § 08 — the controls light up on their own.
+# Then restart ComfyUI and reopen § 12 — the controls light up on their own.
 set -euo pipefail
 
 COMFY="${1:-${COMFYUI_DIR:-}}"
@@ -109,7 +109,7 @@ cat <<'DONE'
 RESTART ComfyUI — custom nodes are only registered at boot. `npm start` does
 this for you; it re-checks before every launch.
 
-Then § 08 GENERATE enables the Conditioning controls on its own: the panel
+Then § 12 GENERATE enables the Conditioning controls on its own: the panel
 re-probes /object_info every few seconds, and everything it reports about what
 is installed is read from ComfyUI, never guessed.
 ─────────────────────────────────────────────────────────────

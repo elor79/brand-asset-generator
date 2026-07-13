@@ -77,7 +77,7 @@ find_comfy() {
 }
 
 # ── Conditioning requirements ───────────────────────────────
-# § 08's Conditioning panel needs an IP-Adapter node pack and ControlNet weights,
+# § 12's Conditioning panel needs an IP-Adapter node pack and ControlNet weights,
 # neither of which ships with ComfyUI. Check the DISK before boot — custom nodes
 # are only registered at startup, so discovering this afterwards means restarting
 # anyway. Better to install first and boot once.
@@ -102,7 +102,7 @@ ensure_conditioning() {   # ensure_conditioning <comfy_dir>
   [ -z "$missing" ] && { echo "✓ Conditioning ready (IP-Adapter + ControlNet)"; return 0; }
 
   echo ""
-  echo "⚠ § 08 · Conditioning is missing some pieces:"
+  echo "⚠ § 12 · Conditioning is missing some pieces:"
   printf "%b" "$missing"
   echo "  (~5 GB. Without them, Generate still works — reference images and"
   echo "   layout control maps do not.)"
@@ -120,7 +120,7 @@ ensure_conditioning() {   # ensure_conditioning <comfy_dir>
   esac
 
   bash "$APP_DIR/ai/tools/setup_conditioning.sh" "$d" || {
-    echo "  ⚠ Setup did not finish. The app still starts; § 08 will say what is missing."
+    echo "  ⚠ Setup did not finish. The app still starts; § 12 will say what is missing."
     return 1
   }
   return 0
@@ -154,7 +154,7 @@ start_comfy() {
       ensure_conditioning "$dir" && {
         echo ""
         echo "⚠ Installed — but this ComfyUI was ALREADY RUNNING when we got here."
-        echo "  Custom nodes are only registered at boot, so § 08 · Conditioning stays"
+        echo "  Custom nodes are only registered at boot, so § 12 · Conditioning stays"
         echo "  greyed out until ComfyUI is restarted. Quit it and run npm start again."
       }
     fi
