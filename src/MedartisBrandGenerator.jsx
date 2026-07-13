@@ -1602,7 +1602,7 @@ function buildLayoutControlMapFrom(src, bgHex) {
 // running heads and the PDF all follow — there is no second source of truth.
 function BrochurePanel({
   pages, idx, title, onTitle, onGoTo, onAdd, onDelete, onMove, onType, onField, hasImg,
-  partners = [], onAddPartner, onRemovePartner,
+  partners = [], onAddPartner, onRemovePartner, secNo = {},
 }) {
   const page = pages[idx];
   if (!page) return null;
@@ -1674,7 +1674,7 @@ function BrochurePanel({
           {BROCHURE_TYPE_KEYS.map((k) => <option key={k} value={k}>{BROCHURE_TYPES[k].label}</option>)}
         </select>
         <div style={{ fontFamily: BRAND.mono, fontSize: 9.5, color: BRAND.ink300, marginBottom: 12, letterSpacing: '0.04em' }}>
-          {def.hint}{def.image ? ` · § ${SECTION_NO.IMAGE} sets this page’s image` : ' · no image on this type'}
+          {def.hint}{def.image ? ` · § ${secNo.IMAGE} sets this page’s image` : ' · no image on this type'}
         </div>
 
         {(def.fields || []).map((fd) => (
@@ -3340,9 +3340,21 @@ export default function MedartisBrandGenerator() {
     });
   };
   // Shorthand: pass to a <Section> to make it collapsible by id
-  const sp = (k) => ({
+  // The numbering counts only the sections that are ACTUALLY RENDERED for this
+  // canvas. A poster has no carousel panels, so it must not have a § 08-shaped
+  // hole where they would have been.
+  const secNo = useMemo(
+    () => sectionNumbers(visibleSections({ isBrochure, isCarousel: !!format.multi })),
+    [isBrochure, format.multi]
+  );
+  /** "§ 07 — CANTO DAM" — the number is never written by hand, and never counts
+      a panel you cannot see. */
+  const SEC = (key, label) => `§ ${secNo[key] || '--'} — ${label}`;
+
+  const sp = (k, label) => ({
     collapsed: collapsed.has('sec:' + k),
     onToggle: () => toggleCollapsed('sec:' + k),
+    ...(label ? { label: SEC(k, label) } : {}),
   });
   const palettes = {
     bone:  { bg: BRAND.bone,    ink: BRAND.ink,    muted: BRAND.ink600,   mode: 'light' },
@@ -5009,6 +5021,7 @@ export default function MedartisBrandGenerator() {
             partners={partnerLogos}
             onAddPartner={addPartnerLogo}
             onRemovePartner={removePartnerLogo}
+            secNo={secNo}
           />
         </Section>
         )}
@@ -5152,7 +5165,7 @@ export default function MedartisBrandGenerator() {
           const canAdd  = isBrochure ? brochurePages.length < 60 : isPages ? true : carouselSlides < 10;
           const label   = (i) => (isBrochure ? (BROCHURE_TYPES[brochurePages[i]?.type]?.label || '') : '');
           const hint = isBrochure
-            ? `PAGE ${idx + 1} / ${count} · ${(BROCHURE_TYPES[brochurePage?.type]?.label || '').toUpperCase()} · § ${SECTION_NO.BROCHURE} EDITS THIS PAGE`
+            ? `PAGE ${idx + 1} / ${count} · ${(BROCHURE_TYPES[brochurePage?.type]?.label || '').toUpperCase()} · § ${secNo.BROCHURE} EDITS THIS PAGE`
             : count > 1
               ? `${noun} ${idx + 1} / ${count} · CONTENT & IMAGE PANELS EDIT THIS ${noun}`
               : `SINGLE ${noun} · + ADDS ${isPages ? 'A PAGE' : 'A SLIDE'}`;
@@ -5179,7 +5192,7 @@ export default function MedartisBrandGenerator() {
                     }}>{i + 1}</button>
                 ))}
                 <button onClick={add} disabled={!canAdd}
-                  title={isBrochure ? `Add a page (choose its type in § ${SECTION_NO.BROCHURE})`
+                  title={isBrochure ? `Add a page (choose its type in § ${secNo.BROCHURE})`
                        : isPages ? 'Add a page (inserts a page break in the body)' : 'Add a slide'}
                   style={{
                     minWidth: 32, height: 32, borderRadius: 16, cursor: canAdd ? 'pointer' : 'not-allowed',
@@ -5591,7 +5604,7 @@ export default function MedartisBrandGenerator() {
                 {!qrConfig.enabled && (
                   <>
                     <br/>
-                    <span style={{ color: BRAND.gold }}>QR PER-SLIDE TOGGLE NEEDS GLOBAL QR ON IN § {SECTION_NO.QR}</span>
+                    <span style={{ color: BRAND.gold }}>QR PER-SLIDE TOGGLE NEEDS GLOBAL QR ON IN § {secNo.QR}</span>
                   </>
                 )}
               </div>
@@ -5851,13 +5864,14 @@ export default function MedartisBrandGenerator() {
             makeControlMap={makeControlMap}
             library={savedLibrary}
             currentImage={activeImage}
-            sectionProps={sp('GENERATE')}
+            secNo={secNo}
+            sectionProps={sp('GENERATE', 'GENERATE · AI')}
           />
         </div>
 
         {/* Canto search */}
         <div style={{ opacity: perSlideImageDisabled ? 0.4 : 1, pointerEvents: perSlideImageDisabled ? 'none' : 'auto' }}>
-          <CantoSection onPickImage={applyImage} onSaveToLibrary={saveImageToLibrary} sectionProps={sp('CANTO')} />
+          <CantoSection onPickImage={applyImage} onSaveToLibrary={saveImageToLibrary} sectionProps={sp('CANTO', 'CANTO DAM')} />
         </div>
 
         {/* Image fit controls */}
@@ -6209,18 +6223,21 @@ const SideGroup = ({ n, label, hint }) => (
 );
 
 // ─── SIDEBAR SECTIONS ────────────────────────────────────────────────
-// ONE ordered list, and the numbers are DERIVED from it. They used to be typed
-// into each label by hand, which is why the sidebar drifted to 04 · 04B · 04E ·
-// 04C · … · 06 · 08 · 07 · 08 · 09 · 10 · 10 — two § 08s, two § 10s, and the
-// B/C/E suffixes reading out of order. Numbering by hand across a file this size
-// is a promise nobody can keep; numbering from the list is free.
+// ONE ordered list. The numbers are DERIVED from it — never typed into a label.
 //
-// The order here IS the order on screen. Move a line, and the number, the label
-// and every "see § 07" reference in the UI move with it.
+// Two bugs, one cause. First the sidebar drifted to 04 · 04B · 04E · 04C · … ·
+// 06 · 08 · 07 · 08 · 09 · 10 · 10, because every number was hand-written into
+// its own heading and nobody can keep that promise across 7000 lines. Then, once
+// numbered from this list, § 08 and § 09 "went missing" — because they are the
+// CAROUSEL panels, and on a non-carousel format they do not render at all.
+//
+// A number that counts sections the reader cannot see is not a number, it is a
+// riddle. So the numbering is computed at RENDER time over the sections that are
+// actually on screen: change format, and § 01…§ n stays a contiguous sequence.
 const SECTION_ORDER = [
   // 1 · Canvas
   'FORMAT', 'LAYOUT',
-  // 2 · Story — TEMPLATE and BROCHURE are alternates: same slot, same number.
+  // 2 · Story — TEMPLATE and BROCHURE are alternates; exactly one is ever visible
   'TEMPLATE', 'BROCHURE',
   // 3 · Brand system
   'SURFACE', 'BRANDBAR', 'TEXTBG', 'QR', 'CAROUSEL', 'CAROUSEL_BG', 'CONTENT',
@@ -6229,20 +6246,23 @@ const SECTION_ORDER = [
   // 5 · Output
   'CHECK', 'EXPORT', 'PRESETS',
 ];
-// TEMPLATE and BROCHURE never appear together — they are the same slot in the
-// story step — so they share a number instead of leaving a hole in the sequence.
-const SECTION_ALIAS = { BROCHURE: 'TEMPLATE' };
-const SECTION_NO = (() => {
+
+/** Which sections exist for the current canvas? The numbering follows from this. */
+function visibleSections({ isBrochure, isCarousel }) {
+  return SECTION_ORDER.filter((k) => {
+    if (k === 'BROCHURE') return isBrochure;
+    if (k === 'LAYOUT' || k === 'TEMPLATE' || k === 'CONTENT') return !isBrochure;
+    if (k === 'CAROUSEL' || k === 'CAROUSEL_BG') return isCarousel;
+    return true;
+  });
+}
+
+/** { FORMAT: '01', LAYOUT: '02', … } over the VISIBLE sections only. */
+function sectionNumbers(vis) {
   const map = {};
-  let n = 0;
-  for (const k of SECTION_ORDER) {
-    if (SECTION_ALIAS[k]) { map[k] = map[SECTION_ALIAS[k]]; continue; }
-    map[k] = String(++n).padStart(2, '0');
-  }
+  vis.forEach((k, i) => { map[k] = String(i + 1).padStart(2, '0'); });
   return map;
-})();
-/** "§ 07 — CANTO DAM" — the number is never written by hand. */
-const SEC = (key, label) => `§ ${SECTION_NO[key] || '--'} — ${label}`;
+}
 
 const Section = ({ label, children, collapsed, onToggle }) => {
   const isCollapsible = typeof onToggle === 'function';
@@ -6803,7 +6823,7 @@ const DualRangeSlider = ({ start, end, onChange }) => {
 // happened rather than implying the negative did something it didn't.
 const GenerateSection = ({
   sectionProps = {}, format, surface, onPickImage, onSaveToLibrary,
-  makeControlMap, library = [], currentImage = null,
+  makeControlMap, library = [], currentImage = null, secNo = {},
 }) => {
   const [status, setStatus] = useState(null);
   // ── CONDITIONING ────────────────────────────────────────────────
@@ -6984,7 +7004,7 @@ const GenerateSection = ({
   });
 
   return (
-    <Section label={SEC('GENERATE', 'GENERATE · AI')} {...sectionProps}>
+    <Section {...sectionProps}>
       <div style={{
         padding: '9px 10px', marginBottom: 10, background: BRAND.bone,
         borderLeft: `3px solid ${BRAND.gold}`,
@@ -7328,7 +7348,7 @@ const GenerateSection = ({
                     This is the Medartis safety gate, not the model. A generated human
                     presented as a surgeon is a regulatory and credibility problem for a
                     medical-device manufacturer — so people-as-clinicians stay real
-                    photography (Canto, § {SECTION_NO.CANTO}).
+                    photography (Canto, § {secNo.CANTO}).
                     <div style={{ marginTop: 6 }}>
                       Generate the <b>place</b>, not the person: “an empty, immaculate
                       operating theatre, cool daylight, instruments laid out on a tray”.
@@ -7470,7 +7490,7 @@ const CantoSection = ({ onPickImage, onSaveToLibrary, sectionProps = {} }) => {
   };
 
   return (
-    <Section label={SEC('CANTO', 'CANTO DAM')} {...sectionProps}>
+    <Section {...sectionProps}>
       {!status && (
         <div style={{ fontSize: 11, color: BRAND.ink600, fontFamily: BRAND.mono }}>
           checking status…
