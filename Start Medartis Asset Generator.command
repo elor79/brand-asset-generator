@@ -76,6 +76,56 @@ find_comfy() {
   return 1
 }
 
+# ── Conditioning requirements ───────────────────────────────
+# § 08's Conditioning panel needs an IP-Adapter node pack and ControlNet weights,
+# neither of which ships with ComfyUI. Check the DISK before boot — custom nodes
+# are only registered at startup, so discovering this afterwards means restarting
+# anyway. Better to install first and boot once.
+#
+# The panel degrades honestly without these; this just means you never have to
+# read the degradation message in the first place.
+missing_conditioning() {   # missing_conditioning <comfy_dir> → prints what's absent
+  local d="$1" missing=""
+  [ -d "$d/custom_nodes/ComfyUI_IPAdapter_plus" ] || missing="$missing  · IP-Adapter node pack\n"
+  compgen -G "$d/models/ipadapter/*.safetensors" >/dev/null 2>&1 || missing="$missing  · IP-Adapter weights\n"
+  compgen -G "$d/models/clip_vision/*.safetensors" >/dev/null 2>&1 || missing="$missing  · CLIP-Vision encoder\n"
+  # The server matches a ControlNet by the TYPE in its filename, so a folder with
+  # some unrelated .safetensors in it is not the same as having depth or canny.
+  compgen -G "$d/models/controlnet/*depth*" >/dev/null 2>&1 || missing="$missing  · ControlNet · depth\n"
+  compgen -G "$d/models/controlnet/*canny*" >/dev/null 2>&1 || missing="$missing  · ControlNet · canny\n"
+  printf "%b" "$missing"
+}
+
+ensure_conditioning() {   # ensure_conditioning <comfy_dir>
+  local d="$1" missing
+  missing="$(missing_conditioning "$d")"
+  [ -z "$missing" ] && { echo "✓ Conditioning ready (IP-Adapter + ControlNet)"; return 0; }
+
+  echo ""
+  echo "⚠ § 08 · Conditioning is missing some pieces:"
+  printf "%b" "$missing"
+  echo "  (~5 GB. Without them, Generate still works — reference images and"
+  echo "   layout control maps do not.)"
+  echo ""
+
+  local ans="${SETUP_CONDITIONING:-}"
+  if [ -z "$ans" ]; then
+    printf "  Install them now? [Y/n] "
+    read -r -n 1 ans; echo ""
+  fi
+  case "$ans" in
+    n|N|skip|0)
+      echo "  Skipped. Install later with: npm run setup:conditioning -- \"$d\""
+      return 1 ;;
+  esac
+
+  bash "$APP_DIR/ai/tools/setup_conditioning.sh" "$d" || {
+    echo "  ⚠ Setup did not finish. The app still starts; § 08 will say what is missing."
+    return 1
+  }
+  return 0
+}
+
 COMFY_PID=""
 cleanup() {
   # Only ever stop a ComfyUI WE started. If we adopted a running one, leave it —
@@ -91,13 +141,27 @@ trap cleanup EXIT INT TERM
 comfy_alive() { curl -sf "http://127.0.0.1:$COMFY_PORT/system_stats" >/dev/null 2>&1; }
 
 start_comfy() {
+  local dir
+  dir="$(find_comfy || true)"
+
   if comfy_alive; then
     echo "✓ ComfyUI already running on 127.0.0.1:$COMFY_PORT — reusing it"
+    # We can still see whether the pieces are on disk. But a running ComfyUI has
+    # already registered its nodes: installing now would need a restart, and this
+    # instance may be another app's to restart. So: install the files, say so,
+    # and let the user decide when to bounce it.
+    if [ -n "$dir" ] && [ -n "$(missing_conditioning "$dir")" ]; then
+      ensure_conditioning "$dir" && {
+        echo ""
+        echo "⚠ Installed — but this ComfyUI was ALREADY RUNNING when we got here."
+        echo "  Custom nodes are only registered at boot, so § 08 · Conditioning stays"
+        echo "  greyed out until ComfyUI is restarted. Quit it and run npm start again."
+      }
+    fi
     return 0
   fi
 
-  local dir
-  if ! dir="$(find_comfy)"; then
+  if [ -z "$dir" ]; then
     echo ""
     echo "⚠ ComfyUI is not installed anywhere I looked — that is why $COMFY_PORT is empty."
     echo "  Looked in: \$COMFY_HOME, ./ComfyUI, the IBRA generator's ComfyUI, ~/ComfyUI"
@@ -111,6 +175,11 @@ start_comfy() {
     echo ""
     return 1
   fi
+
+  # Install BEFORE booting: custom nodes are only registered at startup, so doing
+  # it after would cost a restart. This is the whole reason the check lives here
+  # and not in the app.
+  ensure_conditioning "$dir" || true
 
   echo "→ Starting ComfyUI from $dir …"
   (

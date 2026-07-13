@@ -82,18 +82,35 @@ else
   git clone --depth 1 https://github.com/Fannovel16/comfyui_controlnet_aux "$AUX"
 fi
 
+# ── 4 · PYTHON DEPS ─────────────────────────────────────────────────────────
+# Into ComfyUI's OWN venv. A custom node whose imports fail doesn't announce
+# itself — ComfyUI just quietly skips registering it, and the panel then reports
+# the node as missing, which is true but unhelpfully so.
+say "Python dependencies (into ComfyUI's venv)"
+if [[ -f "$COMFY/venv/bin/activate" ]]; then
+  # shellcheck disable=SC1091
+  source "$COMFY/venv/bin/activate"
+  for req in "$NODE/requirements.txt" "$AUX/requirements.txt"; do
+    [[ -f "$req" ]] && { echo "  · $(basename "$(dirname "$req")")"; python -m pip install --quiet -r "$req" || true; }
+  done
+  deactivate
+else
+  echo "  ⚠ No venv at $COMFY/venv — install the requirements with whatever Python runs ComfyUI:"
+  for req in "$NODE/requirements.txt" "$AUX/requirements.txt"; do
+    [[ -f "$req" ]] && echo "      pip install -r $req"
+  done
+fi
+
 cat <<'DONE'
 
 ─────────────────────────────────────────────────────────────
-✓ Done. Now:
+✓ Done.
 
-  1 · pip install -r custom_nodes/ComfyUI_IPAdapter_plus/requirements.txt   (if present)
-      pip install -r custom_nodes/comfyui_controlnet_aux/requirements.txt
-  2 · RESTART ComfyUI — custom nodes are only registered at boot
-  3 · reopen § 08 GENERATE · the panel re-probes /object_info every few seconds
-      and the Conditioning controls enable themselves
+RESTART ComfyUI — custom nodes are only registered at boot. `npm start` does
+this for you; it re-checks before every launch.
 
-If a control stays greyed out, the panel names the exact file or node that is
-missing — that message is read from ComfyUI, not guessed.
+Then § 08 GENERATE enables the Conditioning controls on its own: the panel
+re-probes /object_info every few seconds, and everything it reports about what
+is installed is read from ComfyUI, never guessed.
 ─────────────────────────────────────────────────────────────
 DONE
