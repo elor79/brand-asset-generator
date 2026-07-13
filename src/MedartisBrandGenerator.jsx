@@ -6914,6 +6914,7 @@ const GenerateSection = ({
   const [strictNegative, setStrictNegative] = useState(false);
   const [engine, setEngine] = useState('flux');
   const [ckpt, setCkpt] = useState('');   // '' = let the server pick
+  const [fast, setFast] = useState(false);  // Lightning / LCM LoRA on top of the checkpoint
   const [busy, setBusy] = useState(false);
   const [job, setJob] = useState(null);
   const [jobId, setJobId] = useState(null);
@@ -6978,6 +6979,7 @@ const GenerateSection = ({
         body: JSON.stringify({
           prompt, surface, engine, realism, strictNegative, extraNegative,
           ckpt: engine === 'sdxl' ? (ckpt || undefined) : undefined,
+          fast: engine === 'sdxl' ? fast : false,
           w: format.w, h: format.h,
           // Conditioning. The server reports back what it could actually honour.
           refImage: canCondition && refImage ? refImage : null,
@@ -7154,6 +7156,18 @@ const GenerateSection = ({
                   : 'STOCK SDXL BASE IS A GENERAL-PURPOSE MODEL. A PHOTOREAL FINE-TUNE WILL BEAT ANY PROMPT WORDING YOU CAN WRITE.'}
               </div>
             </>
+          )}
+
+          {/* FAST — Lightning/LCM as a LoRA on top of the checkpoint.
+              NOT a "fewer steps" switch: these are distilled to run at CFG ~1, and
+              4 steps at CFG 6 is the burnt, oversaturated mess people blame on the
+              LoRA. The whole recipe (steps + cfg + sampler + scheduler) moves
+              together on the server, or not at all. */}
+          {engine === 'sdxl' && (status.fastLoras || []).length > 0 && (
+            <button onClick={() => setFast((v) => !v)} style={{ ...btn(fast), width: '100%', marginBottom: 6 }}
+              title={`Few-step generation via ${status.fastLoras[0]} — keeps the checkpoint (and its text encoder), just gets there faster`}>
+              ⚡ Fast · {String(status.fastLoras[0]).replace(/\.safetensors$/i, '')}
+            </button>
           )}
 
           {/* Realism + strict negatives */}
@@ -7441,6 +7455,7 @@ const GenerateSection = ({
             <div style={{ marginTop: 8, fontSize: 9, fontFamily: BRAND.mono, color: BRAND.ink600, letterSpacing: '0.04em', lineHeight: 1.55 }}>
               {String(lastMeta.engine || '').toUpperCase()}
               {lastMeta.ckpt ? ` · ${String(lastMeta.ckpt).replace(/\.safetensors$/i, '')}` : ''}
+              {lastMeta.fast ? ` · ⚡ ${String(lastMeta.fast).replace(/\.safetensors$/i, '')}` : ''}
               {lastMeta.lora ? ` · LORA ${lastMeta.lora}` : ' · NO HOUSE LORA'}
               {' · NEGATIVE '}
               <span style={{ color: lastMeta.negativeHonoured ? '#0A7D3E' : '#C8200A' }}>

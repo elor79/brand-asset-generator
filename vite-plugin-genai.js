@@ -553,6 +553,22 @@ async function comfyRun(jobId, workflow) {
       }
       detail = parts.join(' · ');
     } catch { /* not JSON — fall through */ }
+
+    // TRANSLATE THE ONE ERROR THAT LOOKS LIKE A BUG BUT IS A MODEL CHOICE.
+    // "CLIPTextEncode: clip input is invalid: None" means the checkpoint that
+    // loaded has NO TEXT ENCODER. That is not a broken graph — it is a file that
+    // is not a full SDXL checkpoint: a UNet-only/"diffusion only" export, or a
+    // Flux / SD3 / video-model file, all of which keep their text encoders in
+    // separate files. ComfyUI's wording sends people hunting through their graph;
+    // the fix is always "load a different checkpoint".
+    if (/clip input is invalid/i.test(detail)) {
+      const ck = workflow['4']?.inputs?.ckpt_name || '(unknown)';
+      detail = `The checkpoint “${ck}” contains no text encoder (CLIP), so the prompt cannot be encoded. ` +
+        `That file is not a complete SDXL checkpoint — it is most likely a UNet-only / "diffusion only" export, ` +
+        `or a Flux / SD3 / video model, which keep their text encoders in separate files. ` +
+        `Pick a full SDXL checkpoint in § 12 (Juggernaut XL, RealVisXL, SDXL base 1.0). ` +
+        `Nothing is wrong with the workflow.`;
+    }
     detach();
     if (!detail && r.status >= 500) {
       detail = 'ComfyUI threw a server error (500) — see comfyui.log for the traceback. ' +
@@ -698,8 +714,21 @@ export default function genai() {
               // same IP-Adapter. Which one you load is the single biggest lever
               // on realism, so let the panel offer them all rather than hard-wiring
               // sd_xl_base and quietly ignoring a better model sitting right there.
-              const notSdxl = (f) => /turbo|refiner|sd15|v1-5|flux|sd3/i.test(f);
-              out.sdxlCkpts = m.ckpts.filter((f) => !notSdxl(f));
+              // Keep out of the picker anything that CANNOT work in this graph.
+              // The graph is SDXL + CLIPTextEncode: it needs a checkpoint with a
+              // BUILT-IN text encoder. These families keep theirs in separate
+              // files, so loading one produces "clip input is invalid: None" —
+              // an error that reads like a bug and is really a wrong file.
+              const NO_CLIP = /flux|sd3|stable[-_ ]?cascade|hunyuan|wan2|mochi|ltx|cogvideo|pixart|auraflow|unet|diffusion[-_ ]?only/i;
+              const NOT_BASE = /refiner|inpaint|turbo|lightning|lcm/i;   // wrong role, not wrong family
+              out.sdxlCkpts = m.ckpts.filter((f) => !NO_CLIP.test(f) && !NOT_BASE.test(f));
+              out.excludedCkpts = m.ckpts.filter((f) => NO_CLIP.test(f) || NOT_BASE.test(f));
+
+              // SPEED LORAS. This is how you actually get Lightning/LCM: as a
+              // LoRA ON TOP of a full checkpoint — so the checkpoint still brings
+              // the text encoder, and the look still comes from Juggernaut rather
+              // than from a stripped-down speed model.
+              out.fastLoras = m.loras.filter((f) => /lightning|lcm|hyper|turbo/i.test(f));
               out.photorealCkpts = out.sdxlCkpts.filter((f) => /juggernaut|realvis|epicrealism|photon|dreamshaper/i.test(f));
               out.hasSdxlLora = m.loras.includes(SDXL_LORA());
               if (!out.hasSdxlBase) out.missing.push('sd_xl_base_1.0.safetensors — the commercially licensable engine · npm run models');
@@ -764,6 +793,7 @@ export default function genai() {
             // Flux only when we swap in a CFGGuider below. Reported to the client so
             // the panel can state the truth rather than imply the negative worked.
             let fluxNegativeHonoured = false;
+            let usedFast = null;
             if (sdxl) {
               // SDXL base 1.0 + house LoRA — the commercially licensable path.
               wf = loadWorkflow('ai/workflows/sdxl_txt2img_lora.api.json');
@@ -772,6 +802,29 @@ export default function genai() {
               // RealVisXL) is a drop-in: same architecture, same LoRA, same
               // ControlNet/IP-Adapter — a very different picture.
               if (b.ckpt) wf['4'].inputs.ckpt_name = b.ckpt;
+
+              // ── FAST (Lightning / LCM) ──────────────────────────────────
+              // A distilled few-step LoRA. It is NOT just "fewer steps": these
+              // models are trained to work at CFG ~1, and leaving CFG at 6 with 4
+              // steps produces the burnt, oversaturated mess people blame on the
+              // LoRA. Sampler and scheduler matter too. So the whole recipe moves
+              // together, or not at all.
+              const fastLora = b.fast
+                ? models.loras.find((f) => /lightning/i.test(f))
+                  || models.loras.find((f) => /hyper/i.test(f))
+                  || models.loras.find((f) => /lcm/i.test(f))
+                : null;
+              if (fastLora) {
+                const lightning = /lightning|hyper/i.test(fastLora);
+                wf['10'].inputs.lora_name = fastLora;
+                wf['10'].inputs.strength_model = 1.0;
+                wf['10'].inputs.strength_clip  = 1.0;
+                wf['3'].inputs.steps = clampInt(b.steps ?? (lightning ? 6 : 8), 2, 12);
+                wf['3'].inputs.cfg = lightning ? 1.2 : 1.8;
+                wf['3'].inputs.sampler_name = 'euler';
+                wf['3'].inputs.scheduler = 'sgm_uniform';
+                usedFast = fastLora;
+              }
               wf['6'].inputs.text = positive;
               wf['7'].inputs.text = negative;
               wf['5'].inputs.width = width;
@@ -840,6 +893,7 @@ export default function genai() {
             const negativeHonoured = engine !== 'flux' ? true : fluxNegativeHonoured;
             const meta = {
               prompt: positive, width, height, target, upscaler, lora: usedLora, ckpt: usedCkpt || null, engine,
+              fast: usedFast,
               negative, negativeHonoured, realism: b.realism !== false,
               conditioning,
             };
