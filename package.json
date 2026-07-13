@@ -11,7 +11,8 @@
     "setup:conditioning": "bash ai/tools/setup_conditioning.sh",
     "build": "vite build",
     "preview": "vite preview",
-    "check": "node --check vite-plugin-genai.js && node --check vite-plugin-canto.js"
+    "check": "node --check vite-plugin-genai.js && node --check vite-plugin-canto.js",
+    "link:models": "bash ai/tools/link_webui_models.sh"
   },
   "dependencies": {
     "ag-psd": "^30.1.1",

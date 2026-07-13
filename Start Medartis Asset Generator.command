@@ -176,6 +176,10 @@ start_comfy() {
     return 1
   fi
 
+  # Share the AUTOMATIC1111 model library rather than keeping a second copy of
+  # every 6 GB checkpoint. Read at boot only, so it belongs here.
+  bash "$APP_DIR/ai/tools/link_webui_models.sh" "$dir" >/dev/null 2>&1 || true
+
   # Install BEFORE booting: custom nodes are only registered at startup, so doing
   # it after would cost a restart. This is the whole reason the check lives here
   # and not in the app.

@@ -6786,6 +6786,7 @@ const GenerateSection = ({
   const [realism, setRealism] = useState(true);
   const [strictNegative, setStrictNegative] = useState(false);
   const [engine, setEngine] = useState('flux');
+  const [ckpt, setCkpt] = useState('');   // '' = let the server pick
   const [busy, setBusy] = useState(false);
   const [job, setJob] = useState(null);
   const [jobId, setJobId] = useState(null);
@@ -6799,6 +6800,15 @@ const GenerateSection = ({
   useEffect(() => {
     if (status?.engines?.includes('sdxl')) setEngine((e) => (e === 'flux' ? 'sdxl' : e));
   }, [status?.engines?.join(',')]);
+
+  // The checkpoint is the single biggest lever on realism — bigger than any
+  // prompt wording. If a photoreal fine-tune is installed, start there rather
+  // than on stock SDXL base, which is what the prompt would otherwise be fighting.
+  useEffect(() => {
+    const list = status?.sdxlCkpts || [];
+    if (!list.length) return;
+    setCkpt((c) => (c && list.includes(c) ? c : (status?.photorealCkpts?.[0] || '')));
+  }, [status?.sdxlCkpts?.join(','), status?.photorealCkpts?.join(',')]);
 
   // Wall-clock ticker — a bar with no numbers is indistinguishable from a hang.
   useEffect(() => {
@@ -6840,6 +6850,7 @@ const GenerateSection = ({
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           prompt, surface, engine, realism, strictNegative, extraNegative,
+          ckpt: engine === 'sdxl' ? (ckpt || undefined) : undefined,
           w: format.w, h: format.h,
           // Conditioning. The server reports back what it could actually honour.
           refImage: canCondition && refImage ? refImage : null,
@@ -6983,6 +6994,40 @@ const GenerateSection = ({
                 <button key={k} onClick={() => setEngine(k)} title={hint} style={btn(engine === k)}>{label}</button>
               ))}
           </div>
+
+          {/* CHECKPOINT — the biggest lever on realism there is, bigger than any
+              wording of the prompt. Stock SDXL base is a general-purpose model;
+              a photoreal fine-tune (Juggernaut XL, RealVisXL) is the same
+              architecture — same LoRA, same ControlNet, same IP-Adapter — trained
+              specifically on photography. Hard-wiring 'sd_xl_base' and quietly
+              ignoring a better checkpoint sitting in the same folder was a way of
+              losing the single easiest win in the panel. */}
+          {engine === 'sdxl' && (status.sdxlCkpts || []).length > 0 && (
+            <>
+              <div style={{ fontSize: 9.5, color: BRAND.ink600, marginBottom: 5, fontFamily: BRAND.mono, letterSpacing: '0.1em', textTransform: 'uppercase' }}>
+                Checkpoint
+                <span style={{ color: BRAND.ink300, letterSpacing: 0, textTransform: 'none' }}> · the largest single lever on realism</span>
+              </div>
+              <select value={ckpt} onChange={(e) => setCkpt(e.target.value)}
+                style={{
+                  width: '100%', boxSizing: 'border-box', marginBottom: 4, padding: '8px 9px',
+                  border: `1px solid ${BRAND.ink100}`, background: BRAND.paper, color: BRAND.ink,
+                  fontFamily: BRAND.mono, fontSize: 10, borderRadius: 0,
+                }}>
+                <option value="">Auto · SDXL base 1.0</option>
+                {(status.sdxlCkpts || []).map((f) => (
+                  <option key={f} value={f}>
+                    {(status.photorealCkpts || []).includes(f) ? '★ ' : ''}{f.replace(/\.safetensors$/i, '')}
+                  </option>
+                ))}
+              </select>
+              <div style={{ fontFamily: BRAND.mono, fontSize: 8.5, color: BRAND.ink300, lineHeight: 1.5, letterSpacing: '0.03em', marginBottom: 10 }}>
+                {(status.photorealCkpts || []).includes(ckpt)
+                  ? '★ PHOTOREAL FINE-TUNE. CHECK ITS LICENCE BEFORE COMMERCIAL USE — SDXL BASE IS OPENRAIL++, A CIVITAI FINE-TUNE CARRIES ITS OWN TERMS.'
+                  : 'STOCK SDXL BASE IS A GENERAL-PURPOSE MODEL. A PHOTOREAL FINE-TUNE WILL BEAT ANY PROMPT WORDING YOU CAN WRITE.'}
+              </div>
+            </>
+          )}
 
           {/* Realism + strict negatives */}
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 3, marginBottom: 6 }}>
@@ -7268,6 +7313,7 @@ const GenerateSection = ({
           {lastMeta && !busy && (
             <div style={{ marginTop: 8, fontSize: 9, fontFamily: BRAND.mono, color: BRAND.ink600, letterSpacing: '0.04em', lineHeight: 1.55 }}>
               {String(lastMeta.engine || '').toUpperCase()}
+              {lastMeta.ckpt ? ` · ${String(lastMeta.ckpt).replace(/\.safetensors$/i, '')}` : ''}
               {lastMeta.lora ? ` · LORA ${lastMeta.lora}` : ' · NO HOUSE LORA'}
               {' · NEGATIVE '}
               <span style={{ color: lastMeta.negativeHonoured ? '#0A7D3E' : '#C8200A' }}>

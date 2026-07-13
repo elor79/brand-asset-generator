@@ -278,7 +278,7 @@ async function resolveWorkflow(wf) {
       else bypassNode(wf, '14', '4', () => 2); // VAEDecode.vae → ['4', 2] = checkpoint VAE
     }
 
-    return { wf, usedLora, engine: isBase ? 'sdxl' : 'sdxl-turbo' };
+    return { wf, usedLora, ckpt, engine: isBase ? 'sdxl' : 'sdxl-turbo' };
   }
 
   const unetWanted = wf['12'].inputs.unet_name;
@@ -689,6 +689,14 @@ export default function genai() {
               if (m.unets.some((f) => f.toLowerCase().includes('flux1-dev'))) out.engines.push('flux');
               if (m.ckpts.some((f) => f.toLowerCase().includes('sd_xl_turbo'))) out.engines.push('sdxl-turbo');
               out.hasSdxlBase = out.engines.includes('sdxl');
+              // Every SDXL-architecture checkpoint the box has — base and any
+              // fine-tune. They are interchangeable: same LoRA, same ControlNet,
+              // same IP-Adapter. Which one you load is the single biggest lever
+              // on realism, so let the panel offer them all rather than hard-wiring
+              // sd_xl_base and quietly ignoring a better model sitting right there.
+              const notSdxl = (f) => /turbo|refiner|sd15|v1-5|flux|sd3/i.test(f);
+              out.sdxlCkpts = m.ckpts.filter((f) => !notSdxl(f));
+              out.photorealCkpts = out.sdxlCkpts.filter((f) => /juggernaut|realvis|epicrealism|photon|dreamshaper/i.test(f));
               out.hasSdxlLora = m.loras.includes(SDXL_LORA());
               if (!out.hasSdxlBase) out.missing.push('sd_xl_base_1.0.safetensors — the commercially licensable engine · npm run models');
               out.upscalers = m.upscalers;
@@ -755,6 +763,11 @@ export default function genai() {
             if (sdxl) {
               // SDXL base 1.0 + house LoRA — the commercially licensable path.
               wf = loadWorkflow('ai/workflows/sdxl_txt2img_lora.api.json');
+              // An explicit checkpoint wins. resolveWorkflow() below looks for
+              // whatever name sits here, so a photoreal fine-tune (Juggernaut XL,
+              // RealVisXL) is a drop-in: same architecture, same LoRA, same
+              // ControlNet/IP-Adapter — a very different picture.
+              if (b.ckpt) wf['4'].inputs.ckpt_name = b.ckpt;
               wf['6'].inputs.text = positive;
               wf['7'].inputs.text = negative;
               wf['5'].inputs.width = width;
@@ -805,7 +818,7 @@ export default function genai() {
 
             configureUpscale(wf, target, upscaler);
 
-            const { wf: ready, usedLora, engine } = await resolveWorkflow(wf);
+            const { wf: ready, usedLora, ckpt: usedCkpt, engine } = await resolveWorkflow(wf);
 
             // CONDITIONING — reference look (IP-Adapter) and/or composition
             // (ControlNet, incl. the map the layout canvas emits). Applied AFTER
@@ -822,7 +835,7 @@ export default function genai() {
             // Flux at CFG 1 ignores it entirely — say so rather than pretend.
             const negativeHonoured = engine !== 'flux' ? true : fluxNegativeHonoured;
             const meta = {
-              prompt: positive, width, height, target, upscaler, lora: usedLora, engine,
+              prompt: positive, width, height, target, upscaler, lora: usedLora, ckpt: usedCkpt || null, engine,
               negative, negativeHonoured, realism: b.realism !== false,
               conditioning,
             };
