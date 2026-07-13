@@ -3,7 +3,7 @@
 #  MEDARTIS Brand Asset Generator — launcher
 #  Double-click. Starts ComfyUI (the AI backend) AND the app, together.
 #
-#      app      → http://localhost:5173     (pinned — vite strictPort)
+#      app      → http://localhost:5174     (pinned — Cadence owns 5173)
 #      comfyui  → http://127.0.0.1:8188     (pinned — COMFY_URL in .env.local)
 #
 #  Ports are PINNED on purpose. Vite runs with strictPort, and the app talks to
@@ -23,7 +23,7 @@ set -e
 cd "$(dirname "$0")"
 APP_DIR="$(pwd)"
 
-APP_PORT=5173
+APP_PORT=5174
 COMFY_PORT=8188
 
 NO_AI=0; AI_ONLY=0

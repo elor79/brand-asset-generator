@@ -11,8 +11,11 @@ export default defineConfig(({ mode }) => {
   }
   return {
     plugins: [react(), canto(), genai()],
-    // strictPort: fail loudly instead of quietly hopping to 5174. A drifting
-    // port is how you end up with two app instances and a stale one in a tab.
-    server: { port: 5173, strictPort: true, open: true },
+    // 5174 — NOT 5173. Cadence lives on 5173, and localStorage is scoped per
+    // origin (port included): if this app takes 5173, Cadence gets bumped to 5174
+    // and opens onto an empty workspace, because its saved data is on the origin
+    // it no longer has. One app, one port, pinned. strictPort so it fails loudly
+    // rather than drifting into someone else's storage.
+    server: { port: 5174, strictPort: true, open: true },
   };
 });
