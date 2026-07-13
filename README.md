@@ -22,10 +22,27 @@ From this folder:
 
 ```bash
 npm install
-npm run dev
+npm start          # boots ComfyUI *and* the app
 ```
 
-The app opens automatically at http://localhost:5173
+The app opens automatically at http://localhost:5173, and the AI backend on
+http://127.0.0.1:8188.
+
+`npm start` (or double-clicking **Start Medartis Asset Generator.command**) is
+the normal way in. It does not ship its own ComfyUI: if one is already answering
+on 8188 it **reuses** it, otherwise it looks in `$COMFY_HOME`, `./ComfyUI`, the
+IBRA generator's ComfyUI, and `~/ComfyUI`. One backend, shared — the weights are
+100+ GB and two installs would just fight over the same GPU.
+
+| command | what it does |
+| --- | --- |
+| `npm start` | ComfyUI + the app (this is the one you want) |
+| `npm run dev` | the app only — § 08 GENERATE will report no backend |
+| `npm run comfy` | ComfyUI only |
+| `npm run setup:conditioning` | one-time: IP-Adapter + ControlNet, for § 08 |
+
+Ports are pinned (`strictPort`). If 5173 is taken, the app says so rather than
+quietly moving to 5174 and leaving you looking at a stale tab.
 
 ## Build for production
 

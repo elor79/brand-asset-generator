@@ -4,9 +4,14 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
+    "start": "bash './Start Medartis Asset Generator.command'",
+    "dev": "echo '\u26a0  app only \u2014 no ComfyUI. Use: npm start (boots both)' && vite",
+    "dev:app": "vite",
+    "comfy": "bash './Start Medartis Asset Generator.command' --ai-only",
+    "setup:conditioning": "bash ai/tools/setup_conditioning.sh",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "check": "node --check vite-plugin-genai.js && node --check vite-plugin-canto.js"
   },
   "dependencies": {
     "ag-psd": "^30.1.1",

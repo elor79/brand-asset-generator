@@ -11,6 +11,8 @@ export default defineConfig(({ mode }) => {
   }
   return {
     plugins: [react(), canto(), genai()],
-    server: { port: 5173, open: true },
+    // strictPort: fail loudly instead of quietly hopping to 5174. A drifting
+    // port is how you end up with two app instances and a stale one in a tab.
+    server: { port: 5173, strictPort: true, open: true },
   };
 });
