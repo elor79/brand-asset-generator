@@ -1371,6 +1371,28 @@ const WORDMARK_PATHS = [
 // consistent while the asset's clear space is respected automatically.
 const WM_VIEW  = { w: 526.755, h: 245.078 };
 const WM_GLYPH = { x: 91.89, y: 91.89, w: 342.98, h: 61.30 };
+
+// ─── CLEAR SPACE — 1.5 × THE HEIGHT OF THE "d" ───────────────────────────
+// The brand rule, and it is not negotiable: nothing — no type, no image edge,
+// no canvas edge — may come closer to the mark than 1.5 × the height of the
+// letter "d" on ANY side.
+//
+// Measured from the shipped artwork rather than assumed: in "medartis" the
+// ascenders (d, t) ARE the tallest glyphs, so the d is exactly the glyph-box
+// height, 61.30. And the SVG's own transparent border is 91.89 on every side —
+// 91.89 / 61.30 = 1.4999. The asset already encodes the rule; the code was only
+// enforcing a third of it (wm.h * 0.5), which is why the mark sat too close to
+// the edge.
+//
+// So: clear space = 1.5 × the glyph height, and drawing the full WM_VIEW box is
+// exactly equivalent to drawing the glyphs plus their clear space.
+const WM_CLEAR_RATIO = 1.5;                       // × the height of the "d"
+const wmClear = (glyphHeight) => glyphHeight * WM_CLEAR_RATIO;
+/** The keep-clear rectangle around a placed mark: the box plus its clear space. */
+const wmClearBox = (box) => {
+  const c = wmClear(box.h);
+  return { x: box.x - c, y: box.y - c, w: box.w + c * 2, h: box.h + c * 2 };
+};
 const WORDMARK_ASSETS = { dark: null, light: null };
 const isLightColor = (hex) => {
   if (!hex || hex[0] !== '#' || hex.length < 7) return false;
@@ -2960,28 +2982,43 @@ function computeWordmarkBox(frame, pos, formatKey, safeArea, pctOverride) {
   const { padX, padY } = frame;
   const sa = safeArea || { x: 0, y: 0, w: frame.w, h: frame.h };
   let wm = wordmarkSizeFor(frame, formatKey, pctOverride);
-  const maxW = Math.max(40, sa.w - padX * 1.4);
-  if (wm.w > maxW) {
-    const r = maxW / wm.w;
-    wm = { w: wm.w * r, h: wm.h * r };
+
+  // The mark plus its clear space must FIT. If the safe area is too narrow for
+  // both, the mark shrinks — the clear space is never the thing that gives way.
+  // (Solved rather than iterated: cs is proportional to h, and h to w.)
+  const aspect = wm.h / wm.w;                       // h = aspect · w
+  const shrinkToFit = (avail) => {
+    // w + 2·1.5·(aspect·w) ≤ avail   →   w ≤ avail / (1 + 3·aspect)
+    const maxW = avail / (1 + 2 * WM_CLEAR_RATIO * aspect);
+    if (wm.w > maxW && maxW > 0) wm = { w: maxW, h: maxW * aspect };
+  };
+  shrinkToFit(Math.min(sa.w, frame.w));
+  const csFit = wmClear(wm.h);
+  if (wm.h + csFit * 2 > Math.min(sa.h, frame.h)) {
+    const maxH = Math.min(sa.h, frame.h) / (1 + 2 * WM_CLEAR_RATIO);
+    if (maxH > 0 && maxH < wm.h) wm = { w: maxH / aspect, h: maxH };
   }
-  const top = sa.y + padY * 0.95;
-  const bottom = sa.y + sa.h - padY * 0.55;
-  const left = sa.x + padX * 0.6;
-  const right = sa.x + sa.w - padX * 0.6 - wm.w;
+
+  const cs = wmClear(wm.h);                          // 1.5 × the height of the "d"
+  // Corner anchors sit AT the clear-space boundary — the rule is the margin, so
+  // padX/padY only apply when they are LARGER than it.
+  const insetX = Math.max(cs, padX * 0.6);
+  const insetY = Math.max(cs, padY * 0.75);
+  const top    = sa.y + insetY;
+  const bottom = sa.y + sa.h - insetY - wm.h;
+  const left   = sa.x + insetX;
+  const right  = sa.x + sa.w - insetX - wm.w;
   let x, y;
   if (pos === 'tl') { x = left;  y = top; }
   if (pos === 'tr') { x = right; y = top; }
   if (pos === 'bl') { x = left;  y = bottom; }
   if (pos === 'br') { x = right; y = bottom; }
-  // Definitive clear-space clamp: whatever the intent, the mark must sit fully
-  // inside the canvas with a margin ≥ its own clear space. Guarantees it can
-  // never be cut off on any format or aspect ratio.
-  const csX = Math.max(padX * 0.5, wm.h * 0.5);
-  const csY = Math.max(padY * 0.5, wm.h * 0.5);
-  x = clamp(x, csX, Math.max(csX, frame.w - wm.w - csX));
-  y = clamp(y, csY, Math.max(csY, frame.h - wm.h - csY));
-  return { x, y, w: wm.w, h: wm.h, pos };
+
+  // THE HARD CLAMP. Whatever the intent, whatever the aspect ratio: the mark
+  // keeps 1.5 × d of clear space from every canvas edge. Nothing overrides this.
+  x = clamp(x, cs, Math.max(cs, frame.w - wm.w - cs));
+  y = clamp(y, cs, Math.max(cs, frame.h - wm.h - cs));
+  return { x, y, w: wm.w, h: wm.h, pos, clear: cs };
 }
 
 function drawWordmarkAt(ctx, frame, pos, inkColor, formatKey, safeArea, pctOverride) {
@@ -3039,8 +3076,18 @@ function brandBarClearance(ctx, frame, opts) {
   const flBox  = computeFolioBox(ctx, frame, flPos, opts.formatKey, opts.safeArea, opts.folioText);
   const gap    = frame.padY * 0.5;
   let top = 0, bottom = 0;
-  if (wmBox && (wmBox.pos === 'tl' || wmBox.pos === 'tr')) top    = Math.max(top,    wmBox.h + gap);
-  if (wmBox && (wmBox.pos === 'bl' || wmBox.pos === 'br')) bottom = Math.max(bottom, wmBox.h + gap);
+  // Reserve the mark's height PLUS its clear space. A gap of padY/2 let the
+  // headline sit inside the keep-clear zone — the rule is about every side, not
+  // only the canvas edges, and type is the thing most likely to crowd it.
+  if (wmBox && (wmBox.pos === 'tl' || wmBox.pos === 'tr')) {
+    const cb = wmClearBox(wmBox);
+    top = Math.max(top, cb.y + cb.h - (opts.safeArea?.y ?? 0));
+  }
+  if (wmBox && (wmBox.pos === 'bl' || wmBox.pos === 'br')) {
+    const cb = wmClearBox(wmBox);
+    const saBottom = (opts.safeArea?.y ?? 0) + (opts.safeArea?.h ?? frame.h);
+    bottom = Math.max(bottom, saBottom - cb.y);
+  }
   if (flBox && (flBox.pos === 'tl' || flBox.pos === 'tr')) top    = Math.max(top,    flBox.h + gap);
   if (flBox && (flBox.pos === 'bl' || flBox.pos === 'br')) bottom = Math.max(bottom, flBox.h + gap);
   return { top, bottom };
@@ -3641,6 +3688,28 @@ export default function MedartisBrandGenerator() {
     const fmt = FORMATS[formatKey] || {};
     const isPrint = !!fmt.printable;
     const dpi = fmt.printDpi || 300;
+
+    // 0 · CLEAR SPACE — 1.5 × the height of the "d", on every side.
+    // Enforced in computeWordmarkBox, so this reports the measurement rather than
+    // policing it. A check that can only ever say "pass" still earns its place:
+    // it shows the number, so the rule is inspectable instead of merely asserted.
+    if (wordmarkPos !== 'hidden') {
+      const fmt0 = FORMATS[formatKey] || {};
+      const fr = { w: fmt0.w, h: fmt0.h, padX: Math.min(fmt0.w, fmt0.h) * 0.07, padY: Math.min(fmt0.w, fmt0.h) * 0.07 };
+      const box = computeWordmarkBox(fr, wordmarkPos, formatKey, null, wordmarkPctOverride);
+      if (box) {
+        const gaps = [box.x, box.y, fr.w - (box.x + box.w), fr.h - (box.y + box.h)];
+        const worst = Math.min(...gaps) / box.h;      // in units of the "d"
+        const ok = worst >= WM_CLEAR_RATIO - 0.01;
+        checks.push({
+          ok: ok ? 'pass' : 'fail',
+          label: 'Logo clear space',
+          note: `${worst.toFixed(2)} × d on the tightest side · rule ${WM_CLEAR_RATIO} × d`
+            + (ok ? '' : ' — the mark is being crowded'),
+          fix: null,
+        });
+      }
+    }
 
     // 1 · Logo minimum size — below this the wordmark stops being legible.
     if (wordmarkPos !== 'hidden') {
