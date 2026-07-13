@@ -3520,18 +3520,6 @@ export default function MedartisBrandGenerator() {
     setBrochurePages((ps) => { const n = [...ps]; [n[i], n[j]] = [n[j], n[i]]; return n; });
     setBrochureIdx(j);
   };
-  // The layout, turned into a conditioning signal. § 08 calls this; the model
-  // then composes AROUND the type instead of us cropping a photo afterwards.
-  const makeControlMap = useCallback((kind = 'depth') => {
-    try {
-      const bare = renderOffscreenCanvas(false, undefined, 'none', undefined, 1, undefined, 0);
-      return buildLayoutControlMapFrom(bare, palette.bg, kind);
-    } catch {
-      return null;
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [format, layoutKey, activeContent, palette, wordmarkPos, folioPos, isBrochure, brochurePage, curBrochure]);
-
   const addPartnerLogo = async (file) => {
     const dataUrl = await fileToImageDataUrl(file);
     const img = new Image();
@@ -4013,6 +4001,18 @@ export default function MedartisBrandGenerator() {
     });
     return c;
   };
+
+  // The layout, turned into a conditioning signal. § 08 calls this; the model
+  // then composes AROUND the type instead of us cropping a photo afterwards.
+  const makeControlMap = useCallback((kind = 'depth') => {
+    try {
+      const bare = renderOffscreenCanvas(false, undefined, 'none', undefined, 1, undefined, 0);
+      return buildLayoutControlMapFrom(bare, palette.bg, kind);
+    } catch {
+      return null;
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [format, layoutKey, activeContent, palette, wordmarkPos, folioPos, isBrochure, brochurePage, curBrochure]);
 
   // For PDF print export: compute a canvas multiplier that captures the source
   // image at its full native resolution. Capped so very large images don't
