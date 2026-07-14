@@ -79,6 +79,14 @@ const FORMATS = {
   'tiktok':          { label: 'TikTok',                w: 1080, h: 1920, ratio: '9:16',   group: 'Social · Video & discovery', wmPct: 0.10 },
   'pinterest-pin':   { label: 'Pinterest Pin',         w: 1000, h: 1500, ratio: '2:3',    group: 'Social · Video & discovery', wmPct: 0.10 },
 
+  // ── PRINT · wearables ─────────────────────────────────────
+  // Lanyard straps: printed FLAT, then folded into the neck loop. 900 mm flat is
+  // the industry standard (≈450 mm hanging drop) and 150 dpi is the usual dye-
+  // sublimation resolution for webbing — so the canvas is a real strap, not a
+  // decorative long rectangle.
+  'lanyard-20':      { label: 'Lanyard 20 × 900 mm',   w: 118,  h: 5315, ratio: '20×900', group: 'Print · wearables', wmPct: 0.55, printable: true, printDpi: 150 },
+  'lanyard-25':      { label: 'Lanyard 25 × 900 mm',   w: 148,  h: 5315, ratio: '25×900', group: 'Print · wearables', wmPct: 0.55, printable: true, printDpi: 150 },
+
   // ── DIGITAL SURFACE ───────────────────────────────────────
   'screensaver':     { label: '16:9 Screensaver',      w: 1920, h: 1080, ratio: '16:9',   group: 'Digital surface', wmPct: 0.10 },
   'screensaver-4k':  { label: '4K Screensaver',        w: 3840, h: 2160, ratio: '16:9',   group: 'Digital surface', wmPct: 0.10 },
@@ -109,6 +117,18 @@ const FORMATS = {
 // `carouselSlides` + `carouselContent` (if present) auto-populate a carousel
 // when the user switches to a multi-slide format with that template selected.
 const TEMPLATES = {
+  // ── WEARABLES ───────────────────────────────────────────────────
+  // A strap can carry a name and a URL. Nothing else fits, so nothing else is
+  // offered — a template with fields the format cannot render is a trap.
+  'lanyard': {
+    label: 'Lanyard strap',
+    desc: 'Congress lanyards · repeating mark, mirrored halves',
+    fields: [
+      { key: 'headline', label: 'Event name (repeats along the strap)', default: 'MEDARTIS CONGRESS MMXXVII' },
+      { key: 'subline',  label: 'Strap line · URL or claim', default: 'medartis.com' },
+    ],
+  },
+
   // ── SINGLE-SHOT TEMPLATES ───────────────────────────────────────
   'product-launch': {
     label: 'Product Launch',
@@ -408,11 +428,14 @@ const LAYOUTS = {
   'image-bottom': { label: 'Image · Text top', draw: (ctx, frame, content, image, opts) => drawImageTextSplit(ctx, frame, content, image, opts, 'top') },
   'image-top':    { label: 'Text · Image bottom', draw: (ctx, frame, content, image, opts) => drawImageTextSplit(ctx, frame, content, image, opts, 'bottom') },
   'overlay':      { label: 'Full-bleed overlay', draw: (ctx, frame, content, image, opts) => drawFullBleedOverlay(ctx, frame, content, image, opts) },
+  'lanyard':      { label: 'Lanyard · repeating mark', draw: (ctx, frame, content, image, opts) => drawLanyardStrip(ctx, frame, content, image, opts) },
 };
 
 // Default to all 3 layouts; explicit overrides for formats where one doesn't make sense.
 const ALL_LAYOUTS = ['image-bottom', 'image-top', 'overlay'];
 const FORMAT_LAYOUTS_OVERRIDES = {
+  'lanyard-20':    ['lanyard'],
+  'lanyard-25':    ['lanyard'],
   'ig-carousel':   ['image-bottom', 'overlay'],
   'li-ad':         ['image-bottom', 'overlay'],
   'li-banner':     ['image-bottom', 'overlay'],
@@ -2144,6 +2167,126 @@ function drawBrochurePage(ctx, frame, image, opts) {
   }
 }
 
+
+// ═══ LANYARD ═════════════════════════════════════════════════════════
+// A congress lanyard is printed FLAT and then folded into a neck loop, so the
+// artwork has two jobs an ordinary layout does not:
+//
+//   · it REPEATS along the strap, because you cannot know where the printer's
+//     cut lands or how the wearer's loop hangs;
+//   · it MIRRORS at the fold, so both halves of the worn loop read upright
+//     instead of one side being upside-down on every visitor's chest.
+//
+// Everything is measured before it is drawn — the mark, the event name and the
+// strap line each report their length along the strap, so the repeat block is
+// composed from real widths and the items can never collide or be cut in half.
+const LANYARD_DEFAULTS = {
+  mark: 'wordmark',   // wordmark | none  (Medartis has no separate signet)
+  markSize: 0.46,     // × strap width, measured ACROSS the webbing
+  textSize: 0.34,     // × strap width — cap height of the event line
+  spacing: 1.0,       // × block length — the gap between repeats
+  mirror: true,       // flip the halves at the fold
+  edges: true,        // accent selvedge hairlines
+  strapLineOn: true,
+};
+
+function drawLanyardStrip(ctx, frame, content, image, opts) {
+  const { w, h } = frame;
+  const { palette, accent } = opts;
+  const bleed = frame.bleedPx || 0;
+  const cfg = { ...LANYARD_DEFAULTS, ...(opts.lanyard || {}) };
+
+  ctx.fillStyle = palette.bg;
+  ctx.fillRect(-bleed, -bleed, w + bleed * 2, h + bleed * 2);
+  const ink   = palette.mode === 'dark' ? BRAND.bone00 : BRAND.ink;
+  const muted = palette.mode === 'dark' ? BRAND.cream100 : BRAND.ink600;
+
+  // Selvedge hairlines — reads as a woven edge on the finished strap.
+  if (cfg.edges) {
+    ctx.save();
+    ctx.fillStyle = accent || BRAND.gold;
+    const hair = Math.max(1, w * 0.018);
+    ctx.globalAlpha = 0.9;
+    ctx.fillRect(w * 0.06, -bleed, hair, h + bleed * 2);
+    ctx.fillRect(w - w * 0.06 - hair, -bleed, hair, h + bleed * 2);
+    ctx.restore();
+  }
+
+  const label = (content?.headline || '').trim().toUpperCase();
+  const strap = cfg.strapLineOn ? (content?.subline || content?.cta || '').trim().toUpperCase() : '';
+
+  const txtSize   = w * clamp(cfg.textSize, 0.12, 0.55);
+  const strapSize = txtSize * 0.62;
+  const trackOf   = (size) => size * 0.16;
+
+  const measure = (text, size, weight, family) => {
+    ctx.font = `${weight} ${size}px ${family}`;
+    const ls = trackOf(size);
+    return [...text].reduce((sum, ch) => sum + ctx.measureText(ch).width + ls, -ls);
+  };
+  const paint = (text, size, weight, family, color) => {
+    ctx.font = `${weight} ${size}px ${family}`;
+    ctx.fillStyle = color;
+    const ls = trackOf(size);
+    let cx = 0;
+    for (const ch of text) {
+      ctx.fillText(ch, cx, size * 0.36);   // centred on the strap's mid-axis
+      cx += ctx.measureText(ch).width + ls;
+    }
+  };
+
+  // ── Compose one repeat block ───────────────────────────────────────
+  const items = [];
+  if (cfg.mark !== 'none') {
+    const markH = w * clamp(cfg.markSize, 0.15, 0.75);
+    const markL = markH * (WM_GLYPH.w / WM_GLYPH.h);   // true artwork aspect
+    items.push({ len: markL, draw: (x) => drawWordmark(ctx, x, -markH / 2, markH, ink) });
+  }
+  if (label) {
+    items.push({
+      len: measure(label, txtSize, 700, BRAND.display),
+      draw: (x) => { ctx.save(); ctx.translate(x, 0); paint(label, txtSize, 700, BRAND.display, ink); ctx.restore(); },
+    });
+  }
+  if (strap) {
+    items.push({
+      len: measure(strap, strapSize, 500, BRAND.mono),
+      draw: (x) => { ctx.save(); ctx.translate(x, 0); paint(strap, strapSize, 500, BRAND.mono, muted); ctx.restore(); },
+    });
+  }
+  if (!items.length) return;
+
+  const itemGap   = w * 1.1;                                   // between items in a block
+  const blockLen  = items.reduce((s, it) => s + it.len, 0) + itemGap * (items.length - 1);
+  const repeatGap = Math.max(w * 1.2, blockLen * clamp(cfg.spacing, 0.2, 3));
+  const period    = blockLen + repeatGap;
+
+  // Start half a gap in, so the strap's ends never cut a mark in half.
+  const reps = Math.ceil((h + period) / period);
+  for (let i = 0; i < reps; i++) {
+    const blockStart  = repeatGap / 2 + i * period;
+    const blockCenter = blockStart + blockLen / 2;
+    if (blockStart > h) break;
+    if (blockStart + blockLen > h) break;   // never print half a block
+
+    // Mirror at the fold: past the midpoint the block reads the other way, so
+    // both sides of the worn loop are upright.
+    const flip = cfg.mirror && blockCenter > h / 2;
+
+    ctx.save();
+    ctx.translate(w / 2, blockCenter);
+    ctx.rotate(flip ? Math.PI / 2 : -Math.PI / 2);
+    let x = -blockLen / 2;                  // local axis: x runs ALONG the strap
+    for (const it of items) {
+      it.draw(x);
+      x += it.len + itemGap;
+    }
+    ctx.restore();
+  }
+
+  if (!opts.skipOverlays) drawQrOverlay(ctx, frame, opts.qr, opts.qrImage, palette);
+}
+
 // ─── LAYOUT 1: Image · Text split ────────────────────────────────────
 function drawImageTextSplit(ctx, frame, content, image, opts, textPos) {
   const { w, h, padX, padY } = frame;
@@ -2236,9 +2379,18 @@ function drawImageTextSplit(ctx, frame, content, image, opts, textPos) {
   // overlap the text block.
   const clearance = brandBarClearance(ctx, frame, { ...opts, safeArea });
   const adjTextY = Math.max(textRectY, clearance.topY);
+  // How much height the text band ACTUALLY has. Hand this to the type engine and
+  // it shrinks the block to fit, instead of running on under the image — which is
+  // precisely what the starting layout was doing on a square canvas.
+  const bandBottom = textBandRect ? textBandRect.y + textBandRect.h : safeArea.y + safeArea.h;
+  const tFrame = {
+    ...frame,
+    textMaxH: Math.max(80, Math.min(bandBottom, clearance.bottomY) - adjTextY - padY * 0.5),
+    fitOut: opts.fitOut,
+  };
   // Backdrop ALWAYS draws (image-composition layer) — even in PDF skipOverlays mode
-  drawTextBackdropOnly(ctx, content, textRectX, adjTextY, textRectW, palette, accent, frame, 'top', opts.textBackdrop);
-  if (!opts.skipOverlays) drawTextBlock(ctx, content, textRectX, adjTextY, textRectW, palette, accent, frame, 'top', null);
+  drawTextBackdropOnly(ctx, content, textRectX, adjTextY, textRectW, palette, accent, tFrame, 'top', opts.textBackdrop);
+  if (!opts.skipOverlays) drawTextBlock(ctx, content, textRectX, adjTextY, textRectW, palette, accent, tFrame, 'top', null);
   if (!opts.skipOverlays) drawBrandBar(ctx, frame, palette, accent, false, { ...opts, safeArea });
   if (!opts.skipOverlays) drawQrOverlay(ctx, frame, opts.qr, opts.qrImage, palette);
 }
@@ -2292,8 +2444,11 @@ function drawFullBleedOverlay(ctx, frame, content, image, opts) {
     if (lum > 145) { overlayPalette.ink = BRAND.ink; overlayPalette.muted = BRAND.ink600; overlayPalette.mode = 'light'; }
     else           { overlayPalette.ink = BRAND.bone00; overlayPalette.muted = BRAND.cream100; overlayPalette.mode = 'dark'; }
   }
-  drawTextBackdropOnly(ctx, content, padX, textBottomY, w - padX * 2, overlayPalette, accent, frame, 'bottom', opts.textBackdrop);
-  if (!opts.skipOverlays) drawTextBlock(ctx, content, padX, textBottomY, w - padX * 2, overlayPalette, accent, frame, 'bottom', null);
+  // Bottom-anchored: the block grows UPWARD from textBottomY, so its budget is the
+  // distance back up to the top clearance.
+  const oFrame = { ...frame, textMaxH: Math.max(80, textBottomY - clearance.topY - padY * 1.2), fitOut: opts.fitOut };
+  drawTextBackdropOnly(ctx, content, padX, textBottomY, w - padX * 2, overlayPalette, accent, oFrame, 'bottom', opts.textBackdrop);
+  if (!opts.skipOverlays) drawTextBlock(ctx, content, padX, textBottomY, w - padX * 2, overlayPalette, accent, oFrame, 'bottom', null);
   if (!opts.skipOverlays) drawBrandBar(ctx, frame, overlayPalette, accent, true, opts);
   if (!opts.skipOverlays) drawQrOverlay(ctx, frame, opts.qr, opts.qrImage, overlayPalette);
 }
@@ -2681,8 +2836,21 @@ function computeTypeScale(frame) {
   };
 }
 
-function layoutTextElements(ctx, content, x, y, w, palette, accent, frame, anchor = 'top') {
-  const ts = computeTypeScale(frame);
+function layoutTextElements(ctx, content, x, y, w, palette, accent, frame, anchor = 'top', scale = 1) {
+  const ts0 = computeTypeScale(frame);
+  // SHRINK-TO-FIT. The type scale says how big the type WANTS to be; the band says
+  // how much room it HAS. Without this the block simply overflows — on a square
+  // format the body runs straight under the image, which is exactly the bug in the
+  // starting layout. The scale gives way, never the layout.
+  const ts = {
+    ...ts0,
+    eyebrowSize:  ts0.eyebrowSize * scale,
+    headlineMax:  ts0.headlineMax * scale,
+    headlineMin:  ts0.headlineMin * scale,
+    sublineSize:  ts0.sublineSize * scale,
+    bodySize:     ts0.bodySize * scale,
+    ctaSize:      ts0.ctaSize * scale,
+  };
   const baseSize = Math.min(frame.w, frame.h);
   // Baseline grid: every element baseline snaps to a multiple of `gridUnit` so
   // vertical rhythm is identical across templates/formats. (From the type scale.)
@@ -2749,6 +2917,22 @@ function layoutTextElements(ctx, content, x, y, w, palette, accent, frame, ancho
     else totalH += el.size * 1.2;
     if (i < blocks.length - 1) totalH += el.size * (gaps[el.type] ?? gaps.body);
   });
+  // Too tall for the band? Re-lay-out one notch smaller. 0.93 per pass, floor at
+  // 55% — below that the type is no longer the problem and something else has to
+  // give (less copy, a taller band), so we stop rather than shrink to unreadable.
+  const maxH = frame.textMaxH;
+  if (maxH && totalH > maxH && scale > 0.55) {
+    return layoutTextElements(ctx, content, x, y, w, palette, accent, frame, anchor, scale * 0.93);
+  }
+  // Report what actually happened. Hitting the floor and STILL not fitting is not
+  // something to swallow: the copy is too long for the band, and the only honest
+  // move is to say so rather than quietly run the text under the image.
+  if (frame.fitOut) {
+    frame.fitOut.scale = scale;
+    frame.fitOut.overflow = maxH ? Math.max(0, totalH - maxH) : 0;
+    frame.fitOut.bandH = maxH || 0;
+  }
+
   let cursorY = anchor === 'bottom' ? y - totalH : y;
   cursorY = snap(cursorY); // snap the starting point to the grid
 
@@ -3533,6 +3717,15 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
   const canvasRef = useRef(null);
   const previewWrapRef = useRef(null);
   const [previewSize, setPreviewSize] = useState({ w: 500, h: 500 });
+  // A 118 × 5315 lanyard is 1:45. Fitted to the window it is a hair-thin line —
+  // you cannot judge a repeat you cannot see. Zoom and a 90° turn are not polish
+  // here, they are what makes the format usable at all.
+  // How the type engine coped with the band on the last draw — measured, not guessed.
+  const fitRef = useRef({ scale: 1, overflow: 0, bandH: 0 });
+  const [typeFit, setTypeFit] = useState({ scale: 1, overflow: 0, bandH: 0 });
+
+  const [previewZoom, setPreviewZoom] = useState(1);
+  const [previewRotate, setPreviewRotate] = useState(false);
   // ── ONE MENTAL MODEL: every canvas can have several "frames" ──────────
   // Screen formats → SLIDES (manual + / − under the canvas; 1 = a single post).
   // Print formats  → PAGES  (manual + / −, which insert/remove PAGE_BREAK markers
@@ -3544,6 +3737,9 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
   // type carries the layout, so a 40-page document stays on-grid. Pages live in
   // their own state (not in the PAGE_BREAK body) because each page has its own
   // fields, its own image and its own crop.
+  // Lanyard strap settings — only used by the lanyard layout.
+  const [lanyard, setLanyard] = useState({ ...LANYARD_DEFAULTS });
+
   const [brochurePages, setBrochurePages] = useState(defaultBrochurePages);
   const [brochureIdx, setBrochureIdx]     = useState(0);
   const [brochureTitle, setBrochureTitle] = useState('MEDARTIS');
@@ -3552,6 +3748,7 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
 
   const baseFormat = FORMATS[formatKey];
   const isBrochure = !!baseFormat.brochure;
+  const isLanyard = layoutKey === 'lanyard';
   const supportsSlides = !baseFormat.printable && !baseFormat.brochure;
   const supportsPages = !!baseFormat.printable && !baseFormat.brochure;
   const format = useMemo(
@@ -3568,8 +3765,8 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
   // down the component. Putting it up with the other sidebar plumbing threw
   // "can't access 'isBrochure' before initialization" on the first paint.
   const secNo = useMemo(
-    () => sectionNumbers(visibleSections({ isBrochure, isCarousel: !!format.multi })),
-    [isBrochure, format.multi]
+    () => sectionNumbers(visibleSections({ isBrochure, isCarousel: !!format.multi, isLanyard })),
+    [isBrochure, format.multi, isLanyard]
   );
   /** "§ 07 — CANTO DAM" — never typed by hand, never counts a panel you can't see. */
   const SEC = (key, label) => `§ ${secNo[key] || '--'} — ${label}`;
@@ -3639,21 +3836,38 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
       const CAPTION = 40;
       const maxW = rect.width - pad;
       const maxH = rect.height - pad - CAPTION - FRAME_BAR;
-      const ratio = format.w / format.h;
+      const ratio = previewRotate ? format.h / format.w : format.w / format.h;
       let w = maxW, h = w / ratio;
       if (h > maxH) { h = maxH; w = h * ratio; }
-      setPreviewSize({ w: Math.max(80, w), h: Math.max(80, h) });
+      // previewSize is always the UNROTATED canvas box; the wrapper below takes
+      // the rotated footprint, because a CSS transform does not change layout size.
+      setPreviewSize(previewRotate
+        ? { w: Math.max(80, h), h: Math.max(80, w) }
+        : { w: Math.max(80, w), h: Math.max(80, h) });
     };
     update();
     window.addEventListener('resize', update);
     return () => window.removeEventListener('resize', update);
-  }, [format]);
+  }, [format, previewRotate]);
+
+  // Leaving a format zoomed 4× into a strap and then switching to an A4 is a
+  // small betrayal — reset the view when the canvas changes shape.
+  useEffect(() => { setPreviewZoom(1); setPreviewRotate(false); }, [formatKey]);
 
   useEffect(() => {
     if (!FORMAT_LAYOUTS[formatKey].includes(layoutKey)) {
       setLayoutKey(FORMAT_LAYOUTS[formatKey][0]);
     }
   }, [formatKey, layoutKey]);
+
+  // A strap can only carry a name and a URL. Switching to one should therefore
+  // switch the template too — but never over content the user has already typed.
+  useEffect(() => {
+    if (FORMATS[formatKey]?.group === 'Print · wearables' && !contentEdited.current) {
+      setTemplateKey('lanyard');
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [formatKey]);
 
   // A carousel format opens with 3 slides; every other screen format starts as a
   // single post and the user adds slides with + under the canvas.
@@ -3738,6 +3952,22 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
           fix: null,
         });
       }
+    }
+
+    // 0b · TYPE FITS THE BAND. Measured on the last draw, not estimated: the type
+    // engine shrinks to fit (down to 55%), and if it is STILL too tall the copy is
+    // simply too long for this band. Saying so beats letting the text run under the
+    // image — which is what it used to do, and what nobody could see was deliberate.
+    if (typeFit.bandH > 0) {
+      const over = typeFit.overflow;
+      checks.push({
+        ok: over > 1 ? 'warn' : 'pass',
+        label: 'Copy fits the text band',
+        note: over > 1
+          ? `${Math.round(over)} px too long even at the ${Math.round(typeFit.scale * 100)}% floor — shorten the copy, or pick a layout with a deeper band`
+          : `fits at ${Math.round(typeFit.scale * 100)}% of the type scale`,
+        fix: null,
+      });
     }
 
     // 1 · Logo minimum size — below this the wordmark stops being legible.
@@ -3841,7 +4071,7 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
     }
 
     return checks;
-  }, [formatKey, wordmarkPos, wordmarkPctOverride, palette, accentColor, mutedBoost, accentSafe, layoutKey, activeImage, pdfBleed, wordmarkOverImage, logoLegib]);
+  }, [formatKey, wordmarkPos, wordmarkPctOverride, palette, accentColor, mutedBoost, accentSafe, layoutKey, activeImage, pdfBleed, wordmarkOverImage, logoLegib, typeFit]);
 
   const draw = useCallback(() => {
     const canvas = canvasRef.current;
@@ -3877,6 +4107,7 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
         : null;
       layout.draw(ctx, frame, activeContent, activeImage, {
         palette, accent: accentColor, fit: activeFit,
+        lanyard, fitOut: fitRef.current,
         wordmarkPos,
         folioPos: slideShowsFolio ? folioPos : 'hidden',
         formatKey,
@@ -3892,6 +4123,12 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
       });
       // Surface the measured legibility to the BRAND CHECK panel. Identity is
       // preserved when nothing material changed, so this can't loop.
+      const F = fitRef.current;
+      setTypeFit((prev) => (
+        Math.abs(prev.scale - F.scale) < 0.005 && Math.abs(prev.overflow - F.overflow) < 0.5
+          ? prev : { ...F }
+      ));
+
       const L = legibRef.current;
       setLogoLegib((prev) => (
         prev.safe === L.safe && prev.protected === L.protected && prev.mode === L.mode
@@ -3913,7 +4150,7 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
         ctx.fill();
       }
     }
-  }, [format, layoutKey, activeContent, activeImage, activeFit, palette, carouselSlides, carouselSlide, wordmarkPos, folioPos, formatKey, wordmarkOverImage, folioOverImage, wordmarkColor, folioColor, folioText, qrConfig, qrImage, carouselBg, carouselBgImage, carouselQrPer, carouselFolioPer, textBackdrop, wordmarkPctOverride, wmReady, logoPlate, accentColor, isBrochure, brochurePage, brochureImgs, brochureTitle, curBrochure, partnerLogos]);
+  }, [format, layoutKey, activeContent, activeImage, activeFit, palette, carouselSlides, carouselSlide, wordmarkPos, folioPos, formatKey, wordmarkOverImage, folioOverImage, wordmarkColor, folioColor, folioText, qrConfig, qrImage, carouselBg, carouselBgImage, carouselQrPer, carouselFolioPer, textBackdrop, wordmarkPctOverride, wmReady, logoPlate, accentColor, isBrochure, brochurePage, brochureImgs, brochureTitle, curBrochure, partnerLogos, lanyard]);
 
   useEffect(() => { draw(); }, [draw]);
 
@@ -4091,6 +4328,7 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
       // derived: render the layout bare, and what is left is type and mark.
       imageOverride === 'none' ? null : (imageOverride ?? activeImage), {
       palette, accent: accentColor,
+      lanyard,
       fit: fitOverride ?? activeFit,
       wordmarkPos,
       folioPos: slideShowsFolio ? folioPos : 'hidden',
@@ -4175,20 +4413,31 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
     let safeArea;
     let effectivePalette = palette;
 
+    // The PDF lays the text out AGAIN, on its own. It must therefore apply the SAME
+    // clearance and the SAME height budget as the canvas — otherwise the vector
+    // print and the on-screen preview quietly disagree, which is the worst kind of
+    // export bug: you only find it on paper.
     if (layoutKey === 'overlay') {
       // Overlay: image fills, text bottom-anchored, scrim coal palette
       effectivePalette = { bg: BRAND.coal, ink: BRAND.bone00, muted: BRAND.cream100, mode: 'dark' };
-      const textBottomY = frame.h - frame.padY * 1.7;
-      textTokens = layoutTextElements(measCtx, slideContent, frame.padX, textBottomY, frame.w - frame.padX * 2, effectivePalette, BRAND.gold, frame, 'bottom');
       safeArea = { x: 0, y: 0, w: frame.w, h: frame.h };
+      const clearance = brandBarClearance(measCtx, frame, { ...opts, safeArea });
+      const textBottomY = Math.min(frame.h - frame.padY * 1.7, clearance.bottomY);
+      const oFrame = { ...frame, textMaxH: Math.max(80, textBottomY - clearance.topY - frame.padY * 1.2) };
+      textTokens = layoutTextElements(measCtx, slideContent, frame.padX, textBottomY, frame.w - frame.padX * 2, effectivePalette, BRAND.gold, oFrame, 'bottom');
     } else {
       const textPos = layoutKey === 'image-bottom' ? 'top' : 'bottom';
       const geom = computeSplitGeom(frame, opts, textPos);
-      const textRectX = geom.isWide ? frame.padX : frame.padX;
-      const textW = geom.isWide ? (frame.w * 0.5 - frame.padX * 2) : (frame.w - frame.padX * 2);
-      const textAreaY = geom.textAreaY;
-      textTokens = layoutTextElements(measCtx, slideContent, textRectX, textAreaY, textW, palette, BRAND.gold, frame);
       safeArea = geom.safeArea;
+      const clearance = brandBarClearance(measCtx, frame, { ...opts, safeArea });
+      const textRectX = frame.padX;
+      const textW = geom.isWide ? (frame.w * 0.5 - frame.padX * 2) : (frame.w - frame.padX * 2);
+      const textAreaY = Math.max(geom.textAreaY, clearance.topY);
+      const tFrame = {
+        ...frame,
+        textMaxH: Math.max(80, Math.min(geom.textRect.y + geom.textRect.h, clearance.bottomY) - textAreaY - frame.padY * 0.5),
+      };
+      textTokens = layoutTextElements(measCtx, slideContent, textRectX, textAreaY, textW, palette, BRAND.gold, tFrame);
     }
 
     return { frame, palette: effectivePalette, opts: { ...opts, safeArea }, textTokens };
@@ -5224,31 +5473,86 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
         }}>
           {format.label} · {format.w} × {format.h} · {LAYOUTS[layoutKey]?.label}
         </div>
-        <canvas
-          ref={canvasRef}
-          onMouseDown={(e) => {
-            if (!activeImage) return;
-            e.preventDefault();
-            const startX = e.clientX, startY = e.clientY;
-            const startOX = activeFit.offsetX, startOY = activeFit.offsetY;
-            const move = (ev) => {
-              const dx = (ev.clientX - startX) / previewSize.w * 100;
-              const dy = (ev.clientY - startY) / previewSize.h * 100;
-              updateFit({ offsetX: clamp(startOX + dx, -200, 200), offsetY: clamp(startOY + dy, -200, 200) });
-            };
-            const up = () => {
-              window.removeEventListener('mousemove', move);
-              window.removeEventListener('mouseup', up);
-            };
-            window.addEventListener('mousemove', move);
-            window.addEventListener('mouseup', up);
-          }}
-          style={{
-            width: previewSize.w, height: previewSize.h,
-            boxShadow: '0 32px 80px rgba(0,0,0,0.55)', background: BRAND.paper,
-            cursor: activeImage ? 'grab' : 'default',
-            touchAction: 'none'
-          }} />
+
+        {/* ZOOM · FIT · 90° */}
+        {(() => {
+          const pill = (on) => ({
+            minWidth: 34, height: 30, borderRadius: 15, cursor: 'pointer',
+            background: on ? BRAND.gold : 'rgba(250,248,240,0.08)',
+            color: on ? BRAND.coal : 'rgba(250,248,240,0.85)',
+            border: `1px solid ${on ? BRAND.gold : 'rgba(250,248,240,0.22)'}`,
+            fontFamily: BRAND.mono, fontSize: 10.5, letterSpacing: '0.06em',
+            padding: '0 9px',
+          });
+          const step = (f) => setPreviewZoom((z) => clamp(Number((z * f).toFixed(2)), 0.5, 8));
+          return (
+            <div style={{ position: 'absolute', top: 16, right: 20, display: 'flex', gap: 5, zIndex: 2 }}>
+              <button style={pill(false)} onClick={() => step(1 / 1.25)} title="Zoom out">−</button>
+              <button style={pill(false)} onClick={() => step(1.25)} title="Zoom in">+</button>
+              <button style={pill(previewZoom !== 1)} onClick={() => setPreviewZoom(1)}
+                title="Fit the canvas to the window">
+                {previewZoom === 1 ? 'FIT' : `${Math.round(previewZoom * 100)}%`}
+              </button>
+              {/* A 1:45 strap read sideways is legible; read upright it is a line. */}
+              {format.h / format.w > 3 || format.w / format.h > 3 ? (
+                <button style={pill(previewRotate)} onClick={() => setPreviewRotate((v) => !v)}
+                  title="Turn the preview 90° — the artwork is unchanged">⟳ 90°</button>
+              ) : null}
+            </div>
+          );
+        })()}
+
+        {/* Viewport — scrolls once the canvas is larger than the window */}
+        <div style={{
+          maxWidth: '100%', maxHeight: '100%',
+          overflow: previewZoom > 1 ? 'auto' : 'visible',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+        }}>
+          <div style={{
+            // A CSS rotation does not change layout size, so the wrapper must take
+            // the rotated footprint explicitly or the flex box reserves the wrong room.
+            width:  (previewRotate ? previewSize.h : previewSize.w) * previewZoom,
+            height: (previewRotate ? previewSize.w : previewSize.h) * previewZoom,
+            display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
+          }}>
+            <canvas
+              ref={canvasRef}
+              onMouseDown={(e) => {
+                if (!activeImage || previewRotate) return;   // drag-to-pan is axis-aligned
+                e.preventDefault();
+                const startX = e.clientX, startY = e.clientY;
+                const startOX = activeFit.offsetX, startOY = activeFit.offsetY;
+                const dispW = previewSize.w * previewZoom, dispH = previewSize.h * previewZoom;
+                const move = (ev) => {
+                  const dx = (ev.clientX - startX) / dispW * 100;
+                  const dy = (ev.clientY - startY) / dispH * 100;
+                  updateFit({ offsetX: clamp(startOX + dx, -200, 200), offsetY: clamp(startOY + dy, -200, 200) });
+                };
+                const up = () => {
+                  window.removeEventListener('mousemove', move);
+                  window.removeEventListener('mouseup', up);
+                };
+                window.addEventListener('mousemove', move);
+                window.addEventListener('mouseup', up);
+              }}
+              style={{
+                width: previewSize.w * previewZoom, height: previewSize.h * previewZoom,
+                transform: previewRotate ? 'rotate(90deg)' : 'none',
+                boxShadow: '0 32px 80px rgba(0,0,0,0.55)', background: BRAND.paper,
+                cursor: activeImage && !previewRotate ? 'grab' : 'default',
+                touchAction: 'none',
+                // flexShrink: 0 — WITHOUT THIS THE PREVIEW LIES.
+                // A rotated element keeps its ORIGINAL layout box, so a 1:45 strap
+                // turned 90° is still a tall box inside a flex row with maxWidth:100%.
+                // Flex then shrinks its WIDTH to fit and leaves the height alone —
+                // and the canvas is drawn at the wrong aspect: the artwork looks
+                // squashed, and you go hunting for a bug in the drawing code that
+                // isn't there. The canvas must never be resized by the layout.
+                flexShrink: 0,
+                maxWidth: 'none', maxHeight: 'none',
+              }} />
+          </div>
+        </div>
 
         {/* FRAME BAR — one control for both models: slides (screen) / pages (print).
             Always visible, so adding a second frame is always one click away. */}
@@ -5322,6 +5626,53 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
         width: 'clamp(380px, 30vw, 560px)', flexShrink: 0, background: BRAND.bone00, padding: '24px 22px',
         overflowY: 'auto', borderLeft: `1px solid ${BRAND.ink100}`
       }}>
+        {isLanyard && (
+        <Section label={SEC('LANYARD', 'LANYARD STRAP')} {...sp('LANYARD')}>
+          {(() => {
+            const row = { marginBottom: 10 };
+            const lab = { display: 'block', fontFamily: BRAND.mono, fontSize: 9, letterSpacing: '0.1em',
+                          textTransform: 'uppercase', color: BRAND.ink600, marginBottom: 4 };
+            const set = (patch) => setLanyard((l) => ({ ...l, ...patch }));
+            const slider = (key, label, min, max, fmt) => (
+              <label style={{ ...lab, marginBottom: 10 }}>
+                {label} · {fmt(lanyard[key])}
+                <input type="range" min={min} max={max} step="0.01" value={lanyard[key]}
+                       onChange={(e) => set({ [key]: Number(e.target.value) })}
+                       style={{ width: '100%', marginTop: 3 }} />
+              </label>
+            );
+            return (
+              <>
+                <div style={row}>
+                  <label style={lab}>Mark</label>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4 }}>
+                    <SidebarBtn active={lanyard.mark === 'wordmark'} onClick={() => set({ mark: 'wordmark' })}>Wordmark</SidebarBtn>
+                    <SidebarBtn active={lanyard.mark === 'none'} onClick={() => set({ mark: 'none' })}>No mark</SidebarBtn>
+                  </div>
+                </div>
+                {slider('markSize', 'Mark size', 0.15, 0.75, (v) => `${Math.round(v * 100)}% of strap width`)}
+                {slider('textSize', 'Text size', 0.12, 0.55, (v) => `${Math.round(v * 100)}% of strap width`)}
+                {slider('spacing', 'Repeat spacing', 0.2, 3, (v) => `${v.toFixed(2)}×`)}
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4, marginBottom: 8 }}>
+                  <SidebarBtn active={lanyard.mirror} onClick={() => set({ mirror: !lanyard.mirror })}>Mirror halves</SidebarBtn>
+                  <SidebarBtn active={lanyard.edges} onClick={() => set({ edges: !lanyard.edges })}>Edge lines</SidebarBtn>
+                </div>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8, fontSize: 11, color: BRAND.ink600 }}>
+                  <input type="checkbox" checked={lanyard.strapLineOn}
+                         onChange={(e) => set({ strapLineOn: e.target.checked })} />
+                  Show strap line
+                </label>
+                <div style={{ fontFamily: BRAND.mono, fontSize: 8.5, color: BRAND.ink300, lineHeight: 1.6, letterSpacing: '0.03em' }}>
+                  ONE REPEAT = MARK · EVENT NAME · STRAP LINE. LENGTHS ARE MEASURED, SO THE
+                  ITEMS NEVER COLLIDE AND A BLOCK IS NEVER CUT IN HALF BY THE STRAP END.
+                  USE THE ZOOM AND ⟳ 90° BUTTONS ABOVE THE CANVAS TO CHECK THE REPEAT AND THE FOLD.
+                </div>
+              </>
+            );
+          })()}
+        </Section>
+        )}
+
         <SideGroup n="3" label="Brand system" />
 
         <Section label={SEC('SURFACE', 'SURFACE')} {...sp('SURFACE')}>
@@ -6340,7 +6691,7 @@ const SECTION_ORDER = [
   // 1 · Canvas
   'FORMAT', 'LAYOUT',
   // 2 · Story — TEMPLATE and BROCHURE are alternates; exactly one is ever visible
-  'TEMPLATE', 'BROCHURE',
+  'TEMPLATE', 'BROCHURE', 'LANYARD',
   // 3 · Brand system
   'SURFACE', 'BRANDBAR', 'TEXTBG', 'QR', 'CAROUSEL', 'CAROUSEL_BG', 'CONTENT',
   // 4 · Imagery
@@ -6350,8 +6701,9 @@ const SECTION_ORDER = [
 ];
 
 /** Which sections exist for the current canvas? The numbering follows from this. */
-function visibleSections({ isBrochure, isCarousel }) {
+function visibleSections({ isBrochure, isCarousel, isLanyard }) {
   return SECTION_ORDER.filter((k) => {
+    if (k === 'LANYARD') return isLanyard;
     if (k === 'BROCHURE') return isBrochure;
     if (k === 'LAYOUT' || k === 'TEMPLATE' || k === 'CONTENT') return !isBrochure;
     if (k === 'CAROUSEL' || k === 'CAROUSEL_BG') return isCarousel;
