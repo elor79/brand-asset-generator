@@ -124,7 +124,11 @@ const TEMPLATES = {
     label: 'Lanyard strap',
     desc: 'Congress lanyards · repeating mark, mirrored halves',
     fields: [
-      { key: 'headline', label: 'Event name (repeats along the strap)', default: 'MEDARTIS CONGRESS MMXXVII' },
+      // The MARK already says "medartis" — one repeat block is wordmark · event ·
+      // strap line, so putting the brand in the event name too makes the strap read
+      // "medartis · MEDARTIS CONGRESS · medartis.com". The event name is for the
+      // EVENT; the mark carries the brand.
+      { key: 'headline', label: 'Event name (repeats along the strap)', default: 'HAND & WRIST CONGRESS MMXXVII' },
       { key: 'subline',  label: 'Strap line · URL or claim', default: 'medartis.com' },
     ],
   },
