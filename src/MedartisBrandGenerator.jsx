@@ -3843,11 +3843,24 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
       const ratio = previewRotate ? format.h / format.w : format.w / format.h;
       let w = maxW, h = w / ratio;
       if (h > maxH) { h = maxH; w = h * ratio; }
+
+      // NEVER CLAMP THE AXES INDEPENDENTLY.
+      // A 118 × 5315 strap fits to about 13 × 600. The old `Math.max(80, w)` then
+      // forced the width to 80 and left the height at 600 — an aspect of 0.133
+      // where the artwork is 0.022, a 6× horizontal stretch. That is what was
+      // "distorting" the lanyard: not the drawing code, a floor meant to stop a
+      // canvas from vanishing that instead made it lie about its own shape.
+      //
+      // A minimum size is still worth having — a 13px-wide preview is useless — but
+      // it has to be applied as a UNIFORM scale-up, and the viewport scrolls. The
+      // aspect ratio is not negotiable; the size is.
+      const MIN_EDGE = 60;
+      const k = Math.max(1, MIN_EDGE / Math.max(1, Math.min(w, h)));
+      w *= k; h *= k;
+
       // previewSize is always the UNROTATED canvas box; the wrapper below takes
       // the rotated footprint, because a CSS transform does not change layout size.
-      setPreviewSize(previewRotate
-        ? { w: Math.max(80, h), h: Math.max(80, w) }
-        : { w: Math.max(80, w), h: Math.max(80, h) });
+      setPreviewSize(previewRotate ? { w: h, h: w } : { w, h });
     };
     update();
     window.addEventListener('resize', update);
@@ -5509,7 +5522,7 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
         {/* Viewport — scrolls once the canvas is larger than the window */}
         <div style={{
           maxWidth: '100%', maxHeight: '100%',
-          overflow: previewZoom > 1 ? 'auto' : 'visible',
+          overflow: 'auto',   // a min-scaled strap can exceed the window even at 100%
           display: 'flex', alignItems: 'center', justifyContent: 'center',
         }}>
           <div style={{
@@ -5630,6 +5643,8 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
         width: 'clamp(380px, 30vw, 560px)', flexShrink: 0, background: BRAND.bone00, padding: '24px 22px',
         overflowY: 'auto', borderLeft: `1px solid ${BRAND.ink100}`
       }}>
+        <SideGroup n="3" label="Brand system" />
+
         {isLanyard && (
         <Section label={SEC('LANYARD', 'LANYARD STRAP')} {...sp('LANYARD')}>
           {(() => {
@@ -5677,7 +5692,6 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
         </Section>
         )}
 
-        <SideGroup n="3" label="Brand system" />
 
         <Section label={SEC('SURFACE', 'SURFACE')} {...sp('SURFACE')}>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', gap: 4 }}>
@@ -6695,9 +6709,9 @@ const SECTION_ORDER = [
   // 1 · Canvas
   'FORMAT', 'LAYOUT',
   // 2 · Story — TEMPLATE and BROCHURE are alternates; exactly one is ever visible
-  'TEMPLATE', 'BROCHURE', 'LANYARD',
+  'TEMPLATE', 'BROCHURE',
   // 3 · Brand system
-  'SURFACE', 'BRANDBAR', 'TEXTBG', 'QR', 'CAROUSEL', 'CAROUSEL_BG', 'CONTENT',
+  'LANYARD', 'SURFACE', 'BRANDBAR', 'TEXTBG', 'QR', 'CAROUSEL', 'CAROUSEL_BG', 'CONTENT',
   // 4 · Imagery
   'IMAGE', 'GENERATE', 'CANTO', 'IMAGEFIT',
   // 5 · Output
