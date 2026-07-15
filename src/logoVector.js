@@ -81,6 +81,11 @@ export async function svgToPdf(svg, { jsPDF, svg2pdf }) {
 /**
  * Every variant × colour × format, plus the palette and a README.
  *
+ * Returns [{ name, data }] where data is a string or a Uint8Array — the shape
+ * makeZip() consumes. NOT Blobs: a Blob has to be awaited to read its bytes, and
+ * the zip writer is synchronous. (It cost me a "bytes is undefined" to learn that
+ * the hard way, and a test that stubbed Blob and so never caught it.)
+ *
  * The README is not padding: it answers the questions an agency would otherwise
  * email you about a week before print — which file to use on a dark background,
  * how much clear space, what the minimum size is. Answering them in the zip is
@@ -105,13 +110,14 @@ export async function buildBrandKit({
     const svg = buildLogoSvg({ paths, glyph, view, color: c.hex, clearSpace });
     const base = `medartis_wordmark_${key}`;
     if (formats.includes('svg')) {
-      files.push({ name: `${base}.svg`, blob: new Blob([svg], { type: 'image/svg+xml' }) });
+      files.push({ name: `logos/svg/${base}.svg`, data: svg });
       step(`${base}.svg`);
     }
     if (formats.includes('pdf')) {
       if (!pdfTools) throw new Error('PDF was requested but no PDF tools were provided.');
       const pdf = await svgToPdf(svg, pdfTools);
-      files.push({ name: `${base}.pdf`, blob: pdf.output('blob') });
+      // arraybuffer → Uint8Array: the zip writer needs real bytes, synchronously.
+      files.push({ name: `logos/pdf/${base}.pdf`, data: new Uint8Array(pdf.output('arraybuffer')) });
       step(`${base}.pdf`);
     }
   }
@@ -120,7 +126,7 @@ export async function buildBrandKit({
     .filter(([, v]) => typeof v === 'string' && /^#[0-9a-f]{6}$/i.test(v))
     .map(([k, v]) => `${k.padEnd(12)} ${v.toUpperCase()}`)
     .join('\n');
-  files.push({ name: 'palette.txt', blob: new Blob([palette], { type: 'text/plain' }) });
+  files.push({ name: 'palette.txt', data: palette });
   step('palette.txt');
 
   const readme = `MEDARTIS · LOGO FILES
@@ -150,7 +156,7 @@ FORMAT
 PALETTE
   See palette.txt.
 `;
-  files.push({ name: 'README.txt', blob: new Blob([readme], { type: 'text/plain' }) });
+  files.push({ name: 'README.txt', data: readme });
   step('README.txt');
 
   return files;
