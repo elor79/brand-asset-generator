@@ -2,6 +2,8 @@ import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react'
 import { jsPDF } from 'jspdf';
 import { svg2pdf } from 'svg2pdf.js';
 import { BROCHURE_TYPES, BROCHURE_TYPE_KEYS, defaultBrochurePages, makeBrochurePage } from './brochure';
+import { buildLogoSvg, svgToPdf, buildBrandKit } from './logoVector';
+import { makeZip } from './zip';
 import QRCodeStyling from 'qr-code-styling';
 import { readPsd, initializeCanvas } from 'ag-psd';
 
@@ -960,8 +962,160 @@ function svgPathToPdfOps(d) {
   return ops;
 }
 
+
+// ═══ LANYARD · VECTOR PDF ════════════════════════════════════════════
+// The strap must print as VECTOR like every other format. Rasterising it at
+// 150 dpi would soften the very thing a lanyard is judged on — crisp type on
+// woven webbing — so the repeat is composed a second time here, in millimetres,
+// mirroring drawLanyardStrip exactly.
+//
+// Two jsPDF traps are handled explicitly, because both produce output that looks
+// almost right and is quietly wrong:
+//
+//   1 · setFontSize wants POINTS. charSpace wants DOCUMENT UNITS (mm) and jsPDF
+//       converts to points itself — so passing mmToPt() to charSpace applies the
+//       72/25.4 factor TWICE. The tracking comes out 2.83× too wide, the type
+//       overruns its measured length, and it collides with the mark.
+//   2 · jsPDF rotates text COUNTER-clockwise: +90 reads UP the page, −90 reads
+//       DOWN. Our cursor advances DOWN for an un-flipped block and UP for a
+//       flipped one, so the angle must follow the cursor or the type runs
+//       backwards through the mark it is supposed to follow.
+const LANYARD_CAP_RATIO = 0.727;   // Inter cap height ÷ font size
+
+function pdfDrawLanyard(pdf, { wMm, hMm, content, cfg, palette, accent, bleedMm = 0 }) {
+  const ink   = palette.mode === 'dark' ? BRAND.bone00 : BRAND.ink;
+  const muted = palette.mode === 'dark' ? BRAND.cream100 : BRAND.ink600;
+  const off = bleedMm;                        // page origin → trim origin
+  const mmToPt = (mm) => mm / 25.4 * 72;
+  const CAP = LANYARD_CAP_RATIO;
+
+  if (cfg.edges) {
+    const [r, g, b] = hexRgb(accent || BRAND.gold);
+    pdf.setFillColor(r, g, b);
+    const hair = Math.max(0.2, wMm * 0.018);
+    pdf.rect(off + wMm * 0.06, off - bleedMm, hair, hMm + bleedMm * 2, 'F');
+    pdf.rect(off + wMm - wMm * 0.06 - hair, off - bleedMm, hair, hMm + bleedMm * 2, 'F');
+  }
+
+  const label = (content?.headline || '').trim().toUpperCase();
+  const strap = cfg.strapLineOn ? (content?.subline || content?.cta || '').trim().toUpperCase() : '';
+  const txtCap   = wMm * clamp(cfg.textSize, 0.12, 0.55);
+  const strapCap = txtCap * 0.62;
+
+  // Measure with the SAME engine the canvas uses, so the vector block and the
+  // preview agree. Anything else and the print quietly differs from the screen.
+  const meas = document.createElement('canvas').getContext('2d');
+  const measure = (text, capMm, weight, family) => {
+    const px = 100, scale = capMm / (px * CAP);
+    meas.font = `${weight} ${px}px ${family}`;
+    const ls = px * 0.16;
+    const w = [...text].reduce((sum, ch) => sum + meas.measureText(ch).width + ls, -ls);
+    return w * scale;
+  };
+
+  const items = [];
+  if (cfg.mark !== 'none') {
+    const markH = wMm * clamp(cfg.markSize, 0.15, 0.75);
+    const markL = markH * (WM_GLYPH.w / WM_GLYPH.h);
+    items.push({ len: markL, kind: 'mark', h: markH });
+  }
+  if (label) items.push({ len: measure(label, txtCap, 700, BRAND.display), kind: 'label' });
+  if (strap) items.push({ len: measure(strap, strapCap, 500, BRAND.mono), kind: 'strap' });
+  if (!items.length) return;
+
+  const itemGap   = wMm * 1.1;
+  const blockLen  = items.reduce((n, it) => n + it.len, 0) + itemGap * (items.length - 1);
+  const repeatGap = Math.max(wMm * 1.2, blockLen * clamp(cfg.spacing, 0.2, 3));
+  const period    = blockLen + repeatGap;
+  const reps      = Math.ceil((hMm + period) / period);
+
+  for (let i = 0; i < reps; i++) {
+    const blockStart = repeatGap / 2 + i * period;
+    if (blockStart > hMm || blockStart + blockLen > hMm) break;
+    const blockCenter = blockStart + blockLen / 2;
+    const flip = cfg.mirror && blockCenter > hMm / 2;
+    const textAngle = flip ? 90 : -90;        // see trap 2 above
+
+    let cursor = -blockLen / 2;
+    for (const it of items) {
+      const along = cursor;
+      // local (along, across) → page (x, y). jsPDF has no transform stack, so
+      // every item's rotated origin is placed directly.
+      const toPage = (a, across) => flip
+        ? [off + wMm / 2 - across, off + blockCenter - a]
+        : [off + wMm / 2 + across, off + blockCenter + a];
+
+      if (it.kind === 'mark') {
+        // The Medartis mark IS the wordmark — no signet, so the vector paths can
+        // be laid down directly. pdfDrawWordmark cannot rotate, so a rotated
+        // strap mark is drawn as tracked text would be: via the path API, with
+        // the block's own rotation applied around its centre.
+        const capH = it.h;
+        const [px, py] = toPage(along, -capH / 2);
+        pdfDrawWordmarkRotated(pdf, px, py, capH, ink, textAngle);
+      } else {
+        const isLabel = it.kind === 'label';
+        const cap  = isLabel ? txtCap : strapCap;
+        const text = isLabel ? label : strap;
+        // across = -cap/2: at these angles jsPDF grows the glyphs to one side of
+        // the baseline, so the baseline sits half a cap-height off-centre.
+        const [px, py] = toPage(along, -cap / 2);
+        pdf.setFont(isLabel ? 'Inter' : 'JetBrainsMono', 'normal', isLabel ? 700 : 500);
+        pdf.setFontSize(mmToPt(cap / CAP));
+        pdf.setTextColor(...hexRgb(isLabel ? ink : muted));
+        pdf.text(text, px, py, {
+          angle: textAngle,
+          charSpace: 0.16 * cap / CAP,        // mm — NOT mmToPt(). See trap 1.
+        });
+      }
+      cursor += it.len + itemGap;
+    }
+  }
+}
+
 // Stroke a parsed-path through jsPDF's low-level path API as filled shapes.
 // (x, y, scale) places + scales the source coords into PDF mm.
+/**
+ * The wordmark, rotated, as real PDF vector.
+ *
+ * jsPDF has no transform stack, so pdfDrawWordmark cannot simply be wrapped in a
+ * rotation the way a canvas call could. But the mark is already drawn from path
+ * data — so rotating it is a coordinate transform on those same points, and the
+ * output stays true vector rather than a rasterised sprite pasted at an angle.
+ *
+ * (x, y) is where the mark's top-left would sit UNROTATED; the rotation is applied
+ * about that point, matching how jsPDF anchors rotated text.
+ *
+ * @param angleDeg counter-clockwise, as jsPDF measures it: +90 reads up the page.
+ */
+function pdfDrawWordmarkRotated(pdf, xMm, yMm, heightMm, color, angleDeg) {
+  const srcH = 61, offsetX = 92, offsetY = 92;
+  const scale = heightMm / srcH;
+  const rad = (angleDeg * Math.PI) / 180;
+  const cos = Math.cos(rad), sin = Math.sin(rad);
+  // Source point → unrotated mm offset from the anchor → rotated → placed.
+  // PDF's y axis grows DOWNWARD, which flips the sign of the sine terms relative
+  // to the textbook formula; getting this wrong mirrors the mark instead of
+  // turning it, and a mirrored logo is a brand incident, not a rendering nit.
+  const map = (sx, sy) => {
+    const dx = (sx - offsetX) * scale;
+    const dy = (sy - offsetY) * scale;
+    return [xMm + dx * cos + dy * sin, yMm - dx * sin + dy * cos];
+  };
+  const [r, g, b] = hexRgb(color);
+  pdf.setFillColor(r, g, b);
+  for (const dStr of WORDMARK_PATHS) {
+    const pdfOps = [];
+    for (const o of svgPathToPdfOps(dStr)) {
+      if (o.op === 'M')      pdfOps.push({ op: 'm', c: map(o.x, o.y) });
+      else if (o.op === 'L') pdfOps.push({ op: 'l', c: map(o.x, o.y) });
+      else if (o.op === 'C') pdfOps.push({ op: 'c', c: [...map(o.x1, o.y1), ...map(o.x2, o.y2), ...map(o.x, o.y)] });
+      else if (o.op === 'Z') pdfOps.push({ op: 'h', c: [] });
+    }
+    pdf.path(pdfOps).fill();
+  }
+}
+
 function pdfDrawWordmark(pdf, xMm, yMm, heightMm, color) {
   const srcH = 61, offsetX = 92, offsetY = 92;
   const scale = heightMm / srcH;
@@ -2172,6 +2326,92 @@ function drawBrochurePage(ctx, frame, image, opts) {
 }
 
 
+// ═══ PARTNER LOGOS ═══════════════════════════════════════════════════
+// Third-party marks are not ours to restyle: a partner's logo has its own brand
+// guide, and "make it match ours" is the one thing we may not do. So the choices
+// here are about LEGIBILITY, not taste — a white plate keeps their colours intact
+// on a coal surface, and the greyscale knock-out is the fallback when a plate
+// would be too loud.
+//
+// Painted in the IMAGE layer, deliberately: partner logos are raster (uploaded
+// PNG/JPG), so drawing them here keeps them in the bitmap that the print PDF
+// composites, rather than being dropped by the vector text pass.
+function drawPartnerLogos(ctx, frame, partners, palette) {
+  const logos = (partners?.logos || []).filter((l) => l && l.img);
+  if (!partners?.enabled || !logos.length) return;
+  const { w, h, padX, padY } = frame;
+  const base = Math.min(w, h);
+  const rowH = base * clamp(partners.size ?? 0.055, 0.02, 0.2);   // logo height
+  const gap  = rowH * 0.7;
+  const dims = logos.map((l) => {
+    const ar = (l.img.naturalWidth || l.img.width) / (l.img.naturalHeight || l.img.height || 1);
+    return { img: l.img, w: rowH * (isFinite(ar) && ar > 0 ? ar : 1), h: rowH };
+  });
+  const rowW = dims.reduce((s, d) => s + d.w, 0) + gap * (dims.length - 1);
+  const caption = (partners.label || '').trim();
+  const capSize = Math.max(9, rowH * 0.26);
+  const capGap  = caption ? capSize * 1.5 : 0;
+
+  const align = partners.align || 'center';                 // left | center | right
+  const atTop = (partners.pos || 'bottom') === 'top';
+  let x = align === 'left'  ? padX
+        : align === 'right' ? w - padX - rowW
+        : (w - rowW) / 2;
+  let y = atTop ? padY * 1.1 + capGap : h - padY * 0.9 - rowH;
+
+  // Optional white plate — keeps third-party logos legible (and their own brand
+  // colours intact) on navy / photographic backgrounds.
+  if (partners.plate) {
+    const pad = rowH * 0.45;
+    const px = x - pad, py = y - pad - capGap;
+    const pw = rowW + pad * 2, ph = rowH + capGap + pad * 2;
+    const r = Math.min(pad, rowH * 0.35);
+    ctx.save();
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath();
+    ctx.moveTo(px + r, py);
+    ctx.arcTo(px + pw, py, px + pw, py + ph, r);
+    ctx.arcTo(px + pw, py + ph, px, py + ph, r);
+    ctx.arcTo(px, py + ph, px, py, r);
+    ctx.arcTo(px, py, px + pw, py, r);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+  }
+
+  if (caption) {
+    const onPlate = !!partners.plate;
+    ctx.save();
+    ctx.fillStyle = onPlate ? BRAND.ink600
+      : (palette.mode === 'dark' ? 'rgba(255,255,255,0.66)' : BRAND.ink600);
+    ctx.font = `500 ${capSize}px ${BRAND.mono}`;
+    ctx.textAlign = align === 'right' ? 'right' : align === 'left' ? 'left' : 'center';
+    const cx = align === 'right' ? x + rowW : align === 'left' ? x : x + rowW / 2;
+    const ls = capSize * 0.14;
+    // letter-spaced caption (mono, uppercase) — matches the sender/folio voice
+    const text = caption.toUpperCase();
+    const totalLs = ls * Math.max(0, text.length - 1);
+    let cursor = ctx.textAlign === 'center' ? cx - (ctx.measureText(text).width + totalLs) / 2
+               : ctx.textAlign === 'right'  ? cx - (ctx.measureText(text).width + totalLs)
+               : cx;
+    ctx.textAlign = 'left';
+    for (const ch of text) {
+      ctx.fillText(ch, cursor, y - capGap * 0.35);
+      cursor += ctx.measureText(ch).width + ls;
+    }
+    ctx.restore();
+  }
+
+  // Greyscale/knock-out option for dark surfaces without a plate
+  ctx.save();
+  if (partners.mono && !partners.plate) ctx.filter = 'grayscale(1) brightness(2.2)';
+  for (const d of dims) {
+    ctx.drawImage(d.img, x, y, d.w, d.h);
+    x += d.w + gap;
+  }
+  ctx.restore();
+}
+
 // ═══ LANYARD ═════════════════════════════════════════════════════════
 // A congress lanyard is printed FLAT and then folded into a neck loop, so the
 // artwork has two jobs an ordinary layout does not:
@@ -2289,6 +2529,9 @@ function drawLanyardStrip(ctx, frame, content, image, opts) {
   }
 
   if (!opts.skipOverlays) drawQrOverlay(ctx, frame, opts.qr, opts.qrImage, palette);
+  // Co-branded congresses put a partner mark on the strap too — raster, so it
+  // goes in the image layer like everywhere else.
+  drawPartnerLogos(ctx, frame, opts.partners, palette);
 }
 
 // ─── LAYOUT 1: Image · Text split ────────────────────────────────────
@@ -2397,6 +2640,8 @@ function drawImageTextSplit(ctx, frame, content, image, opts, textPos) {
   if (!opts.skipOverlays) drawTextBlock(ctx, content, textRectX, adjTextY, textRectW, palette, accent, tFrame, 'top', null);
   if (!opts.skipOverlays) drawBrandBar(ctx, frame, palette, accent, false, { ...opts, safeArea });
   if (!opts.skipOverlays) drawQrOverlay(ctx, frame, opts.qr, opts.qrImage, palette);
+  // Raster, so it belongs in the image layer — see drawPartnerLogos.
+  drawPartnerLogos(ctx, frame, opts.partners, palette);
 }
 
 // ─── LAYOUT 2: Full-bleed overlay ────────────────────────────────────
@@ -2455,6 +2700,7 @@ function drawFullBleedOverlay(ctx, frame, content, image, opts) {
   if (!opts.skipOverlays) drawTextBlock(ctx, content, padX, textBottomY, w - padX * 2, overlayPalette, accent, oFrame, 'bottom', null);
   if (!opts.skipOverlays) drawBrandBar(ctx, frame, overlayPalette, accent, true, opts);
   if (!opts.skipOverlays) drawQrOverlay(ctx, frame, opts.qr, opts.qrImage, overlayPalette);
+  drawPartnerLogos(ctx, frame, opts.partners, overlayPalette);
 }
 
 // Build the list of drawable text "tokens" for a content block. Each token
@@ -3741,6 +3987,79 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
   // type carries the layout, so a 40-page document stays on-grid. Pages live in
   // their own state (not in the PAGE_BREAK body) because each page has its own
   // fields, its own image and its own crop.
+  // Branded confirm/notice, replacing window.confirm / window.alert. Promise-based
+  // so call sites stay linear: if (!(await askConfirm({ … }))) return;
+  const [confirmDlg, setConfirmDlg] = useState(null);
+  const askConfirm = (o) => new Promise((resolve) => setConfirmDlg({ ...o, resolve }));
+  const closeConfirm = (answer) => setConfirmDlg((d) => { d?.resolve?.(answer); return null; });
+
+  // Logo files — the mark, handed out as real vector.
+  const [logoBusy, setLogoBusy] = useState(false);
+  const [logoColorKey, setLogoColorKey] = useState('ink');
+  const [logoClearSpace, setLogoClearSpace] = useState(true);
+  const [kitProgress, setKitProgress] = useState(null);
+  const [kitPdfs, setKitPdfs] = useState(true);
+  const LOGO_COLORS = {
+    ink:  { hex: BRAND.ink,    label: 'Ink · for light surfaces' },
+    bone: { hex: BRAND.bone00, label: 'Bone · for dark surfaces' },
+  };
+
+  const downloadLogo = async (fmt) => {
+    setLogoBusy(true);
+    try {
+      const svg = buildLogoSvg({
+        paths: WORDMARK_PATHS, glyph: WM_GLYPH, view: WM_VIEW,
+        color: LOGO_COLORS[logoColorKey].hex,
+        clearSpace: logoClearSpace,
+        height: 1000,                     // vector — this only sets the viewBox
+      });
+      const base = `medartis_wordmark_${logoColorKey}${logoClearSpace ? '' : '_tight'}`;
+      if (fmt === 'svg') {
+        const url = URL.createObjectURL(new Blob([svg], { type: 'image/svg+xml' }));
+        const a = document.createElement('a');
+        a.href = url; a.download = `${base}.svg`; a.click();
+        URL.revokeObjectURL(url);
+      } else {
+        const pdf = await svgToPdf(svg, { jsPDF, svg2pdf });
+        pdf.save(`${base}.pdf`);
+      }
+    } catch (e) {
+      await askConfirm({ title: 'Could not build the logo file', body: e.message, notice: true, tone: 'error' });
+    } finally {
+      setLogoBusy(false);
+    }
+  };
+
+  const downloadBrandKit = async () => {
+    setKitProgress({ done: 0, total: 1, label: 'starting' });
+    try {
+      const files = await buildBrandKit({
+        paths: WORDMARK_PATHS, glyph: WM_GLYPH, view: WM_VIEW,
+        colors: LOGO_COLORS,
+        brand: BRAND,
+        formats: kitPdfs ? ['svg', 'pdf'] : ['svg'],
+        clearSpace: logoClearSpace,
+        pdfTools: { jsPDF, svg2pdf },
+        onProgress: (done, total, label) => setKitProgress({ done, total, label }),
+      });
+      const url = URL.createObjectURL(makeZip(files));
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `medartis_logo_kit_${new Date().toISOString().slice(0, 10)}.zip`;
+      a.click();
+      URL.revokeObjectURL(url);
+      await askConfirm({
+        title: 'Brand kit ready',
+        body: `${files.length} files — the wordmark in SVG${kitPdfs ? ' and PDF' : ''}, the palette, and a README covering clear space and minimum sizes.`,
+        notice: true, tone: 'success',
+      });
+    } catch (e) {
+      await askConfirm({ title: 'Could not build the brand kit', body: e.message, notice: true, tone: 'error' });
+    } finally {
+      setKitProgress(null);
+    }
+  };
+
   // Lanyard strap settings — only used by the lanyard layout.
   const [lanyard, setLanyard] = useState({ ...LANYARD_DEFAULTS });
 
@@ -3749,6 +4068,12 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
   const [brochureTitle, setBrochureTitle] = useState('MEDARTIS');
   const [brochureImgs, setBrochureImgs]   = useState({});  // pageId → HTMLImageElement
   const [partnerLogos, setPartnerLogos]   = useState([]);  // [{ id, name, src, img }]
+  // How the partner wall is PLACED. Separate from the logos themselves, because
+  // the same set gets laid out differently on a poster and on a strap.
+  const [partners, setPartners] = useState({
+    enabled: true, size: 0.055, align: 'center', pos: 'bottom',
+    plate: false, mono: false, label: 'IN COOPERATION WITH',
+  });
 
   const baseFormat = FORMATS[formatKey];
   const isBrochure = !!baseFormat.brochure;
@@ -3797,10 +4122,13 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
       return next;
     });
   };
-  const deleteBrochurePage = (i) => {
+  const deleteBrochurePage = async (i) => {
     if (brochurePages.length <= 1) return;
     const p = brochurePages[i];
-    if (!window.confirm(`Delete page ${i + 1} (${BROCHURE_TYPES[p.type]?.label})?`)) return;
+    if (!(await askConfirm({
+      title: `Delete page ${i + 1}?`,
+      body: `${BROCHURE_TYPES[p.type]?.label} — its fields, image and crop go with it. The other pages renumber.`,
+    }))) return;
     setBrochurePages((ps) => ps.filter((_, k) => k !== i));
     setBrochureImgs((m) => { const n = { ...m }; delete n[p.id]; return n; });
     setBrochureIdx((idx) => Math.max(0, Math.min(idx, brochurePages.length - 2)));
@@ -3825,7 +4153,7 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
     palette, accent: accentColor,
     fit: brochurePage?.fit || DEFAULT_FIT,
     brochurePage, pageNumber: curBrochure + 1, brochureTitle,
-    partners: { logos: partnerLogos },
+    partners: { ...partners, logos: partnerLogos },
   });
 
   useEffect(() => {
@@ -3907,11 +4235,14 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
     updateField('body', `${raw}\n${PAGE_BREAK}\n`);
     setPageIdx(pageCount); // jump to the page we just created
   };
-  const deletePage = (i) => {
+  const deletePage = async (i) => {
     const chunks = bodyChunks();
     if (chunks.length <= 1) return;
     const hasWork = (chunks[i] || '').trim().length > 0;
-    if (hasWork && !window.confirm(`Delete page ${i + 1}? Its lines, image and crop will be removed.`)) return;
+    if (hasWork && !(await askConfirm({
+      title: `Delete page ${i + 1}?`,
+      body: 'Its lines, image and crop will be removed.',
+    }))) return;
     chunks.splice(i, 1);
     updateField('body', chunks.join(`\n${PAGE_BREAK}\n`).replace(/\n{3,}/g, '\n\n'));
     setPageImages((p) => p.filter((_, k) => k !== i));
@@ -4125,6 +4456,7 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
       layout.draw(ctx, frame, activeContent, activeImage, {
         palette, accent: accentColor, fit: activeFit,
         lanyard, fitOut: fitRef.current,
+        partners: { ...partners, logos: partnerLogos },
         wordmarkPos,
         folioPos: slideShowsFolio ? folioPos : 'hidden',
         formatKey,
@@ -4167,7 +4499,7 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
         ctx.fill();
       }
     }
-  }, [format, layoutKey, activeContent, activeImage, activeFit, palette, carouselSlides, carouselSlide, wordmarkPos, folioPos, formatKey, wordmarkOverImage, folioOverImage, wordmarkColor, folioColor, folioText, qrConfig, qrImage, carouselBg, carouselBgImage, carouselQrPer, carouselFolioPer, textBackdrop, wordmarkPctOverride, wmReady, logoPlate, accentColor, isBrochure, brochurePage, brochureImgs, brochureTitle, curBrochure, partnerLogos, lanyard]);
+  }, [format, layoutKey, activeContent, activeImage, activeFit, palette, carouselSlides, carouselSlide, wordmarkPos, folioPos, formatKey, wordmarkOverImage, folioOverImage, wordmarkColor, folioColor, folioText, qrConfig, qrImage, carouselBg, carouselBgImage, carouselQrPer, carouselFolioPer, textBackdrop, wordmarkPctOverride, wmReady, logoPlate, accentColor, isBrochure, brochurePage, brochureImgs, brochureTitle, curBrochure, partnerLogos, partners, lanyard]);
 
   useEffect(() => { draw(); }, [draw]);
 
@@ -4332,7 +4664,7 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
         palette, accent: accentColor,
         fit: fitOverride ?? page?.fit ?? DEFAULT_FIT,
         brochurePage: page, pageNumber: pageNo || 1, brochureTitle,
-        partners: { logos: partnerLogos },
+        partners: { ...partners, logos: partnerLogos },
       });
       return c;
     }
@@ -4345,7 +4677,7 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
       // derived: render the layout bare, and what is left is type and mark.
       imageOverride === 'none' ? null : (imageOverride ?? activeImage), {
       palette, accent: accentColor,
-      lanyard,
+      lanyard, partners: { ...partners, logos: partnerLogos },
       fit: fitOverride ?? activeFit,
       wordmarkPos,
       folioPos: slideShowsFolio ? folioPos : 'hidden',
@@ -4589,12 +4921,29 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
       }
     }
 
-    pdfDrawTextTokens(pdf, textTokens, dpi, bleedMm);
-    pdfDrawBrandBar(pdf, frame, vecPalette, formatKey, {
-      ...vecOpts,
-      wordmarkResolvedColor: wmResolvedColor,
-      folioResolvedColor:    flResolvedColor,
-    }, dpi, bleedMm);
+    if (layoutKey === 'lanyard') {
+      // The strap composes its own ROTATED repeat, so it cannot use the shared
+      // text-token engine — but it still gets REAL vector: the wordmark's own
+      // paths, rotated, and the embedded fonts for the type. Without this branch
+      // the strap would survive only as the bitmap underneath, and a file named
+      // "vector" would contain one image and zero text operators.
+      pdfDrawLanyard(pdf, {
+        wMm: formatDef.w / dpi * 25.4,
+        hMm: formatDef.h / dpi * 25.4,
+        content: slideContent,
+        cfg: { ...LANYARD_DEFAULTS, ...lanyard },
+        palette: vecPalette,
+        accent: accentColor,
+        bleedMm,
+      });
+    } else {
+      pdfDrawTextTokens(pdf, textTokens, dpi, bleedMm);
+      pdfDrawBrandBar(pdf, frame, vecPalette, formatKey, {
+        ...vecOpts,
+        wordmarkResolvedColor: wmResolvedColor,
+        folioResolvedColor:    flResolvedColor,
+      }, dpi, bleedMm);
+    }
 
     // Vector QR code via svg2pdf
     if (qrConfig.enabled && qrConfig.url) {
@@ -5202,6 +5551,15 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
       fontFamily: BRAND.display,
       background: BRAND.coal, color: BRAND.ink, overflow: 'hidden'
     }}>
+      {/* Branded confirm — mounted at the top of the app so it overlays everything. */}
+      {confirmDlg && (
+        <ConfirmDialog
+          {...confirmDlg}
+          onConfirm={() => closeConfirm(true)}
+          onCancel={() => closeConfirm(false)}
+        />
+      )}
+
       {assistantOpen && (
         <ChatAssistant
           onClose={() => setAssistantOpen(false)}
@@ -5868,6 +6226,139 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
         </Section>
 
         {/* Frosted-glass / solid backdrop behind text */}
+        <Section label={SEC('LOGOFILES', 'LOGO FILES')} {...sp('LOGOFILES')}>
+          {(() => {
+            const lab = { display: 'block', fontFamily: BRAND.mono, fontSize: 9, letterSpacing: '0.1em',
+                          textTransform: 'uppercase', color: BRAND.ink600, marginBottom: 4 };
+            const b = (active) => ({
+              padding: '9px 4px', cursor: logoBusy ? 'wait' : 'pointer', borderRadius: 0,
+              background: active ? BRAND.ink : BRAND.paper, color: active ? BRAND.bone00 : BRAND.ink600,
+              border: `1px solid ${active ? BRAND.ink : BRAND.ink100}`,
+              fontFamily: BRAND.mono, fontSize: 10, letterSpacing: '0.1em', textTransform: 'uppercase',
+            });
+            return (
+              <>
+                <label style={lab}>Colour</label>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4, marginBottom: 10 }}>
+                  {Object.entries(LOGO_COLORS).map(([k, c]) => (
+                    <SidebarBtn key={k} active={logoColorKey === k} onClick={() => setLogoColorKey(k)} title={c.label}>
+                      {k === 'ink' ? 'Ink' : 'Bone'}
+                    </SidebarBtn>
+                  ))}
+                </div>
+                <SidebarBtn active={logoClearSpace} onClick={() => setLogoClearSpace((v) => !v)}>
+                  {logoClearSpace ? 'Clear space included' : 'Cropped tight to the glyphs'}
+                </SidebarBtn>
+                <div style={{ fontFamily: BRAND.mono, fontSize: 8.5, color: BRAND.ink300, lineHeight: 1.6,
+                              letterSpacing: '0.03em', margin: '6px 0 10px' }}>
+                  {logoClearSpace
+                    ? 'THE FILE CARRIES ITS OWN 1.5 × d MARGIN, SO PLACING IT EDGE-TO-EDGE IS CORRECT.'
+                    : '⚠ NO MARGIN IN THE FILE — WHOEVER PLACES IT MUST ADD 1.5 × d THEMSELVES.'}
+                </div>
+
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4, marginBottom: 12 }}>
+                  <button onClick={() => downloadLogo('svg')} disabled={logoBusy} style={b(false)}>↓ SVG</button>
+                  <button onClick={() => downloadLogo('pdf')} disabled={logoBusy} style={b(false)}>↓ PDF</button>
+                </div>
+
+                <div style={{ borderTop: `1px solid ${BRAND.ink100}`, paddingTop: 10 }}>
+                  <label style={lab}>Brand kit · one zip for an agency</label>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8, fontSize: 11, color: BRAND.ink600 }}>
+                    <input type="checkbox" checked={kitPdfs} onChange={(e) => setKitPdfs(e.target.checked)} />
+                    Include print PDFs (slower)
+                  </label>
+                  <button onClick={downloadBrandKit} disabled={!!kitProgress} style={{ ...b(true), width: '100%' }}>
+                    {kitProgress ? `Building… ${kitProgress.done}/${kitProgress.total}` : '↓ Brand kit (.zip)'}
+                  </button>
+                  <div style={{ fontFamily: BRAND.mono, fontSize: 8.5, color: BRAND.ink300, lineHeight: 1.6,
+                                letterSpacing: '0.03em', marginTop: 8 }}>
+                    EVERY COLOUR × FORMAT, THE PALETTE, AND A README ANSWERING WHAT AN AGENCY WOULD
+                    OTHERWISE EMAIL YOU A WEEK BEFORE PRINT. THE WORDMARK IS OUTLINES, NOT LIVE TEXT —
+                    IT CANNOT FALL BACK TO THE WRONG TYPEFACE ON A MACHINE WITHOUT INTER.
+                  </div>
+                </div>
+              </>
+            );
+          })()}
+        </Section>
+
+        <Section label={SEC('PARTNERS', 'PARTNER LOGOS')} {...sp('PARTNERS')}>
+          {(() => {
+            const set = (patch) => setPartners((p) => ({ ...p, ...patch }));
+            const lab = { display: 'block', fontFamily: BRAND.mono, fontSize: 9, letterSpacing: '0.1em',
+                          textTransform: 'uppercase', color: BRAND.ink600, marginBottom: 4 };
+            return (
+              <>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 8 }}>
+                  {partnerLogos.map((l) => (
+                    <div key={l.id} title={l.name} style={{
+                      position: 'relative', width: 74, height: 44, border: `1px solid ${BRAND.ink100}`,
+                      background: BRAND.paper, display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    }}>
+                      <img src={l.src} alt={l.name} style={{ maxWidth: '82%', maxHeight: '70%', objectFit: 'contain' }} />
+                      <button onClick={() => removePartnerLogo(l.id)} title="Remove" style={{
+                        position: 'absolute', top: -1, right: -1, width: 15, height: 15, lineHeight: '13px',
+                        padding: 0, fontSize: 10, cursor: 'pointer', background: BRAND.ink,
+                        color: BRAND.bone00, border: 'none', borderRadius: 0,
+                      }}>×</button>
+                    </div>
+                  ))}
+                </div>
+                <label style={{
+                  display: 'block', padding: '9px', background: BRAND.paper, textAlign: 'center',
+                  border: `1px dashed ${BRAND.ink300}`, cursor: 'pointer', marginBottom: 10,
+                  fontFamily: BRAND.mono, fontSize: 9.5, letterSpacing: '0.12em',
+                  textTransform: 'uppercase', color: BRAND.ink600,
+                }}>
+                  + ADD PARTNER LOGO · PNG / SVG
+                  <input type="file" accept="image/*" style={{ display: 'none' }}
+                         onChange={(e) => { const f = e.target.files?.[0]; if (f) addPartnerLogo(f); e.target.value = ''; }} />
+                </label>
+
+                {partnerLogos.length > 0 && (
+                  <>
+                    <SidebarBtn active={partners.enabled} onClick={() => set({ enabled: !partners.enabled })}>
+                      {partners.enabled ? 'Shown on the canvas' : 'Hidden'}
+                    </SidebarBtn>
+                    <div style={{ height: 8 }} />
+                    <label style={lab}>Caption
+                      <input type="text" value={partners.label} placeholder="e.g. IN COOPERATION WITH"
+                             onChange={(e) => set({ label: e.target.value })}
+                             style={{ width: '100%', boxSizing: 'border-box', marginTop: 3 }} />
+                    </label>
+                    <label style={{ ...lab, marginBottom: 10 }}>
+                      Size · {Math.round(partners.size * 1000) / 10}% of the short edge
+                      <input type="range" min="0.02" max="0.2" step="0.005" value={partners.size}
+                             onChange={(e) => set({ size: Number(e.target.value) })}
+                             style={{ width: '100%', marginTop: 3 }} />
+                    </label>
+                    <label style={lab}>Position</label>
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4, marginBottom: 8 }}>
+                      <SidebarBtn active={partners.pos === 'bottom'} onClick={() => set({ pos: 'bottom' })}>Bottom</SidebarBtn>
+                      <SidebarBtn active={partners.pos === 'top'} onClick={() => set({ pos: 'top' })}>Top</SidebarBtn>
+                    </div>
+                    <label style={lab}>Align</label>
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 4, marginBottom: 8 }}>
+                      {['left', 'center', 'right'].map((a) => (
+                        <SidebarBtn key={a} active={partners.align === a} onClick={() => set({ align: a })}>{a}</SidebarBtn>
+                      ))}
+                    </div>
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4, marginBottom: 8 }}>
+                      <SidebarBtn active={partners.plate} onClick={() => set({ plate: !partners.plate, mono: false })}>White plate</SidebarBtn>
+                      <SidebarBtn active={partners.mono} onClick={() => set({ mono: !partners.mono, plate: false })}>Knock out</SidebarBtn>
+                    </div>
+                    <div style={{ fontFamily: BRAND.mono, fontSize: 8.5, color: BRAND.ink300, lineHeight: 1.6, letterSpacing: '0.03em' }}>
+                      A PARTNER'S LOGO HAS ITS OWN BRAND GUIDE — RECOLOURING IT TO MATCH OURS IS THE
+                      ONE THING WE MAY NOT DO. THE PLATE KEEPS THEIR COLOURS INTACT ON A DARK SURFACE;
+                      KNOCK OUT IS THE FALLBACK WHEN A PLATE WOULD BE TOO LOUD.
+                    </div>
+                  </>
+                )}
+              </>
+            );
+          })()}
+        </Section>
+
         <Section label={SEC('TEXTBG', 'TEXT BACKDROP')} {...sp('TEXTBG')}>
           <label style={{
             display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10,
@@ -6711,7 +7202,7 @@ const SECTION_ORDER = [
   // 2 · Story — TEMPLATE and BROCHURE are alternates; exactly one is ever visible
   'TEMPLATE', 'BROCHURE',
   // 3 · Brand system
-  'LANYARD', 'SURFACE', 'BRANDBAR', 'TEXTBG', 'QR', 'CAROUSEL', 'CAROUSEL_BG', 'CONTENT',
+  'LANYARD', 'SURFACE', 'BRANDBAR', 'LOGOFILES', 'PARTNERS', 'TEXTBG', 'QR', 'CAROUSEL', 'CAROUSEL_BG', 'CONTENT',
   // 4 · Imagery
   'IMAGE', 'GENERATE', 'CANTO', 'IMAGEFIT',
   // 5 · Output
@@ -6734,6 +7225,86 @@ function sectionNumbers(vis) {
   const map = {};
   vis.forEach((k, i) => { map[k] = String(i + 1).padStart(2, '0'); });
   return map;
+}
+
+// ═══ CONFIRM / NOTICE DIALOG ═════════════════════════════════════════
+// Replaces window.confirm and window.alert. Not for looks: the browser's dialogs
+// say "localhost:5174 says" above your brand's name, they cannot be styled, and
+// on some platforms they focus the destructive button by default.
+//
+// Two rules encoded here:
+//   · A CONFIRM is destructive → focus CANCEL, so a stray Enter never deletes.
+//   · A NOTICE has one safe action → focus it, so Enter dismisses.
+function ConfirmDialog({
+  title, body, confirmLabel = 'Delete', cancelLabel = 'Cancel',
+  onConfirm, onCancel,
+  notice = false,          // notice = no destructive choice, just "OK"
+  tone = 'confirm',        // confirm | error | success | info
+}) {
+  const cancelRef = useRef(null);
+  const okRef = useRef(null);
+  useEffect(() => {
+    (notice ? okRef : cancelRef).current?.focus();
+    const onKey = (e) => {
+      if (e.key === 'Escape') { e.preventDefault(); onCancel(); }
+      if (e.key === 'Enter')  { e.preventDefault(); onConfirm(); }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onConfirm, onCancel, notice]);
+
+  const accent = tone === 'error' ? '#C8200A' : tone === 'success' ? '#0A7D3E' : BRAND.gold;
+  const kicker = tone === 'error' ? 'Something went wrong'
+    : tone === 'success' ? 'Done'
+    : notice ? 'Heads up' : 'Confirm';
+
+  return (
+    <div
+      onMouseDown={(e) => { if (e.target === e.currentTarget) onCancel(); }}
+      style={{
+        position: 'fixed', inset: 0, zIndex: 9999,
+        background: 'rgba(19,19,16,0.55)', backdropFilter: 'blur(3px)',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+      }}>
+      <div style={{
+        width: 'min(440px, calc(100vw - 48px))',
+        background: BRAND.paper, color: BRAND.ink,
+        border: `1px solid ${BRAND.ink100}`,
+        boxShadow: '0 40px 90px rgba(0,0,0,0.45)',
+      }}>
+        {/* Coal head with the wordmark — this is Medartis speaking, not the browser. */}
+        <div style={{ background: BRAND.coal, padding: '18px 22px 16px' }}>
+          <div style={{
+            fontFamily: BRAND.mono, fontSize: 9, letterSpacing: '0.18em',
+            textTransform: 'uppercase', color: accent, marginBottom: 6,
+          }}>{kicker}</div>
+          <div style={{ fontFamily: BRAND.display, fontSize: 17, fontWeight: 600, color: BRAND.bone00 }}>
+            {title}
+          </div>
+        </div>
+        {body && (
+          <div style={{
+            padding: '16px 22px 4px', fontFamily: BRAND.display, fontSize: 13,
+            lineHeight: 1.6, color: BRAND.ink600,
+          }}>{body}</div>
+        )}
+        <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', padding: '16px 22px 20px' }}>
+          {!notice && (
+            <button ref={cancelRef} onClick={onCancel} style={{
+              padding: '9px 16px', background: BRAND.paper, color: BRAND.ink,
+              border: `1px solid ${BRAND.ink100}`, borderRadius: 0, cursor: 'pointer',
+              fontFamily: BRAND.mono, fontSize: 10.5, letterSpacing: '0.12em', textTransform: 'uppercase',
+            }}>{cancelLabel}</button>
+          )}
+          <button ref={okRef} onClick={onConfirm} style={{
+            padding: '9px 16px', background: BRAND.ink, color: BRAND.bone00,
+            border: `1px solid ${BRAND.ink}`, borderRadius: 0, cursor: 'pointer',
+            fontFamily: BRAND.mono, fontSize: 10.5, letterSpacing: '0.12em', textTransform: 'uppercase',
+          }}>{notice ? 'OK' : confirmLabel}</button>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 const Section = ({ label, children, collapsed, onToggle }) => {
