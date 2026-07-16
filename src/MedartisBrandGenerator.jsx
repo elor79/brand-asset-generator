@@ -5,6 +5,10 @@ import { BROCHURE_TYPES, BROCHURE_TYPE_KEYS, defaultBrochurePages, makeBrochureP
 import { buildLogoSvg, svgToPdf, buildBrandKit } from './logoVector';
 import { templateSwitchImpact, describeImpact } from './templateSwitch';
 import {
+  readTemplatePref, writeTemplatePref, TEMPLATE_PREF_LABEL,
+  snapshotContent, snapshotDiffers, snapshotLostWork,
+} from './templatePref';
+import {
   CUSTOM_GROUP, DPI_CHOICES, TYPE_CATEGORY_KEYS, TYPE_CATEGORY_LABELS,
   makeCustomFormat, readCustomFormats, writeCustomFormats,
   duplicateAsCustom, validateSize, ratioLabel,
@@ -4329,6 +4333,20 @@ export default function MedartisBrandGenerator() {
 
   // Per-slide state (carousel) + single-slide fallback
   const [content, setContent] = useState(initialContent);
+  // Remembered answer to the template-switch question: 'keep' | 'sample' | null.
+  const [tmplPref, setTmplPref] = useState(() => readTemplatePref());
+  const [undo, setUndo] = useState(null);        // { snap, lostWork, label }
+
+  // Live mirrors, for reading state from a setTimeout that would otherwise close
+  // over the render that scheduled it.
+  const contentRef = useRef(initialContent);
+  const carouselContentRef = useRef([]);
+  const layoutRef = useRef('image-bottom');
+  const slidesRef = useRef(1);
+  // Set while an undo is being applied, so the template effect leaves the restored
+  // copy alone instead of helpfully overwriting it with the template's defaults —
+  // which would make the undo button do nothing and look broken.
+  const undoingRef = useRef(false);
   const [carouselContent, setCarouselContent] = useState(() => [initialContent, initialContent, initialContent]);
   // Print PAGES: a long agenda splits onto extra A4 pages at steerable PAGE_BREAK
   // markers in the body (edited in the agenda editor). `pages` is DERIVED from the
@@ -4342,6 +4360,11 @@ export default function MedartisBrandGenerator() {
   const [carouselFits, setCarouselFits] = useState([{...DEFAULT_FIT}, {...DEFAULT_FIT}, {...DEFAULT_FIT}]);
 
   useEffect(() => {
+    // An undo restores the copy AND the templateKey, which re-fires this effect.
+    // Without this guard it would immediately re-apply the template's defaults over
+    // the restored words — the undo button would appear to do nothing, which is the
+    // worst possible outcome for a button whose whole job is trust.
+    if (undoingRef.current) { undoingRef.current = false; return; }
     const t = TEMPLATES[templateKey];
     setCarouselSlide(0);
     // Carry the user's copy across a template switch. Every template shares the
@@ -4383,6 +4406,13 @@ export default function MedartisBrandGenerator() {
       setCarouselContent(prev => prev.map((c) => carry(c)));
     }
   }, [templateKey, initialContent]);
+
+  // Mirror the live state for armUndo's setTimeout, which would otherwise read the
+  // render that scheduled it — i.e. the state from BEFORE the switch it is measuring.
+  useEffect(() => { contentRef.current = content; }, [content]);
+  useEffect(() => { carouselContentRef.current = carouselContent; }, [carouselContent]);
+  useEffect(() => { layoutRef.current = layoutKey; }, [layoutKey]);
+  useEffect(() => { slidesRef.current = carouselSlides; }, [carouselSlides]);
 
   // Palettes
   const [paletteName, setPaletteName] = useState('coal');
@@ -5305,6 +5335,10 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
   // ── Per-slide mutators ───────────────────────────────────────────
   const updateField = (key, value) => {
     contentEdited.current = true; // real copy now exists — protect it on template switches
+    // The moment you type, the undo's snapshot describes a state you have moved on
+    // from. Restoring it would silently discard the edit you just made — an undo
+    // that destroys work is the exact opposite of an undo. So it retires.
+    setUndo(null);
     if (format.multi) {
       const next = [...carouselContent];
       next[carouselSlide] = { ...(next[carouselSlide] || initialContent), [key]: value };
@@ -5969,29 +6003,93 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
       contentEdited: contentEdited.current,
     });
 
+    // Snapshot BEFORE anything moves. This is what the undo restores, and it is
+    // taken unconditionally: cheap, and the alternative is discovering you needed
+    // it after the state is gone.
+    const before = snapshotContent({ content, carouselContent, templateKey, layoutKey, carouselSlides });
+
     // Nothing typed, or the sample matches what you have → just switch. Silence is
     // the correct UI here.
-    if (!impact.differs) { setTemplateKey(key); applySuggestedLayout(key); return; }
+    if (!impact.differs) {
+      setTemplateKey(key);
+      applySuggestedLayout(key);
+      armUndo(before, key);
+      return;
+    }
 
-    const answer = await askTemplateChoice({
-      title: `Switch to "${TEMPLATES[key].label}"?`,
-      body: describeImpact(impact, TEMPLATES[key].label),
-      dropped: impact.dropped,
-      slides: impact.slidesReplaced,
-    });
-    if (answer === 'cancel') return;
+    // A remembered answer skips the dialog — but never the undo. That is the deal:
+    // you may silence the question, you may not lose the way back.
+    let answer = tmplPref;
+    if (!answer) {
+      const res = await askTemplateChoice({
+        title: `Switch to "${TEMPLATES[key].label}"?`,
+        body: describeImpact(impact, TEMPLATES[key].label),
+        dropped: impact.dropped,
+        slides: impact.slidesReplaced,
+      });
+      if (res.answer === 'cancel') return;
+      answer = res.answer;
+      if (res.remember) {
+        setTmplPref(answer);
+        writeTemplatePref(answer);
+      }
+    }
     // "sample" is the answer to "the template does nothing" — it loads the copy
     // the template was written to show off, once.
     sampleOnceRef.current = answer === 'sample';
     setTemplateKey(key);
     applySuggestedLayout(key);
+    armUndo(before, key);
+  };
+
+  // ── UNDO ──────────────────────────────────────────────────────────
+  // The template effect runs asynchronously (it reacts to templateKey), so the
+  // "after" state does not exist yet. Wait a tick, compare, and offer the undo
+  // only when something actually changed — an undo bar that appears after a no-op
+  // is noise, and noise is how a real one gets ignored.
+  const armUndo = (before, key) => {
+    setTimeout(() => {
+      const after = snapshotContent({
+        content: contentRef.current,
+        carouselContent: carouselContentRef.current,
+        templateKey: key,
+        layoutKey: layoutRef.current,
+        carouselSlides: slidesRef.current,
+      });
+      if (!snapshotDiffers(before, after)) return;
+      setUndo({
+        snap: before,
+        lostWork: snapshotLostWork(before, after),
+        label: TEMPLATES[key]?.label || key,
+      });
+    }, 0);
+  };
+
+  const applyUndo = () => {
+    if (!undo) return;
+    const s = undo.snap;
+    // Restore in one go. contentEdited stays true: undoing does not make the
+    // canvas pristine — it makes it what it was, which was edited.
+    sampleOnceRef.current = false;
+    undoingRef.current = true;      // the template effect must not re-apply defaults
+    setTemplateKey(s.templateKey);
+    setLayoutKey(s.layoutKey);
+    setCarouselSlides(s.carouselSlides);
+    setContent(s.content);
+    setCarouselContent(s.carouselContent);
+    setUndo(null);
   };
 
   // Three answers, and dismissal means CANCEL — the same rule as everywhere else:
   // the safe reading of a question nobody answered is "no".
   const [tmplAsk, setTmplAsk] = useState(null);
+  // Unticked every time the dialog opens. A remember-box that stays ticked from
+  // the last visit is how a standing instruction gets set by accident.
+  const [tmplRemember, setTmplRemember] = useState(false);
+  useEffect(() => { if (tmplAsk) setTmplRemember(false); }, [tmplAsk]);
   const askTemplateChoice = (o) => new Promise((resolve) => setTmplAsk({ ...o, resolve }));
-  const closeTemplateAsk = (answer) => setTmplAsk((d) => { d?.resolve?.(answer ?? 'cancel'); return null; });
+  const closeTemplateAsk = (answer, remember = false) =>
+    setTmplAsk((d) => { d?.resolve?.({ answer: answer ?? 'cancel', remember }); return null; });
 
   /** The template's own shape — but only into an empty seat. */
   const applySuggestedLayout = (key) => {
@@ -6513,8 +6611,29 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
                   THAT TEXT IS DROPPED.
                 </div>
               )}
-              <div style={{ display: 'grid', gap: 6, marginTop: 16 }}>
-                <button onClick={() => closeTemplateAsk('keep')} style={{
+              {/* REMEMBER — and be honest that the two answers are not equally safe.
+                  "keep" is a standing instruction to lose nothing. "sample" is a
+                  standing instruction to REPLACE YOUR WRITING on every future
+                  switch. Both are legitimate; only one needs a warning, and the
+                  undo is what makes the risky one acceptable to offer at all. */}
+              <label style={{
+                display: 'flex', alignItems: 'flex-start', gap: 8, marginTop: 16,
+                padding: '9px 10px', background: BRAND.bone, border: `1px solid ${BRAND.ink100}`,
+                fontSize: 11.5, color: BRAND.ink600, cursor: 'pointer', lineHeight: 1.5,
+              }}>
+                <input type="checkbox" checked={tmplRemember} style={{ marginTop: 2 }}
+                       onChange={(e) => setTmplRemember(e.target.checked)} />
+                <span>
+                  Remember my answer — stop asking
+                  <div style={{ fontSize: 10.5, color: BRAND.ink300, marginTop: 2 }}>
+                    Whichever button you press next becomes the standing answer. You can
+                    change it in § 03 at any time, and every switch still offers an undo.
+                  </div>
+                </span>
+              </label>
+
+              <div style={{ display: 'grid', gap: 6, marginTop: 10 }}>
+                <button onClick={() => closeTemplateAsk('keep', tmplRemember)} style={{
                   padding: '11px 16px', background: BRAND.ink, color: BRAND.bone00,
                   border: 'none', borderRadius: 0, cursor: 'pointer', textAlign: 'left',
                   fontFamily: BRAND.mono, fontSize: 10.5, letterSpacing: '0.1em', textTransform: 'uppercase',
@@ -6525,7 +6644,7 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
                     Your words move into the new template's structure. Nothing is lost.
                   </div>
                 </button>
-                <button onClick={() => closeTemplateAsk('sample')} style={{
+                <button onClick={() => closeTemplateAsk('sample', tmplRemember)} style={{
                   padding: '11px 16px', background: BRAND.paper, color: BRAND.ink,
                   border: `1px solid ${BRAND.ink100}`, borderRadius: 0, cursor: 'pointer', textAlign: 'left',
                   fontFamily: BRAND.mono, fontSize: 10.5, letterSpacing: '0.1em', textTransform: 'uppercase',
@@ -6535,6 +6654,14 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
                                 textTransform: 'none', color: BRAND.ink600, marginTop: 3 }}>
                     Shows what this template is FOR — and replaces what you have written.
                   </div>
+                  {tmplRemember && (
+                    <div style={{ fontFamily: BRAND.display, fontSize: 10.5, letterSpacing: 0,
+                                  textTransform: 'none', color: '#C8200A', marginTop: 5 }}>
+                      ⚠ Remembering this one means every future switch replaces your copy
+                      without asking. Recoverable — the undo appears each time — but it will
+                      not stop to check.
+                    </div>
+                  )}
                 </button>
                 <button onClick={() => closeTemplateAsk('cancel')} style={{
                   padding: '9px 16px', background: 'transparent', color: BRAND.ink600,
@@ -6822,6 +6949,33 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
               did nothing. Pick one and choose <b>Load the sample copy</b> to see what it is for.
             </div>
           )}
+          {/* A remembered answer must be visible and revocable HERE, where the
+              decision lives. A setting you cannot find is a setting you cannot
+              revoke — and this one silently governs whether your writing survives. */}
+          {tmplPref && (
+            <div style={{
+              display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8,
+              padding: '8px 9px', background: BRAND.bone,
+              border: `1px solid ${BRAND.ink100}`,
+              borderLeft: `3px solid ${tmplPref === 'sample' ? '#C8200A' : BRAND.goldDeep}`,
+            }}>
+              <div style={{ flex: 1, fontFamily: BRAND.mono, fontSize: 9, color: BRAND.ink600,
+                            letterSpacing: '0.04em', lineHeight: 1.55 }}>
+                {TEMPLATE_PREF_LABEL[tmplPref].toUpperCase()} · NOT ASKING
+                {tmplPref === 'sample' && (
+                  <div style={{ color: '#C8200A', marginTop: 2 }}>
+                    EVERY SWITCH REPLACES YOUR COPY. THE UNDO STILL APPEARS.
+                  </div>
+                )}
+              </div>
+              <button onClick={() => { setTmplPref(null); writeTemplatePref(null); }}
+                style={{
+                  flexShrink: 0, padding: '5px 9px', cursor: 'pointer', borderRadius: 0,
+                  background: BRAND.paper, color: BRAND.ink, border: `1px solid ${BRAND.ink100}`,
+                  fontFamily: BRAND.mono, fontSize: 9, letterSpacing: '0.08em', textTransform: 'uppercase',
+                }}>Ask again</button>
+            </div>
+          )}
           {(() => {
             const entries = Object.entries(TEMPLATES);
             const single = entries.filter(([, t]) => !t.carouselContent);
@@ -6987,6 +7141,40 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
               }} />
           </div>
         </div>
+
+        {/* UNDO — over the canvas, because that is where the change you are undoing
+            just happened. It does not auto-dismiss on a timer: a 5-second window is
+            fine for "archived" and wrong for "your headline is gone", and the one
+            time you look away is the one time you needed it. It clears when you act
+            or when you switch again. */}
+        {undo && (
+          <div style={{
+            position: 'absolute', top: 58, left: '50%', transform: 'translateX(-50%)',
+            zIndex: 3, display: 'flex', alignItems: 'center', gap: 12,
+            padding: '9px 12px 9px 14px',
+            background: undo.lostWork ? '#3A1410' : 'rgba(19,19,16,0.92)',
+            border: `1px solid ${undo.lostWork ? '#C8200A' : 'rgba(250,248,240,0.22)'}`,
+            backdropFilter: 'blur(6px)', maxWidth: 'min(560px, 90%)',
+          }}>
+            <div style={{ fontFamily: BRAND.mono, fontSize: 9.5, color: 'rgba(250,248,240,0.85)',
+                          letterSpacing: '0.04em', lineHeight: 1.5 }}>
+              {undo.lostWork
+                ? <>SWITCHED TO “{undo.label.toUpperCase()}” — <span style={{ color: '#FF6B57' }}>YOUR COPY WAS REPLACED</span></>
+                : <>SWITCHED TO “{undo.label.toUpperCase()}”</>}
+            </div>
+            <button onClick={applyUndo} style={{
+              flexShrink: 0, padding: '6px 12px', cursor: 'pointer', borderRadius: 0,
+              background: BRAND.gold, color: BRAND.coal, border: 'none',
+              fontFamily: BRAND.mono, fontSize: 10, fontWeight: 600,
+              letterSpacing: '0.12em', textTransform: 'uppercase',
+            }}>↩ Undo</button>
+            <button onClick={() => setUndo(null)} title="Dismiss" style={{
+              flexShrink: 0, width: 22, height: 22, padding: 0, cursor: 'pointer',
+              background: 'transparent', color: 'rgba(250,248,240,0.5)',
+              border: 'none', fontSize: 13, lineHeight: 1,
+            }}>×</button>
+          </div>
+        )}
 
         {/* FRAME BAR — one control for both models: slides (screen) / pages (print).
             Always visible, so adding a second frame is always one click away. */}
