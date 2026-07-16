@@ -24,7 +24,7 @@
 // format and silently wrong on every other. Porting it would import the bug along
 // with the feature. Everything here is relative to the row box it is given.
 
-import { GROUP_MARK, NEOORTHO_MARK, KERIMEDICAL_MARK, SUB_BRANDS } from './groupBrands.js';
+import { GROUP_MARK, NEOORTHO_MARK, KERIMEDICAL_MARK, SUB_BRANDS, markMetrics } from './groupBrands.js';
 
 /** The house wordmark is supplied by the engine (it already owns medartis). */
 export const FAMILY_ORDER = ['medartis', 'neoortho', 'kerimedical'];
@@ -83,6 +83,8 @@ export function familyRow(marks, { x, y, w, h, gapRatio = 0.9, align = 'center' 
   return items.map((m, i) => {
     const rect = {
       mark: m,
+      glyph: m.glyph,
+      paths: m.paths,
       x: cx,
       // Optical centring: the glyphs share a centre line, not a baseline — with
       // aspects this different a shared baseline visually drops the wide marks.
@@ -123,4 +125,79 @@ export function endorsedLockup(leadMark, { x, y, w, h }) {
 
 export function subBrandLabel(key) {
   return SUB_BRANDS[key]?.label || key;
+}
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// THE CO-BRAND ROW, SET LIKE TYPE
+// ─────────────────────────────────────────────────────────────────────────────
+// familyRow above matches optical AREA and centres each mark on its own centre
+// line. That is a reasonable rule for marks of unknown shape, and it is the wrong
+// rule for these: they are WORDMARKS. Area-matching left them standing at three
+// different heights, because a bounding box does not know where the baseline is —
+// KeriMedical's box is 130 tall and its letters are 41, so matched by box it
+// shrinks and floats.
+//
+// A designer sets a row of wordmarks by matching the letterforms and standing them
+// on one line. So:
+//
+//   width_i = cap x widthPerCap_i          (one cap height for the whole row)
+//   baseline shared; ascenders rise and descenders hang from it
+//
+// The gap is a multiple of the CAP height — the size of the letters, which is what
+// the space between them should relate to. Not the canvas, not the box, and not the
+// bounding boxes (which for KeriMedical would measure mostly empty stroke).
+//
+// Solves in closed form, so no iteration and no failure mode where the row gives up:
+//   cap x SUM(widthPerCap) + gapRatio x cap x (n-1) = boxW
+export function baselineRow(marks, { x, y, w, h, gapRatio = 2.6, align = 'center', withByline = false }) {
+  const items = (marks || []).filter(Boolean).map((m) => ({
+    mark: m,
+    ...markMetrics(m.__metricsFrom || m, withByline),
+  }));
+  if (!items.length || w <= 0 || h <= 0) return [];
+  const n = items.length;
+
+  const sumWPC = items.reduce((s, m) => s + m.widthPerCap, 0);
+  let cap = w / (sumWPC + gapRatio * (n - 1));
+  if (!(cap > 0)) return [];
+
+  // Height binds too: the row occupies the tallest ascent plus the deepest descent,
+  // both measured from the SHARED baseline — not the sum of individual box heights.
+  const ascent = () => Math.max(...items.map((m) => m.above / m.cap)) * cap;
+  const descent = () => Math.max(...items.map((m) => m.below / m.cap)) * cap;
+  const need = ascent() + descent();
+  if (need > h) cap *= h / need;
+
+  const gap = gapRatio * cap;
+  const widths = items.map((m) => m.widthPerCap * cap);
+  const rowW = widths.reduce((s, v) => s + v, 0) + gap * (n - 1);
+  const baselineY = y + (h - (ascent() + descent())) / 2 + ascent();
+
+  let cx = align === 'left' ? x : align === 'right' ? x + w - rowW : x + (w - rowW) / 2;
+  return items.map((m, i) => {
+    const s = cap / m.cap;                      // viewBox → canvas
+    const rect = {
+      mark: m.mark,
+      paths: m.paths,
+      // The glyph the row actually SIZED against. The caller must scale by this and
+      // not by mark.glyph: with the byline on, the two differ, and the draw would
+      // squash the mark by the byline's share of the height while claiming to be
+      // uniform.
+      glyph: m.glyph,
+      x: cx,
+      y: baselineY - m.above * s,               // the glyph top, derived from the baseline
+      w: widths[i],
+      h: (m.above + m.below) * s,
+      baselineY,
+      cap,
+      scale: s,
+      // viewBox → rect. The glyph is inset in the viewBox, so the transform must
+      // subtract that offset or the mark sits off-centre inside its own box.
+      offsetX: -m.glyph.x * s,
+      offsetY: -m.glyph.y * s,
+    };
+    cx += widths[i] + gap;
+    return rect;
+  });
 }

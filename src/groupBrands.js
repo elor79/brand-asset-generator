@@ -62,6 +62,8 @@
 
 export const GROUP_MARK = {
   view: { w: 206.875, h: 57.316 },
+  baseline: 33.82,   // 11 of 13 elements sit here; the other two are g/p descenders
+  cap: 14.26,
   glyph: { x: 34.479, y: 19.568, w: 137.916, h: 18.18 },
   fullGlyph: { x: 34.479, y: 19.568, w: 137.916, h: 18.18 },
   paths: [
@@ -83,6 +85,8 @@ export const GROUP_MARK = {
 
 export const NEOORTHO_MARK = {
   view: { w: 2267.72, h: 566.93 },
+  baseline: 341.54,  // 9 of 11; the outliers are the symbol and the ®
+  cap: 283.47,
   glyph: { x: 184.38, y: 58.07, w: 1904.49, h: 283.47 },          // brand only — what the Group lockup reserves space for
   fullGlyph: { x: 184.38, y: 58.07, w: 1904.49, h: 450.07 },
   // NeoOrtho carries the byline too — it just does not announce it.
@@ -115,6 +119,8 @@ export const NEOORTHO_MARK = {
 
 export const KERIMEDICAL_MARK = {
   view: { w: 294.081, h: 130.806 },
+  baseline: 86.41,   // 2 of 4; the bars sit above it, the tilted stroke hangs below
+  cap: 41.45,
   glyph: { x: 0.567, y: 0.566, w: 292.938, h: 129.671 },
   fullGlyph: { x: 0.434, y: 0.566, w: 293.071, h: 129.671 },
   // Here the artwork states its own split: <g id="medartis_group"> above
@@ -404,4 +410,45 @@ export function pathBounds(paths) {
   if (!xs.length) return null;
   const x0 = Math.min(...xs), y0 = Math.min(...ys);
   return { x: x0, y: y0, w: Math.max(...xs) - x0, h: Math.max(...ys) - y0 };
+}
+
+
+// ─── BASELINE AND CAP — why a logo row is not an area problem ─────────────────
+// Marks laid out by matching AREA sit at visibly different heights, because area
+// says nothing about where the letters are. The eye does not read area; it reads a
+// line of type. So a logo row is set the way a designer sets one:
+//
+//   1. match the CAP HEIGHT (the letterforms), not the bounding box
+//   2. align the BASELINES
+//
+// Both numbers are measured from the artwork, never typed:
+//
+//   BASELINE — the y where most letterform bottoms coincide. Descenders and hanging
+//   strokes are the minority BY DEFINITION, which is what makes this robust rather
+//   than a guess: "medartis group" puts 11 of 13 elements on its baseline (g and p
+//   descend), NeoOrtho 9 of 11 (its symbol and its ® sit off it), KeriMedical 2 of 4
+//   (the bars rise above, the tilted stroke hangs below).
+//
+//   CAP — baseline minus the top of the tallest element STANDING ON the baseline.
+//   For the medartis wordmark this returns 61.30, which is the height of the "d" —
+//   the same number the 1.5x-d clear-space rule uses. The measurement agrees with
+//   the brand guide it never read.
+//
+// This is why bbox-matching looked wrong: KeriMedical's box is 130 tall but its
+// letters are 41. Two thirds of its "height" is a stroke and a set of bars. Matched
+// by box it shrinks; matched by cap it reads as an equal.
+
+/** Baseline-relative metrics for `mark`, in viewBox units. */
+export function markMetrics(mark, withByline = false) {
+  const g = markGeometry(mark, withByline);
+  const baseline = mark.baseline ?? (g.glyph.y + g.glyph.h);
+  const cap = mark.cap ?? g.glyph.h;
+  return {
+    ...g,
+    baseline,
+    cap,
+    above: baseline - g.glyph.y,                    // ascenders + anything higher
+    below: (g.glyph.y + g.glyph.h) - baseline,      // descenders + hanging strokes
+    widthPerCap: g.glyph.w / cap,                   // the only ratio the row needs
+  };
 }

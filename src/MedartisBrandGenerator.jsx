@@ -23,9 +23,9 @@ import {
 } from './gradient';
 import {
   GROUP_MARK, NEOORTHO_MARK, KERIMEDICAL_MARK, CO_BRANDS, markGeometry, SUB_BRANDS,
-  GROUP_GRADIENTS, GROUP_RULE_COLOR, markPaths, clearSpaceFor, legibleInkAt, deadZones,
+  GROUP_GRADIENTS, GROUP_RULE_COLOR, markPaths, markMetrics, clearSpaceFor, legibleInkAt, deadZones,
 } from './groupBrands';
-import { familyRow, endorsedLockup, FAMILY_ORDER, MARK_BY_KEY, subBrandLabel } from './groupLockup';
+import { familyRow, baselineRow, endorsedLockup, MARK_BY_KEY, subBrandLabel } from './groupLockup';
 import QRCodeStyling from 'qr-code-styling';
 import { readPsd, initializeCanvas } from 'ag-psd';
 
@@ -1786,6 +1786,13 @@ const markAsBrand = (m) => ({ ...m, ...markGeometry(m, false) });
 const MEDARTIS_WORDMARK_MARK = {
   view: WM_VIEW,
   glyph: WM_GLYPH,
+  // "medartis" has no descenders, so its baseline IS the glyph bottom, and the
+  // tallest thing standing on it is the "d" — which makes cap === the very height
+  // the 1.5x-d clear-space rule is written against. The row measurement and the
+  // brand guide arrive at the same number independently.
+  baseline: WM_GLYPH.y + WM_GLYPH.h,   // 153.19
+  cap: WM_GLYPH.h,                     // 61.30 — the "d"
+  fullGlyph: WM_GLYPH,
   paths: WORDMARK_PATHS.map((d) => ({ fill: null, d })),   // null = takes the ink colour
 };
 
@@ -2689,16 +2696,10 @@ function drawGroupLockup(ctx, frame, group, palette, surface) {
   // the house mark it is the only thing naming the parent.
   const withByline = !group.enabled;
   const cobs = [
-    group.coBrands?.medartis && { mark: MEDARTIS_WORDMARK_MARK, withByline: true },
-    group.coBrands?.neoortho && { mark: NEOORTHO_MARK, withByline },
-    group.coBrands?.kerimedical && { mark: KERIMEDICAL_MARK, withByline },
-  ].filter(Boolean).map(({ mark, withByline: wb }) => {
-    const g = markGeometry(mark, wb);
-    // familyRow lays out by glyph aspect, so it must be given the glyph that
-    // matches the paths it will actually draw — a byline-off mark measured with
-    // the byline's height reserves space for artwork that is not there.
-    return { ...mark, glyph: g.glyph, paths: g.paths };
-  });
+    group.coBrands?.medartis && MEDARTIS_WORDMARK_MARK,
+    group.coBrands?.neoortho && NEOORTHO_MARK,
+    group.coBrands?.kerimedical && KERIMEDICAL_MARK,
+  ].filter(Boolean);
 
   let rects;
   if (!cobs.length) {
@@ -2709,7 +2710,11 @@ function drawGroupLockup(ctx, frame, group, palette, surface) {
     const rowH = boxH - headH - gapY;
     rects = [
       ...familyRow([GROUP_MARK], { x: padX, y, w: boxW, h: headH, align: 'center' }),
-      ...familyRow(cobs, { x: padX, y: y + headH + gapY, w: boxW, h: rowH, align: 'center', gapRatio: group.gap ?? 0.9 }),
+      // baselineRow, not familyRow: these are WORDMARKS. Matched by area they stand
+      // at three different heights, because a bounding box does not know where the
+      // letters are.
+      ...baselineRow(cobs, { x: padX, y: y + headH + gapY, w: boxW, h: rowH,
+                             align: 'center', gapRatio: group.gap ?? 2.6, withByline }),
     ];
   }
   if (!rects?.length) return null;
@@ -2738,10 +2743,14 @@ function drawGroupLockup(ctx, frame, group, palette, surface) {
   for (const r of rects) {
     ctx.save();
     ctx.translate(r.x, r.y);
-    const sx = r.w / r.mark.glyph.w, sy = r.h / r.mark.glyph.h;
+    // Scale against the glyph the ROW measured, not the mark's default one — with
+    // the byline on they are different boxes, and using the wrong one squashes the
+    // artwork while every number still looks uniform.
+    const gl = r.glyph || r.mark.glyph;
+    const sx = r.w / gl.w, sy = r.h / gl.h;
     ctx.scale(sx, sy);
-    ctx.translate(-r.mark.glyph.x, -r.mark.glyph.y);
-    for (const pth of markPaths(r.mark, variant, ink)) {
+    ctx.translate(-gl.x, -gl.y);
+    for (const pth of markPaths(r.paths ? { paths: r.paths } : r.mark, variant, ink)) {
       ctx.fillStyle = pth.fill;
       ctx.fill(new Path2D(pth.d));
     }
@@ -5195,7 +5204,7 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
     size: 0.14,                // fraction of the SHORT EDGE — never of the canvas
     // The space between co-brands, as a fraction of their own drawn height — not of
     // the canvas and not of the box, so it holds its proportion at every format.
-    gap: 0.9,
+    gap: 2.6,   // multiples of the CAP height — the size of the letters
   });
 
   // The surface: flat palette colour, or a Group gradient.
@@ -7950,17 +7959,17 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
                     <div style={{ fontFamily: BRAND.mono, fontSize: 8.5, color: BRAND.ink300,
                                   lineHeight: 1.6, letterSpacing: '0.03em', marginBottom: 10 }}>
                       {(group.coBrands?.medartis || group.coBrands?.neoortho || group.coBrands?.kerimedical)
-                        ? `THEY SIT BENEATH THE GROUP — ITS BRANDS, NOT ITS PEERS. MATCHED ON OPTICAL AREA, NOT HEIGHT.${group.coBrands?.kerimedical ? ' KERIMEDICAL DROPS ITS "MEDARTIS GROUP" BYLINE HERE — UNDER THE GROUP MARK IT WOULD STATE THE SAME RELATIONSHIP TWICE.' : ''}`
+                        ? `THEY SIT BENEATH THE GROUP — ITS BRANDS, NOT ITS PEERS. SET LIKE TYPE: ONE CAP HEIGHT, ONE BASELINE. KERIMEDICAL'S BOX IS 130 TALL AND ITS LETTERS ARE 41, SO MATCHING BOXES WOULD SHRINK IT AND FLOAT IT.${group.coBrands?.kerimedical ? ' KERIMEDICAL DROPS ITS "MEDARTIS GROUP" BYLINE HERE — UNDER THE GROUP MARK IT WOULD STATE THE SAME RELATIONSHIP TWICE.' : ''}`
                         : 'A GROUP ASSET IS COMPLETE WITH THE GROUP MARK ALONE. ADD A CO-BRAND ONLY WHEN THIS PIECE IS ACTUALLY ABOUT IT.'}
                     </div>
 
-                    <label style={lab}>Space between co-brands · {(group.gap ?? 0.9).toFixed(2)}×</label>
-                    <input type="range" min="10" max="250" value={Math.round((group.gap ?? 0.9) * 100)}
+                    <label style={lab}>Space between co-brands · {(group.gap ?? 2.6).toFixed(2)}×</label>
+                    <input type="range" min="40" max="500" value={Math.round((group.gap ?? 2.6) * 100)}
                            onChange={(e) => set({ gap: +e.target.value / 100 })}
                            style={{ width: '100%', marginBottom: 2 }} />
                     <div style={{ fontFamily: BRAND.mono, fontSize: 8, color: BRAND.ink300,
                                   letterSpacing: '0.03em', marginBottom: 10 }}>
-                      A MULTIPLE OF THE MARKS' OWN HEIGHT — SO IT HOLDS ITS PROPORTION AT EVERY FORMAT.
+                      A MULTIPLE OF THE CAP HEIGHT — THE SIZE OF THE LETTERS, WHICH IS WHAT THE SPACE BETWEEN THEM SHOULD RELATE TO.
                     </div>
 
                     <label style={lab}>Position</label>
