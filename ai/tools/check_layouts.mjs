@@ -71,7 +71,22 @@ const CONTRACT = [
     id: 'group',
     needs: /drawGroupLockup\(/,
     why: 'must draw the Group lockup — a sub-brand row that is configured-but-never-drawn is the partner-logo bug wearing a new hat',
-    skip: ['drawBrochurePage'],   // has its own cover/back furniture
+    // drawLanyardStrip composes the Group into its own repeat block, rotated onto
+    // the strap axis. drawGroupLockup's horizontal band would sit sideways to
+    // everything else on a 20mm webbing. This skip is a design decision, not an
+    // omission — the strap DOES honour opts.group, just not with that function.
+    skip: ['drawBrochurePage', 'drawLanyardStrip'],
+  },
+  {
+    id: 'group-inline',
+    // The counterpart to the 'group' skip above. A skip is a HOLE: having excused
+    // the lanyard from drawGroupLockup, nothing was left checking that it honours
+    // opts.group at all — which is precisely the "configured but never drawn" bug
+    // the 'group' rule exists to prevent, reintroduced by the exemption meant to
+    // be careful. So the exemption comes with an obligation.
+    needs: /inlineGroupLockup\(/,
+    why: 'must compose the Group into its repeat block via inlineGroupLockup() — it is exempt from drawGroupLockup, not from the Group',
+    only: ['drawLanyardStrip'],
   },
   {
     id: 'skip-overlays',
@@ -111,7 +126,8 @@ for (const { key, fn } of entries) {
     continue;
   }
   const misses = CONTRACT.filter((r) => {
-    if (r.skip.includes(fn)) return false;
+    if (r.only && !r.only.includes(fn)) return false;   // rule aimed at one layout
+    if (r.skip?.includes(fn)) return false;
     if (r.forbids) return r.forbids.test(body);      // presence is the failure
     return !r.needs.test(body);                      // absence is the failure
   });

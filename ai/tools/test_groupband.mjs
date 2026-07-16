@@ -19,7 +19,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { GROUP_MARK, clearSpaceFor } from '../../src/groupBrands.js';
+import { GROUP_MARK, NEOORTHO_MARK, KERIMEDICAL_MARK, clearSpaceFor, markMetrics, markPaths } from '../../src/groupBrands.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const src = fs.readFileSync(path.join(ROOT, 'src/MedartisBrandGenerator.jsx'), 'utf8');
@@ -86,6 +86,51 @@ else if (!/groupLockupBand\(/.test(clr)) {
 } else if (/\bbotY\b/.test(clr)) {
   bad('brandBarClearance references `botY`; the variable is `bottomY` — a ReferenceError on every draw with the Group at the bottom');
 } else ok('brandBarClearance reserves the Group band, using the same function that draws it');
+
+// ── 4. The strap's inline lockup — RUN it too ────────────────────────────────
+// A lanyard is 20mm wide and everything on it must be in line, because stacked
+// marks get ~6mm each. This is the geometry that makes that work, so it is the
+// geometry that must not quietly return a lockup taller than the webbing.
+console.log('');
+const inlSrc = bodyOf('inlineGroupLockup');
+if (!inlSrc) bad('inlineGroupLockup not found');
+else {
+  const mk = new Function('markMetrics', 'markPaths', 'Path2D',
+    inlSrc + '\nreturn inlineGroupLockup;')(markMetrics, markPaths, function () {});
+  const ctx = { save() {}, restore() {}, translate() {}, scale() {}, fill() {}, set fillStyle(v) {} };
+  const STRAP_W = 118;          // ~20mm of webbing at print resolution
+  const BUDGET = 0.46;
+  const SETS = [
+    ['group alone',        [GROUP_MARK]],
+    ['+ NeoOrtho',         [GROUP_MARK, NEOORTHO_MARK]],
+    ['+ KeriMedical',      [GROUP_MARK, KERIMEDICAL_MARK]],
+    ['all three',          [GROUP_MARK, NEOORTHO_MARK, KERIMEDICAL_MARK]],
+  ];
+  for (const [name, marks] of SETS) {
+    let r;
+    try {
+      r = mk(ctx, marks.map((m) => ({ mark: m, withByline: false })), STRAP_W, BUDGET, 2.6, '#fff', 'white');
+    } catch (e) { bad(`${name}: threw ${e.message}`); continue; }
+    if (!r) { bad(`${name}: returned null`); continue; }
+    // The cross-webbing extent must respect the budget — that is the entire point
+    // of measuring from a shared baseline instead of stacking boxes.
+    const ms = marks.map((m) => markMetrics(m, false));
+    const A = Math.max(...ms.map((q) => q.above / q.cap));
+    const B = Math.max(...ms.map((q) => q.below / q.cap));
+    const across = (A + B) * r.cap;
+    if (across > STRAP_W * BUDGET + 0.01) bad(`${name}: needs ${across.toFixed(1)}px across a strap that allows ${(STRAP_W * BUDGET).toFixed(1)}px`);
+    else if (!(r.len > 0)) bad(`${name}: zero length`);
+    else ok(`${name.padEnd(14)} cap ${r.cap.toFixed(1)}px, ${across.toFixed(1)}px across (budget ${(STRAP_W * BUDGET).toFixed(1)}), runs ${r.len.toFixed(0)}px along the strap`);
+  }
+  // Empty set must not pretend.
+  if (mk(ctx, [], STRAP_W, BUDGET, 2.6, '#fff', 'white') !== null) bad('no marks should give no lockup, not an empty one');
+  else ok('no marks → null');
+  // KeriMedical is the tallest per unit of letter; it MUST drag the cap down.
+  const solo = mk(ctx, [{ mark: GROUP_MARK, withByline: false }], STRAP_W, BUDGET, 2.6, '#fff', 'white');
+  const withK = mk(ctx, [{ mark: GROUP_MARK, withByline: false }, { mark: KERIMEDICAL_MARK, withByline: false }], STRAP_W, BUDGET, 2.6, '#fff', 'white');
+  if (withK.cap >= solo.cap) bad('adding KeriMedical did not reduce the cap — its bars and stroke cost webbing, and something is not measuring them');
+  else ok(`KeriMedical costs the row ${((1 - withK.cap / solo.cap) * 100).toFixed(0)}% of its cap (${solo.cap.toFixed(1)} → ${withK.cap.toFixed(1)}px) — bars above, stroke below`);
+}
 
 console.log(fail ? `\n✗ ${fail} problem(s)` : '\n✓ the band terminates, stays on the canvas, and is reserved');
 process.exit(fail ? 1 : 0);

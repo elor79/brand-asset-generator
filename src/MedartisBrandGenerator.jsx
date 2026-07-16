@@ -3280,6 +3280,70 @@ const LANYARD_DEFAULTS = {
   strapLineOn: true,
 };
 
+
+// ═══ THE GROUP, IN LINE ═══════════════════════════════════════════════
+// A lanyard is not a canvas you compose once. It is a loop that twists on a neck,
+// so any 10cm of it might be the part facing out — which is why the strap repeats,
+// and why everything on it has to work as a fragment.
+//
+// It is also about 20mm wide. That single fact decides the whole design:
+//
+//   IN LINE, NEVER STACKED. Three marks stacked across the webbing get ~6mm each
+//   and none of them survive. In line they share the full width and the strap's
+//   only abundant dimension — its length — pays for them.
+//
+// So the Group and its brands are ONE item on the strap: a single lockup with
+// cap-matched marks on a shared baseline, internally spaced by the same § GROUP gap
+// control that spaces the row on a poster. One control, one meaning. The text that
+// follows is a separate item, separated by the strap's own item gap — because the
+// marks are a lockup and the text is a different thought.
+//
+// KERIMEDICAL SETS THE CAP FOR EVERYONE, and this is worth knowing before you
+// wonder why the letters went small: its mark is 3.13 cap-heights tall (bars above
+// the caps, a stroke hanging below) where NeoOrtho is 1.00. It is the tallest thing
+// per unit of letter, so it eats the webbing budget. On a 20mm strap at the default
+// 46% budget that puts the row at a ~2.9mm cap — legible, but it is the reason.
+function inlineGroupLockup(ctx, marks, strapW, budget, gapRatio, ink, variant) {
+  const ms = marks.map((m) => markMetrics(m.mark, m.withByline)).filter((q) => q.paths.length);
+  if (!ms.length) return null;
+
+  // Cross-webbing extent is measured from the SHARED baseline, not by summing each
+  // mark's own box: the row is one line of type, so it is as tall as the highest
+  // ascender plus the deepest descender, and no taller.
+  const A = Math.max(...ms.map((q) => q.above / q.cap));
+  const B = Math.max(...ms.map((q) => q.below / q.cap));
+  const cap = (strapW * budget) / (A + B);
+  if (!(cap > 0)) return null;
+
+  const gap = gapRatio * cap;
+  const widths = ms.map((q) => q.widthPerCap * cap);
+  const len = widths.reduce((a, b) => a + b, 0) + gap * (ms.length - 1);
+  // Centre the row across the webbing on its optical middle, not its baseline —
+  // the baseline sits low when something descends.
+  const baseY = ((A - B) / 2) * cap;
+
+  return {
+    len,
+    cap,
+    draw: (x0) => {
+      let x = x0;
+      ms.forEach((q, i) => {
+        const sc = cap / q.cap;
+        ctx.save();
+        ctx.translate(x, baseY - q.above * sc);
+        ctx.scale(sc, sc);
+        ctx.translate(-q.glyph.x, -q.glyph.y);
+        for (const p of markPaths({ paths: q.paths }, variant, ink)) {
+          ctx.fillStyle = p.fill;
+          ctx.fill(new Path2D(p.d));
+        }
+        ctx.restore();
+        x += widths[i] + gap;
+      });
+    },
+  };
+}
+
 function drawLanyardStrip(ctx, frame, content, image, opts) {
   const { w, h } = frame;
   const { palette, accent } = opts;
@@ -3326,10 +3390,28 @@ function drawLanyardStrip(ctx, frame, content, image, opts) {
 
   // ── Compose one repeat block ───────────────────────────────────────
   const items = [];
+  const grp = opts.group;
   if (cfg.mark !== 'none') {
-    const markH = w * clamp(cfg.markSize, 0.15, 0.75);
-    const markL = markH * (WM_GLYPH.w / WM_GLYPH.h);   // true artwork aspect
-    items.push({ len: markL, draw: (x) => drawWordmark(ctx, x, -markH / 2, markH, ink) });
+    if (grp?.enabled) {
+      // Same rule as everywhere else: the Group mark REPLACES the medartis
+      // wordmark, and medartis joins its siblings as an optional co-brand. The
+      // bylines come off — under the Group mark they would say "a medartis group
+      // company" beside "medartis group", twice, on a 20mm strap.
+      const marks = [{ mark: GROUP_MARK, withByline: false }];
+      if (grp.coBrands?.medartis)    marks.push({ mark: MEDARTIS_WORDMARK_MARK, withByline: false });
+      if (grp.coBrands?.neoortho)    marks.push({ mark: NEOORTHO_MARK, withByline: false });
+      if (grp.coBrands?.kerimedical) marks.push({ mark: KERIMEDICAL_MARK, withByline: false });
+      const variant = grp.variant && grp.variant !== 'auto'
+        ? grp.variant
+        : (palette.mode === 'dark' ? 'white' : 'color');
+      const lock = inlineGroupLockup(ctx, marks, w, clamp(cfg.markSize, 0.15, 0.75),
+                                     grp.gap ?? 2.6, ink, variant);
+      if (lock) items.push(lock);
+    } else {
+      const markH = w * clamp(cfg.markSize, 0.15, 0.75);
+      const markL = markH * (WM_GLYPH.w / WM_GLYPH.h);   // true artwork aspect
+      items.push({ len: markL, draw: (x) => drawWordmark(ctx, x, -markH / 2, markH, ink) });
+    }
   }
   if (label) {
     items.push({
@@ -3377,7 +3459,13 @@ function drawLanyardStrip(ctx, frame, content, image, opts) {
   // Co-branded congresses put a partner mark on the strap too — raster, so it
   // goes in the image layer like everywhere else.
   drawPartnerLogos(ctx, frame, opts.partners, palette);
-  drawGroupLockup(ctx, frame, opts.group, palette, opts.surface);
+  // NO drawGroupLockup here — deliberately, and check_layouts knows.
+  //
+  // That function reserves a full-width horizontal band at the top or bottom of the
+  // canvas. On a 118 x 5315 strap "full width" is 118px ACROSS the webbing, and the
+  // band would land sideways to everything else on the strap, at a size where none
+  // of it reads. The strap composes the Group into its own repeat block above,
+  // rotated onto the strap's axis, which is the only orientation that exists here.
 }
 
 // ─── LAYOUT 1: Image · Text split ────────────────────────────────────
