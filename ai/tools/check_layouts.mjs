@@ -68,10 +68,29 @@ const CONTRACT = [
     skip: ['drawBrochurePage'],   // has its own partner WALL page type
   },
   {
+    id: 'group',
+    needs: /drawGroupLockup\(/,
+    why: 'must draw the Group lockup — a sub-brand row that is configured-but-never-drawn is the partner-logo bug wearing a new hat',
+    skip: ['drawBrochurePage'],   // has its own cover/back furniture
+  },
+  {
     id: 'skip-overlays',
     needs: /skipOverlays/,
     why: 'must respect opts.skipOverlays — the vector PDF draws text itself, and without this it lands twice',
     skip: ['drawBrochurePage'],
+  },
+  {
+    id: 'own-surface',
+    // A NEGATIVE rule: the presence of this is the bug.
+    forbids: /ctx\.fillStyle\s*=\s*(palette|pal)\.bg\s*;/,
+    why: 'paints its own surface instead of calling paintSurface() — that is how a gradient becomes unappliable: the control moves, the swatch updates, and nine layouts flatten it back to a colour',
+    skip: [],
+  },
+  {
+    id: 'surface',
+    needs: /paintSurface\(/,
+    why: 'must call paintSurface() — the surface is a property of the canvas, not a favour each layout remembers to do',
+    skip: [],
   },
   {
     id: 'bleed',
@@ -91,7 +110,11 @@ for (const { key, fn } of entries) {
     fail++;
     continue;
   }
-  const misses = CONTRACT.filter((r) => !r.skip.includes(fn) && !r.needs.test(body));
+  const misses = CONTRACT.filter((r) => {
+    if (r.skip.includes(fn)) return false;
+    if (r.forbids) return r.forbids.test(body);      // presence is the failure
+    return !r.needs.test(body);                      // absence is the failure
+  });
   if (!misses.length) {
     console.log(`✓ ${key.padEnd(13)} ${fn}`);
   } else {

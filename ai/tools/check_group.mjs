@@ -18,7 +18,7 @@
 //
 //     node ai/tools/check_group.mjs
 import { GROUP_GRADIENTS, SUB_BRANDS, GROUP_MARK, NEOORTHO_MARK, KERIMEDICAL_MARK, shade, GROUP_RULE_COLOR,
-  deadZones, legibleInkAt, pathBounds } from '../../src/groupBrands.js';
+  deadZones, legibleInkAt, pathBounds, KERIMEDICAL_FULL } from '../../src/groupBrands.js';
 import { colorAt } from '../../src/gradient.js';
 import fs from 'node:fs';
 
@@ -45,6 +45,35 @@ for (const [k, m] of Object.entries(MARKS)) {
     bad(`${k}: glyph bounds fall outside the viewBox — the extraction is wrong`);
   } else {
     ok(`${k.padEnd(12)} ${m.paths.length} paths, glyph ${g.w.toFixed(1)}×${g.h.toFixed(1)} in ${v.w}×${v.h} (re-measured from the paths)`);
+  }
+}
+
+// ── 1b. The KeriMedical byline ───────────────────────────────────────────────
+// The supplied file is KeriMedical_medartis_Group_Logo.svg — the artwork carries a
+// "medartis group" byline in its own <g>. Under the Group mark that byline states
+// the relationship twice, so it must be SEPARABLE. If someone ever merges it back
+// into `paths`, the lockup silently starts repeating itself.
+console.log('');
+{
+  const m = MARKS.kerimedical;
+  if (!m.byline?.length) {
+    bad('kerimedical: the medartis-group byline is gone from the mark — KeriMedical standing alone then names no parent');
+  } else if (m.paths.some((p) => m.byline.some((b) => b.d === p.d))) {
+    bad('kerimedical: byline paths are ALSO in `paths` — under the Group mark the lockup would say "a medartis group company" beneath "Medartis Group"');
+  } else {
+    const bb = pathBounds(m.byline), br = pathBounds(m.paths);
+    if (bb.y < br.y + br.h) bad(`kerimedical: the byline (y ${bb.y.toFixed(1)}) overlaps the brand (ends ${(br.y + br.h).toFixed(1)})`);
+    else ok(`kerimedical  byline separable: ${m.byline.length} paths at y ${bb.y.toFixed(1)}–${(bb.y + bb.h).toFixed(1)}, beneath the brand`);
+  }
+  // FULL must be brand + byline, and its bounds must span both.
+  const full = pathBounds(KERIMEDICAL_FULL.paths);
+  const drift = ['x', 'y', 'w', 'h'].map((a) => Math.abs(full[a] - KERIMEDICAL_FULL.glyph[a]));
+  if (KERIMEDICAL_FULL.paths.length !== m.paths.length + m.byline.length) {
+    bad('KERIMEDICAL_FULL is not brand + byline');
+  } else if (Math.max(...drift) > 0.01) {
+    bad(`KERIMEDICAL_FULL glyph drifted from its paths by ${Math.max(...drift).toFixed(2)}`);
+  } else {
+    ok(`kerimedical  standalone (with byline) ${full.w.toFixed(1)}×${full.h.toFixed(1)} — for use away from the Group mark`);
   }
 }
 

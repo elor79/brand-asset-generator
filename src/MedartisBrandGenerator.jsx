@@ -17,6 +17,15 @@ import {
   // two copies of the same maths quietly drift apart.
 } from './customFormats';
 import { makeZip } from './zip';
+import {
+  DEFAULT_GRADIENT, ANGLE_PRESETS, axisFor, tAt, gradientStops, colorAt,
+  applyCanvasGradient, gradientToSvgDefs, describeGradient,
+} from './gradient';
+import {
+  GROUP_MARK, NEOORTHO_MARK, KERIMEDICAL_MARK, KERIMEDICAL_FULL, SUB_BRANDS,
+  GROUP_GRADIENTS, GROUP_RULE_COLOR, markPaths, clearSpaceFor, legibleInkAt, deadZones,
+} from './groupBrands';
+import { familyRow, endorsedLockup, FAMILY_ORDER, MARK_BY_KEY, subBrandLabel } from './groupLockup';
 import QRCodeStyling from 'qr-code-styling';
 import { readPsd, initializeCanvas } from 'ag-psd';
 
@@ -1766,6 +1775,17 @@ const WORDMARK_PATHS = [
 const WM_VIEW  = { w: 526.755, h: 245.078 };
 const WM_GLYPH = { x: 91.89, y: 91.89, w: 342.98, h: 61.30 };
 
+// The medartis wordmark as a MARK, so the Group row can lay it out beside the
+// sub-brands. medartis is one of the three brands UNDER the Group — it is not the
+// Group. Those are two different pieces of artwork, and the family row was drawing
+// the Group mark in the medartis slot: a lockup that names the house three times
+// and the main brand not at all. It rendered perfectly.
+const MEDARTIS_WORDMARK_MARK = {
+  view: WM_VIEW,
+  glyph: WM_GLYPH,
+  paths: WORDMARK_PATHS.map((d) => ({ fill: null, d })),   // null = takes the ink colour
+};
+
 // ─── CLEAR SPACE — 1.5 × THE HEIGHT OF THE "d" ───────────────────────────
 // The brand rule, and it is not negotiable: nothing — no type, no image edge,
 // no canvas edge — may come closer to the mark than 1.5 × the height of the
@@ -2250,8 +2270,7 @@ function drawBrochurePage(ctx, frame, image, opts) {
   // accent (see BRAND CHECK). Use the accessible deep gold on light pages.
   const accent = DARK ? BRAND.gold : BRAND.goldDeep;
 
-  ctx.fillStyle = pal.bg;
-  ctx.fillRect(-bleed, -bleed, w + bleed * 2, h + bleed * 2);
+  paintSurface(ctx, frame, pal, opts.surface);
 
   const body = w * 0.0125;
   const h1 = w * 0.052;
@@ -2617,6 +2636,113 @@ function drawPartnerLogos(ctx, frame, partners, palette) {
   ctx.restore();
 }
 
+
+// ═══ MEDARTIS GROUP LOCKUP ═══════════════════════════════════════════
+// The house marks on the canvas. Three things here are deliberate.
+//
+// SIZE IS OFF THE SHORT EDGE, NOT THE CANVAS. `Math.min(w, h)` — because a
+// fraction of the long edge on a 43:1 lanyard is a lockup taller than the strap.
+// IBRA's sponsor strip takes its default as a fraction of the canvas
+// (`size: partners.size ?? 0.78`) and that is exactly why it draws its wordmark at
+// the wrong scale. The bug is not in the drawing, it is in what the fraction is OF.
+//
+// VARIANT IS RESOLVED AGAINST THE SURFACE UNDERNEATH, not the palette. On a
+// gradient the palette's mode says "dark" while the spot under the lockup may be
+// bright teal. So the actual ramp position is sampled and asked.
+//
+// CLEAR SPACE IS RESERVED, NOT ASSUMED. Each mark reserves 1.5x its own height,
+// per groupBrands.js — the medartis 1.5x-d rule generalised honestly rather than
+// pretended to apply to marks that have no "d".
+function drawGroupLockup(ctx, frame, group, palette, surface) {
+  if (!group?.enabled) return null;
+  const { w, h, padX, padY } = frame;
+  const short = Math.min(w, h);
+  const boxH = short * clamp(group.size ?? 0.14, 0.03, 0.4);
+  const boxW = w - padX * 2;
+  if (boxH <= 0 || boxW <= 0) return null;
+
+  // THE HIERARCHY, which the artwork must not misstate:
+  //
+  //     Medartis Group          <- the house
+  //       |-- medartis          <- the main brand
+  //       |-- KeriMedical
+  //       +-- NeoOrtho
+  //
+  // The Group mark stands IN PLACE OF the medartis wordmark (drawBrandBar
+  // suppresses it), because the house and the main brand are not two senders.
+  // The co-brands are optional, and when present they sit BENEATH the Group — they
+  // are its brands, not its peers, and a single row of equals would say otherwise.
+  const y = group.pos === 'top' ? padY : h - padY - boxH;
+  //
+  // AND THE CO-BRANDS LOSE THEIR BYLINE.
+  //
+  // KeriMedical's supplied artwork carries a "medartis group" byline — it exists so
+  // the brand can name its parent when it appears ALONE. Directly beneath the
+  // Medartis Group mark it states the same relationship a second time, in the
+  // opposite direction. So under a Group lead the byline comes off, and KeriMedical
+  // uses the brand paths only. Standing alone (Group off) it keeps it.
+  const kmMark = group.enabled ? KERIMEDICAL_MARK : KERIMEDICAL_FULL;
+  // Order follows the hierarchy, not the checkbox order: medartis is the main brand
+  // and reads first among the three.
+  const cobs = [
+    group.coBrands?.medartis && MEDARTIS_WORDMARK_MARK,
+    group.coBrands?.neoortho && NEOORTHO_MARK,
+    group.coBrands?.kerimedical && kmMark,
+  ].filter(Boolean);
+
+  let rects;
+  if (!cobs.length) {
+    rects = familyRow([GROUP_MARK], { x: padX, y, w: boxW, h: boxH, align: 'center' });
+  } else {
+    const gapY = boxH * 0.16;
+    const headH = boxH * 0.38;          // the house reads first
+    const rowH = boxH - headH - gapY;
+    rects = [
+      ...familyRow([GROUP_MARK], { x: padX, y, w: boxW, h: headH, align: 'center' }),
+      ...familyRow(cobs, { x: padX, y: y + headH + gapY, w: boxW, h: rowH, align: 'center' }),
+    ];
+  }
+  if (!rects?.length) return null;
+
+  // Which ink? Ask the surface at the lockup's own position, not the palette.
+  let variant = group.variant;
+  if (variant === 'auto') {
+    if (surface?.enabled && surface.gradient) {
+      // Where along the ramp does the lockup actually sit? tAt() is the inverse of
+      // the renderer's own axis, so this asks the SAME question the paint answered
+      // — including for a radial, where a hand-rolled linear projection would be
+      // confidently wrong.
+      const bleed = frame.bleedPx || 0;
+      const t = tAt(surface.gradient, padX + boxW / 2, y + boxH / 2,
+                    -bleed, -bleed, w + bleed * 2, h + bleed * 2);
+      const best = legibleInkAt(surface.gradient, t, colorAt);
+      // A sub-brand's own colours only survive on a light, quiet surface. Anywhere
+      // else the mark goes single-colour, which is what its negative artwork is for.
+      variant = best.ink === 'paper' ? 'white' : 'mono';
+    } else {
+      variant = palette.mode === 'dark' ? 'white' : 'color';
+    }
+  }
+  const ink = palette.mode === 'dark' ? BRAND.bone00 : BRAND.ink;
+
+  for (const r of rects) {
+    ctx.save();
+    ctx.translate(r.x, r.y);
+    const sx = r.w / r.mark.glyph.w, sy = r.h / r.mark.glyph.h;
+    ctx.scale(sx, sy);
+    ctx.translate(-r.mark.glyph.x, -r.mark.glyph.y);
+    for (const pth of markPaths(r.mark, variant, ink)) {
+      ctx.fillStyle = pth.fill;
+      ctx.fill(new Path2D(pth.d));
+    }
+    ctx.restore();
+  }
+
+  // The band this lockup owns, INCLUDING its clear space — so text keeps out.
+  const clear = clearSpaceFor(rects[0].mark, Math.max(...rects.map((r) => r.h)));
+  return { y, h: boxH, top: y - clear, bottom: y + boxH + clear };
+}
+
 // ═══ LAYOUT · TYPE ONLY ══════════════════════════════════════════════
 // No photograph. Not a fallback — a choice.
 //
@@ -2627,14 +2753,53 @@ function drawPartnerLogos(ctx, frame, partners, palette) {
 //
 // The type is set on the surface with generous air and anchored to the OPTICAL
 // centre — a block centred by arithmetic sits low, because the eye reads the
+
+// ═══ THE SURFACE ═════════════════════════════════════════════════════
+// Every layout used to open with these exact two lines:
+//
+//     ctx.fillStyle = palette.bg;
+//     ctx.fillRect(-bleed, -bleed, w + bleed * 2, h + bleed * 2);
+//
+// Nine copies. Which is fine for a flat colour and fatal for anything else: a
+// gradient cannot be expressed as a fillStyle STRING, so the moment the surface
+// became more than a colour, every one of those nine sites would quietly paint a
+// flat rectangle over it. The control would be in the panel, the swatch would
+// update, and the canvas would not change. IBRA shipped exactly that bug and
+// spent a commit undoing it (429f60a — "gradient unappliable: five layouts
+// painted over it"). It had five. We have nine.
+//
+// So there is now ONE place that paints the surface, and check_layouts fails any
+// layout that paints its own. A gradient is a property of the surface, not a
+// favour each layout must remember to do.
+function paintSurface(ctx, frame, palette, surface) {
+  const { w, h } = frame;
+  const bleed = frame.bleedPx || 0;
+  const x = -bleed, y = -bleed, ww = w + bleed * 2, hh = h + bleed * 2;
+
+  if (surface?.enabled && surface.gradient) {
+    // The ramp is painted across the BLED rect, not the trim box. A gradient that
+    // starts at the trim edge leaves the bleed a flat slab of the end colour —
+    // invisible on screen, a visible band after the guillotine.
+    //
+    // applyCanvasGradient is the SHARED renderer (it handles radial too). Rolling
+    // the axis by hand here is how the canvas and the SVG export drift apart — and
+    // my hand-rolled version destructured axisFor's return as an array when it
+    // returns an object, which would have thrown the instant anyone ticked the box.
+    applyCanvasGradient(ctx, surface.gradient, x, y, ww, hh);
+    ctx.fillRect(x, y, ww, hh);
+    return;
+  }
+  ctx.fillStyle = palette.bg;
+  ctx.fillRect(x, y, ww, hh);
+}
+
 // mass, not the box.
 function drawTypeOnly(ctx, frame, content, image, opts) {
   const { w, h, padX, padY } = frame;
   const { palette, accent } = opts;
   const bleed = frame.bleedPx || 0;
 
-  ctx.fillStyle = palette.bg;
-  ctx.fillRect(-bleed, -bleed, w + bleed * 2, h + bleed * 2);
+  paintSurface(ctx, frame, palette, opts.surface);
 
   const safeArea = { x: 0, y: 0, w, h };
   const clearance = brandBarClearance(ctx, frame, { ...opts, safeArea });
@@ -2660,6 +2825,7 @@ function drawTypeOnly(ctx, frame, content, image, opts) {
   if (!opts.skipOverlays) drawBrandBar(ctx, frame, palette, accent, false, { ...opts, safeArea });
   if (!opts.skipOverlays) drawQrOverlay(ctx, frame, opts.qr, opts.qrImage, palette);
   drawPartnerLogos(ctx, frame, opts.partners, palette);
+  drawGroupLockup(ctx, frame, opts.group, palette, opts.surface);
 }
 
 // ═══ LAYOUT · SIDE BY SIDE ═══════════════════════════════════════════
@@ -2674,8 +2840,7 @@ function drawSideBySide(ctx, frame, content, image, opts, imageSide = 'right') {
   const { palette, accent, fit } = opts;
   const bleed = frame.bleedPx || 0;
 
-  ctx.fillStyle = palette.bg;
-  ctx.fillRect(-bleed, -bleed, w + bleed * 2, h + bleed * 2);
+  paintSurface(ctx, frame, palette, opts.surface);
 
   const ratio = clamp(fit?.frameRatio ?? 0.5, 0.25, 0.75);
   const imgW = w * ratio;
@@ -2712,6 +2877,7 @@ function drawSideBySide(ctx, frame, content, image, opts, imageSide = 'right') {
   if (!opts.skipOverlays) drawBrandBar(ctx, frame, palette, accent, false, { ...opts, safeArea });
   if (!opts.skipOverlays) drawQrOverlay(ctx, frame, opts.qr, opts.qrImage, palette);
   drawPartnerLogos(ctx, frame, opts.partners, palette);
+  drawGroupLockup(ctx, frame, opts.group, palette, opts.surface);
 }
 
 // ═══ LAYOUT · TABLE ══════════════════════════════════════════════════
@@ -2729,8 +2895,7 @@ function drawTable(ctx, frame, content, image, opts) {
   const { palette, accent } = opts;
   const bleed = frame.bleedPx || 0;
 
-  ctx.fillStyle = palette.bg;
-  ctx.fillRect(-bleed, -bleed, w + bleed * 2, h + bleed * 2);
+  paintSurface(ctx, frame, palette, opts.surface);
 
   const safeArea = { x: 0, y: 0, w, h };
   const clearance = brandBarClearance(ctx, frame, { ...opts, safeArea });
@@ -2852,6 +3017,7 @@ function drawTable(ctx, frame, content, image, opts) {
   if (!opts.skipOverlays) drawBrandBar(ctx, frame, palette, accent, false, { ...opts, safeArea });
   if (!opts.skipOverlays) drawQrOverlay(ctx, frame, opts.qr, opts.qrImage, palette);
   drawPartnerLogos(ctx, frame, opts.partners, palette);
+  drawGroupLockup(ctx, frame, opts.group, palette, opts.surface);
 }
 
 // ═══ LAYOUT · STAT ═══════════════════════════════════════════════════
@@ -2869,8 +3035,7 @@ function drawStat(ctx, frame, content, image, opts) {
   const { palette, accent, fit } = opts;
   const bleed = frame.bleedPx || 0;
 
-  ctx.fillStyle = palette.bg;
-  ctx.fillRect(-bleed, -bleed, w + bleed * 2, h + bleed * 2);
+  paintSurface(ctx, frame, palette, opts.surface);
 
   // An optional image sits BEHIND, heavily scrimmed: the figure must win.
   if (image) {
@@ -2951,6 +3116,7 @@ function drawStat(ctx, frame, content, image, opts) {
   if (!opts.skipOverlays) drawBrandBar(ctx, frame, palette, accent, false, { ...opts, safeArea });
   if (!opts.skipOverlays) drawQrOverlay(ctx, frame, opts.qr, opts.qrImage, palette);
   drawPartnerLogos(ctx, frame, opts.partners, palette);
+  drawGroupLockup(ctx, frame, opts.group, palette, opts.surface);
 }
 
 // ═══ LAYOUT · DUO ════════════════════════════════════════════════════
@@ -2973,8 +3139,7 @@ function drawDuo(ctx, frame, content, image, opts) {
   const { palette, accent, fit } = opts;
   const bleed = frame.bleedPx || 0;
 
-  ctx.fillStyle = palette.bg;
-  ctx.fillRect(-bleed, -bleed, w + bleed * 2, h + bleed * 2);
+  paintSurface(ctx, frame, palette, opts.surface);
 
   const safeArea = { x: 0, y: 0, w, h };
   const clearance = brandBarClearance(ctx, frame, { ...opts, safeArea });
@@ -3048,6 +3213,7 @@ function drawDuo(ctx, frame, content, image, opts) {
   if (!opts.skipOverlays) drawBrandBar(ctx, frame, palette, accent, false, { ...opts, safeArea });
   if (!opts.skipOverlays) drawQrOverlay(ctx, frame, opts.qr, opts.qrImage, palette);
   drawPartnerLogos(ctx, frame, opts.partners, palette);
+  drawGroupLockup(ctx, frame, opts.group, palette, opts.surface);
 }
 
 // ═══ LANYARD ═════════════════════════════════════════════════════════
@@ -3078,8 +3244,7 @@ function drawLanyardStrip(ctx, frame, content, image, opts) {
   const bleed = frame.bleedPx || 0;
   const cfg = { ...LANYARD_DEFAULTS, ...(opts.lanyard || {}) };
 
-  ctx.fillStyle = palette.bg;
-  ctx.fillRect(-bleed, -bleed, w + bleed * 2, h + bleed * 2);
+  paintSurface(ctx, frame, palette, opts.surface);
   const ink   = palette.mode === 'dark' ? BRAND.bone00 : BRAND.ink;
   const muted = palette.mode === 'dark' ? BRAND.cream100 : BRAND.ink600;
 
@@ -3170,6 +3335,7 @@ function drawLanyardStrip(ctx, frame, content, image, opts) {
   // Co-branded congresses put a partner mark on the strap too — raster, so it
   // goes in the image layer like everywhere else.
   drawPartnerLogos(ctx, frame, opts.partners, palette);
+  drawGroupLockup(ctx, frame, opts.group, palette, opts.surface);
 }
 
 // ─── LAYOUT 1: Image · Text split ────────────────────────────────────
@@ -3180,8 +3346,7 @@ function drawImageTextSplit(ctx, frame, content, image, opts, textPos) {
   const isWide = w / h > 1.4;
 
   // Bg fill — extended into bleed area so cut never reveals canvas background
-  ctx.fillStyle = palette.bg;
-  ctx.fillRect(-bleed, -bleed, w + bleed * 2, h + bleed * 2);
+  paintSurface(ctx, frame, palette, opts.surface);
 
   // Spanning bg placement defaults to 'full'. When set to 'image' it replaces
   // the per-slide image; 'text' fills only the text band; 'full' bleeds.
@@ -3281,6 +3446,7 @@ function drawImageTextSplit(ctx, frame, content, image, opts, textPos) {
   if (!opts.skipOverlays) drawQrOverlay(ctx, frame, opts.qr, opts.qrImage, palette);
   // Raster, so it belongs in the image layer — see drawPartnerLogos.
   drawPartnerLogos(ctx, frame, opts.partners, palette);
+  drawGroupLockup(ctx, frame, opts.group, palette, opts.surface);
 }
 
 // ─── LAYOUT 2: Full-bleed overlay ────────────────────────────────────
@@ -3294,8 +3460,7 @@ function drawFullBleedOverlay(ctx, frame, content, image, opts) {
   const bleed = frame.bleedPx || 0;
   const spanBg = opts.carouselBg?.image && opts.totalSlides > 1 ? opts.carouselBg : null;
   const spanPlacement = spanBg?.placement || 'full';
-  ctx.fillStyle = palette.bg;
-  ctx.fillRect(-bleed, -bleed, w + bleed * 2, h + bleed * 2);
+  paintSurface(ctx, frame, palette, opts.surface);
   if (image && !(spanBg && (spanPlacement === 'full' || spanPlacement === 'image'))) {
     drawImageFit(ctx, image, -bleed, -bleed, w + bleed * 2, h + bleed * 2, fit, palette.bg);
   } else if (spanBg && (spanPlacement === 'full' || spanPlacement === 'image')) {
@@ -3340,6 +3505,7 @@ function drawFullBleedOverlay(ctx, frame, content, image, opts) {
   if (!opts.skipOverlays) drawBrandBar(ctx, frame, overlayPalette, accent, true, opts);
   if (!opts.skipOverlays) drawQrOverlay(ctx, frame, opts.qr, opts.qrImage, overlayPalette);
   drawPartnerLogos(ctx, frame, opts.partners, overlayPalette);
+  drawGroupLockup(ctx, frame, opts.group, overlayPalette, opts.surface);
 }
 
 // Build the list of drawable text "tokens" for a content block. Each token
@@ -4409,7 +4575,18 @@ function drawBrandBar(ctx, frame, palette, accent, overlay, opts = {}) {
   } else if (opts.legibilityOut) {
     Object.assign(opts.legibilityOut, { best: 21, std: 0, safe: true, protected: false, mode: 'off' });
   }
-  drawWordmarkAt(ctx, frame, wm, wmColor, opts.formatKey, wmArea, opts.wordmarkPctOverride);
+  // THE GROUP MARK REPLACES THE MEDARTIS WORDMARK — it does not join it.
+  //
+  // "Medartis Group" and "medartis" are the house and the main brand under it.
+  // Showing both on one asset says the sender is two organisations. So when the
+  // Group is on, the wordmark slot is ITS slot, and drawGroupLockup fills it.
+  //
+  // This is a suppression, so it is done HERE, at the single place the wordmark is
+  // drawn, rather than by asking each layout to remember. A layout that forgot
+  // would double the mark and still look plausible.
+  if (!opts.group?.enabled) {
+    drawWordmarkAt(ctx, frame, wm, wmColor, opts.formatKey, wmArea, opts.wordmarkPctOverride);
+  }
 
   // Folio palette resolution — dim variants of the colour
   let folioPalette = opts.folioColor
@@ -4938,6 +5115,19 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
         formats: kitPdfs ? ['svg', 'pdf'] : ['svg'],
         clearSpace: logoClearSpace,
         pdfTools: { jsPDF, svg2pdf },
+        // The house and its brands. Colour + white for the ones that HAVE colours;
+        // the Group mark is monochrome, so offering it a "colour" variant would be
+        // a menu entry that produces the same file twice under different names.
+        groupMarks: [
+          { key: 'medartis_group', label: 'Medartis Group', mark: GROUP_MARK, variants: ['mono', 'white'] },
+          { key: 'neoortho', label: 'NeoOrtho', mark: NEOORTHO_MARK, variants: ['color', 'white', 'mono'] },
+          // Both KeriMedical builds ship, because the choice between them is a
+          // judgement about the asset, not a preference — and getting it wrong is
+          // silent. The README says which is which.
+          { key: 'kerimedical', label: 'KeriMedical', mark: KERIMEDICAL_FULL, variants: ['color', 'white', 'mono'] },
+          { key: 'kerimedical_no-byline', label: 'KeriMedical', mark: KERIMEDICAL_MARK, variants: ['color', 'white', 'mono'] },
+        ],
+        gradients: GROUP_GRADIENTS,
         onProgress: (done, total, label) => setKitProgress({ done, total, label }),
       });
       const url = URL.createObjectURL(makeZip(files));
@@ -4971,6 +5161,33 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
   const [partners, setPartners] = useState({
     enabled: true, size: 0.055, align: 'center', pos: 'bottom',
     plate: false, mono: false, label: 'IN COOPERATION WITH',
+  });
+
+  // MEDARTIS GROUP — the house, not a partnership.
+  //
+  // Kept separate from `partners` on purpose. Partners are strangers whose
+  // relationship must be spelled out ("IN COOPERATION WITH"); the sub-brands are
+  // owned, and saying that about KeriMedical would be a factual error. Sharing the
+  // state would make the two indistinguishable at the point where it matters.
+  const [group, setGroup] = useState({
+    enabled: false,
+    // Which co-brands ride along. OPTIONAL by definition — a Medartis Group asset
+    // is complete with the Group mark alone; naming KeriMedical and NeoOrtho is a
+    // choice about THIS asset, not a rule of the house.
+    // medartis is in here too. Once the Group mark leads, medartis is no longer the
+    // sender — it is one of the three brands under the house, exactly like the other
+    // two, and it appears (or not) on the same terms.
+    coBrands: { medartis: false, neoortho: false, kerimedical: false },
+    pos: 'bottom',             // top | bottom
+    variant: 'auto',           // auto | color | white | mono
+    size: 0.14,                // fraction of the SHORT EDGE — never of the canvas
+  });
+
+  // The surface: flat palette colour, or a Group gradient.
+  const [surface, setSurface] = useState({
+    enabled: false,
+    key: 'group',
+    gradient: { ...DEFAULT_GRADIENT, ...GROUP_GRADIENTS.group },
   });
 
   const baseFormat = FORMATS[formatKey];
@@ -5051,7 +5268,7 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
     palette, accent: accentColor,
     fit: brochurePage?.fit || DEFAULT_FIT,
     brochurePage, pageNumber: curBrochure + 1, brochureTitle,
-    partners: { ...partners, logos: partnerLogos },
+    partners: { ...partners, logos: partnerLogos }, surface, group,
   });
 
   useEffect(() => {
@@ -5411,7 +5628,7 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
       layout.draw(ctx, frame, activeContent, activeImage, {
         palette, accent: accentColor, fit: activeFit,
         lanyard, fitOut: fitRef.current, textOverflow,
-        partners: { ...partners, logos: partnerLogos },
+        partners: { ...partners, logos: partnerLogos }, surface, group,
       // Duo compares TWO pictures: the next carousel slide's image is the second
       // one. No new field — a layout that demands its own content model is a
       // layout nobody reaches for.
@@ -5458,7 +5675,7 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
         ctx.fill();
       }
     }
-  }, [format, layoutKey, activeContent, activeImage, activeFit, palette, carouselSlides, carouselSlide, wordmarkPos, folioPos, formatKey, wordmarkOverImage, folioOverImage, wordmarkColor, folioColor, folioText, qrConfig, qrImage, carouselBg, carouselBgImage, carouselQrPer, carouselFolioPer, textBackdrop, wordmarkPctOverride, wmReady, logoPlate, accentColor, isBrochure, brochurePage, brochureImgs, brochureTitle, curBrochure, partnerLogos, partners, lanyard, textOverflow]);
+  }, [format, layoutKey, activeContent, activeImage, activeFit, palette, carouselSlides, carouselSlide, wordmarkPos, folioPos, formatKey, wordmarkOverImage, folioOverImage, wordmarkColor, folioColor, folioText, qrConfig, qrImage, carouselBg, carouselBgImage, carouselQrPer, carouselFolioPer, textBackdrop, wordmarkPctOverride, wmReady, logoPlate, accentColor, isBrochure, brochurePage, brochureImgs, brochureTitle, curBrochure, partnerLogos, partners, lanyard, textOverflow, surface, group]);
 
   useEffect(() => { draw(); }, [draw]);
 
@@ -5627,7 +5844,7 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
         palette, accent: accentColor,
         fit: fitOverride ?? page?.fit ?? DEFAULT_FIT,
         brochurePage: page, pageNumber: pageNo || 1, brochureTitle,
-        partners: { ...partners, logos: partnerLogos },
+        partners: { ...partners, logos: partnerLogos }, surface, group,
       });
       return c;
     }
@@ -5640,7 +5857,7 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
       // derived: render the layout bare, and what is left is type and mark.
       imageOverride === 'none' ? null : (imageOverride ?? activeImage), {
       palette, accent: accentColor,
-      lanyard, textOverflow, partners: { ...partners, logos: partnerLogos },
+      lanyard, textOverflow, partners: { ...partners, logos: partnerLogos }, surface, group,
       // Duo compares TWO pictures: the next carousel slide's image is the second
       // one. No new field — a layout that demands its own content model is a
       // layout nobody reaches for.
@@ -7679,6 +7896,184 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
           })()}
         </Section>
 
+        <Section label={SEC('GROUP', 'MEDARTIS GROUP')} {...sp('GROUP')}>
+          {(() => {
+            const set = (patch) => setGroup((g) => ({ ...g, ...patch }));
+            const setSurf = (patch) => setSurface((v) => ({ ...v, ...patch }));
+            const lab = { display: 'block', fontFamily: BRAND.mono, fontSize: 9, letterSpacing: '0.1em',
+                          textTransform: 'uppercase', color: BRAND.ink600, marginBottom: 4 };
+            const pickGradient = (key) =>
+              setSurf({ key, gradient: { ...DEFAULT_GRADIENT, ...GROUP_GRADIENTS[key] } });
+            const g = surface.gradient;
+            // Where the ramp takes no ink at all. 2% on the sanctioned gradient — but
+            // it is shown rather than hidden, because type centred there fails
+            // whichever colour the sampler picks, and it fails without complaining.
+            const dead = surface.enabled ? deadZones(g, colorAt) : [];
+            return (
+              <>
+                <SidebarBtn active={group.enabled} onClick={() => set({ enabled: !group.enabled })}>
+                  {group.enabled ? 'Medartis Group branding' : 'medartis (main brand)'}
+                </SidebarBtn>
+                <div style={{ fontFamily: BRAND.mono, fontSize: 8.5, color: BRAND.ink300,
+                              lineHeight: 1.6, letterSpacing: '0.03em', margin: '6px 0 10px' }}>
+                  {group.enabled
+                    ? 'THE GROUP MARK STANDS IN PLACE OF THE MEDARTIS WORDMARK — THE HOUSE AND THE MAIN BRAND ARE NOT TWO SENDERS. MEDARTIS BECOMES ONE OF THE THREE CO-BRANDS BELOW, ON THE SAME TERMS AS THE OTHERS.'
+                    : 'THE MEDARTIS WORDMARK, AS USUAL. SWITCH ON FOR ASSETS SENT BY THE GROUP RATHER THAN BY MEDARTIS.'}
+                </div>
+
+                {group.enabled && (
+                  <>
+                    <label style={lab}>Co-brands · optional</label>
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 4, marginBottom: 4 }}>
+                      {['medartis', 'neoortho', 'kerimedical'].map((k) => (
+                        <SidebarBtn key={k} active={!!group.coBrands?.[k]}
+                                    onClick={() => set({ coBrands: { ...group.coBrands, [k]: !group.coBrands?.[k] } })}>
+                          {subBrandLabel(k)}
+                        </SidebarBtn>
+                      ))}
+                    </div>
+                    <div style={{ fontFamily: BRAND.mono, fontSize: 8.5, color: BRAND.ink300,
+                                  lineHeight: 1.6, letterSpacing: '0.03em', marginBottom: 10 }}>
+                      {(group.coBrands?.medartis || group.coBrands?.neoortho || group.coBrands?.kerimedical)
+                        ? `THEY SIT BENEATH THE GROUP — ITS BRANDS, NOT ITS PEERS. MATCHED ON OPTICAL AREA, NOT HEIGHT.${group.coBrands?.kerimedical ? ' KERIMEDICAL DROPS ITS "MEDARTIS GROUP" BYLINE HERE — UNDER THE GROUP MARK IT WOULD STATE THE SAME RELATIONSHIP TWICE.' : ''}`
+                        : 'A GROUP ASSET IS COMPLETE WITH THE GROUP MARK ALONE. ADD A CO-BRAND ONLY WHEN THIS PIECE IS ACTUALLY ABOUT IT.'}
+                    </div>
+
+                    <label style={lab}>Position</label>
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4, marginBottom: 10 }}>
+                      {[['top', 'Top'], ['bottom', 'Bottom']].map(([k, l]) => (
+                        <SidebarBtn key={k} active={group.pos === k} onClick={() => set({ pos: k })}>{l}</SidebarBtn>
+                      ))}
+                    </div>
+
+                    <label style={lab}>Size · {(group.size * 100).toFixed(0)}% of the short edge</label>
+                    <input type="range" min="3" max="40" value={Math.round(group.size * 100)}
+                           onChange={(e) => set({ size: +e.target.value / 100 })}
+                           style={{ width: '100%', marginBottom: 10 }} />
+
+                    <label style={lab}>Colour</label>
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: 4, marginBottom: 10 }}>
+                      {[['auto', 'Auto'], ['color', 'Brand'], ['white', 'White'], ['mono', 'Mono']].map(([k, l]) => (
+                        <SidebarBtn key={k} active={group.variant === k} onClick={() => set({ variant: k })}>{l}</SidebarBtn>
+                      ))}
+                    </div>
+                  </>
+                )}
+
+                <div style={{ borderTop: `1px solid ${BRAND.ink100}`, paddingTop: 10, marginTop: 4 }}>
+                  <SidebarBtn active={surface.enabled} onClick={() => setSurf({ enabled: !surface.enabled })}>
+                    {surface.enabled ? 'Gradient surface' : 'Flat palette colour'}
+                  </SidebarBtn>
+
+                  {surface.enabled && (
+                    <>
+                      <div style={{ height: 8 }} />
+                      <label style={lab}>Gradient · derived from the sub-brands</label>
+                      {Object.entries(GROUP_GRADIENTS).map(([k, def]) => (
+                        <button key={k} onClick={() => pickGradient(k)} title={def.derivation}
+                                style={{
+                                  display: 'flex', alignItems: 'center', gap: 8, width: '100%', marginBottom: 4,
+                                  padding: '5px 6px', cursor: 'pointer', textAlign: 'left',
+                                  border: `1px solid ${surface.key === k ? BRAND.ink : BRAND.ink100}`,
+                                  background: surface.key === k ? BRAND.bone : BRAND.paper,
+                                }}>
+                          <span style={{ width: 34, height: 16, flexShrink: 0,
+                                         background: `linear-gradient(90deg, ${def.from}, ${def.to})` }} />
+                          <span style={{ fontFamily: BRAND.mono, fontSize: 8.5, letterSpacing: '0.04em',
+                                         color: BRAND.ink600, lineHeight: 1.4 }}>{def.label}</span>
+                        </button>
+                      ))}
+
+                      <label style={{ ...lab, marginTop: 8 }}>Shape</label>
+                      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4, marginBottom: 8 }}>
+                        {[['linear', 'Linear'], ['radial', 'Radial']].map(([k, l]) => (
+                          <SidebarBtn key={k} active={(g.type ?? 'linear') === k}
+                                      onClick={() => setSurf({ gradient: { ...g, type: k } })}>{l}</SidebarBtn>
+                        ))}
+                      </div>
+
+                      {(g.type ?? 'linear') === 'linear' ? (
+                        <>
+                          <label style={lab}>Angle · {g.angle}°</label>
+                          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 4, marginBottom: 4 }}>
+                            {Object.entries(ANGLE_PRESETS).map(([k, a]) => (
+                              <SidebarBtn key={k} active={g.angle === a.angle}
+                                          onClick={() => setSurf({ gradient: { ...g, angle: a.angle } })}>{a.label}</SidebarBtn>
+                            ))}
+                          </div>
+                          <input type="range" min="0" max="359" value={g.angle}
+                                 onChange={(e) => setSurf({ gradient: { ...g, angle: +e.target.value } })}
+                                 style={{ width: '100%', marginBottom: 6 }} />
+                        </>
+                      ) : (
+                        <>
+                          <label style={lab}>Centre · {((g.cx ?? 0.5) * 100).toFixed(0)}% / {((g.cy ?? 0.5) * 100).toFixed(0)}%</label>
+                          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4, marginBottom: 6 }}>
+                            <input type="range" min="0" max="100" value={Math.round((g.cx ?? 0.5) * 100)}
+                                   onChange={(e) => setSurf({ gradient: { ...g, cx: +e.target.value / 100 } })} />
+                            <input type="range" min="0" max="100" value={Math.round((g.cy ?? 0.5) * 100)}
+                                   onChange={(e) => setSurf({ gradient: { ...g, cy: +e.target.value / 100 } })} />
+                          </div>
+                          <label style={lab}>Radius · {((g.r ?? 0.7) * 100).toFixed(0)}%</label>
+                          <input type="range" min="10" max="150" value={Math.round((g.r ?? 0.7) * 100)}
+                                 onChange={(e) => setSurf({ gradient: { ...g, r: +e.target.value / 100 } })}
+                                 style={{ width: '100%', marginBottom: 6 }} />
+                        </>
+                      )}
+
+                      <label style={lab}>Band · {Math.round((g.start ?? 0) * 100)}–{Math.round((g.end ?? 1) * 100)}%</label>
+                      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4, marginBottom: 2 }}>
+                        <input type="range" min="0" max="100" value={Math.round((g.start ?? 0) * 100)}
+                               onChange={(e) => setSurf({ gradient: { ...g, start: Math.min(+e.target.value / 100, (g.end ?? 1) - 0.02) } })} />
+                        <input type="range" min="0" max="100" value={Math.round((g.end ?? 1) * 100)}
+                               onChange={(e) => setSurf({ gradient: { ...g, end: Math.max(+e.target.value / 100, (g.start ?? 0) + 0.02) } })} />
+                      </div>
+                      <div style={{ fontFamily: BRAND.mono, fontSize: 8, color: BRAND.ink300,
+                                    letterSpacing: '0.03em', marginBottom: 8 }}>
+                        OUTSIDE THE BAND THE COLOUR IS FLAT — THAT IS WHAT IT IS FOR.
+                      </div>
+
+                      <label style={lab}>Midpoint · {(g.midpoint ?? 0.5).toFixed(2)}</label>
+                      <input type="range" min="5" max="95" value={Math.round((g.midpoint ?? 0.5) * 100)}
+                             onChange={(e) => setSurf({ gradient: { ...g, midpoint: +e.target.value / 100 } })}
+                             style={{ width: '100%', marginBottom: 6 }} />
+
+                      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4, marginBottom: 8 }}>
+                        {[['smooth', 'Smooth'], ['linear', 'Linear']].map(([k, l]) => (
+                          <SidebarBtn key={k} active={(g.easing ?? 'smooth') === k}
+                                      onClick={() => setSurf({ gradient: { ...g, easing: k } })}>{l}</SidebarBtn>
+                        ))}
+                      </div>
+
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                                    gap: 6, marginTop: 4, marginBottom: 6 }}>
+                        <span style={{ fontFamily: BRAND.mono, fontSize: 8.5, letterSpacing: '0.04em',
+                                       color: BRAND.ink600 }}>{describeGradient(g).toUpperCase()}</span>
+                        <button onClick={() => pickGradient(surface.key)}
+                                style={{ fontFamily: BRAND.mono, fontSize: 8.5, letterSpacing: '0.06em',
+                                         padding: '3px 6px', cursor: 'pointer', border: `1px solid ${BRAND.ink100}`,
+                                         background: BRAND.paper, color: BRAND.ink600 }}>RESET</button>
+                      </div>
+
+                      {dead.length > 0 && (
+                        <div style={{ fontFamily: BRAND.mono, fontSize: 8.5, lineHeight: 1.6,
+                                      letterSpacing: '0.03em', color: BRAND.goldDeep,
+                                      borderLeft: `2px solid ${BRAND.gold}`, paddingLeft: 6, marginTop: 6 }}>
+                          {`CROSSOVER AT ${(dead[0].from * 100).toFixed(0)}–${(dead[0].to * 100).toFixed(0)}% OF THE RAMP: WHITE AND COAL BOTH FALL UNDER 4.5:1 THERE. IT IS ${((dead.reduce((m, z) => Math.max(m, z.to - z.from), 0)) * 100).toFixed(0)}% WIDE — KEEP TYPE OFF IT, OR PUT A BACKDROP UNDER THE TEXT.`}
+                        </div>
+                      )}
+                      <div style={{ fontFamily: BRAND.mono, fontSize: 8.5, color: BRAND.ink300, lineHeight: 1.6,
+                                    letterSpacing: '0.03em', marginTop: 8 }}>
+                        {(GROUP_GRADIENTS[surface.key]?.derivation || '').toUpperCase()}
+                      </div>
+                    </>
+                  )}
+                </div>
+              </>
+            );
+          })()}
+        </Section>
+
         <Section label={SEC('PARTNERS', 'PARTNER LOGOS')} {...sp('PARTNERS')}>
           {(() => {
             const set = (patch) => setPartners((p) => ({ ...p, ...patch }));
@@ -8743,7 +9138,7 @@ const SECTION_ORDER = [
   // 2 · Story — TEMPLATE and BROCHURE are alternates; exactly one is ever visible
   'TEMPLATE', 'BROCHURE',
   // 3 · Brand system
-  'LANYARD', 'SURFACE', 'BRANDBAR', 'LOGOFILES', 'PARTNERS', 'TEXTBG', 'QR', 'CAROUSEL', 'CAROUSEL_BG', 'CONTENT',
+  'LANYARD', 'SURFACE', 'BRANDBAR', 'LOGOFILES', 'GROUP', 'PARTNERS', 'TEXTBG', 'QR', 'CAROUSEL', 'CAROUSEL_BG', 'CONTENT',
   // 4 · Imagery
   'IMAGE', 'GENERATE', 'CANTO', 'IMAGEFIT',
   // 5 · Output

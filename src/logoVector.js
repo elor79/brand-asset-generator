@@ -51,6 +51,45 @@ ${body}
 `;
 }
 
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MULTI-COLOUR MARKS (the Group and the sub-brands)
+// ─────────────────────────────────────────────────────────────────────────────
+// buildLogoSvg above takes `paths` as an array of `d` STRINGS and wraps them in a
+// single <g fill="...">, because the medartis wordmark is one colour by definition.
+//
+// The sub-brands are not. NeoOrtho is violet AND teal; KeriMedical is blue AND
+// grey. Pushing them through the single-fill path would silently flatten each to
+// one colour — the file would open, look almost right, and be wrong. So they get
+// their own builder rather than a hopeful reuse of this one.
+export function buildMarkSvg({ mark, label, variant = 'color', inkColor = '#131310', clearSpace = true, height = 1000 }) {
+  if (!mark?.paths?.length) throw new Error(`${label}: mark geometry is missing.`);
+  const { view, glyph } = mark;
+  const box = clearSpace
+    ? { x: 0, y: 0, w: view.w, h: view.h }
+    : { x: glyph.x, y: glyph.y, w: glyph.w, h: glyph.h };
+  const scale = height / box.h;
+  const wOut = +(box.w * scale).toFixed(2);
+  const hOut = +(box.h * scale).toFixed(2);
+
+  const body = mark.paths.map((p) => {
+    const fill = variant === 'white' ? '#FFFFFF'
+               : variant === 'mono'  ? inkColor
+               : (p.fill || inkColor);
+    return `    <path fill="${fill}" d="${p.d}"/>`;
+  }).join('\n');
+
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="${wOut}" height="${hOut}"
+     viewBox="${box.x} ${box.y} ${box.w} ${box.h}"
+     role="img" aria-label="${label}">
+  <title>${label}</title>
+${body}
+</svg>
+`;
+}
+
 /** SVG string → a jsPDF document sized exactly to the artwork. */
 export async function svgToPdf(svg, { jsPDF, svg2pdf }) {
   if (!jsPDF || !svg2pdf) throw new Error('PDF tools were not provided.');
@@ -98,11 +137,20 @@ export async function buildBrandKit({
   formats = ['svg', 'pdf'],
   clearSpace = true,
   pdfTools = null,           // { jsPDF, svg2pdf } — required if 'pdf' is asked for
+  groupMarks = null,         // [{ key, label, mark, variants: [...] }] — the house
+  gradients = null,          // { key: { from, to, label, derivation } }
   onProgress = () => {},
 } = {}) {
   const files = [];
   const entries = Object.entries(colors);
-  const total = entries.length * formats.length + 2;
+  const groupJobs = (groupMarks || []).flatMap((m) =>
+    (m.variants || ['color']).map((v) => ({ ...m, variant: v }))
+  );
+  // The total must count the Group work too, or the progress bar reaches 100% and
+  // then keeps going — which reads as a hang.
+  const total = entries.length * formats.length
+              + groupJobs.length * formats.length
+              + 2 + (gradients ? 1 : 0);
   let done = 0;
   const step = (label) => onProgress(++done, total, label);   // positional, as in the IBRA kit
 
@@ -122,6 +170,46 @@ export async function buildBrandKit({
     }
   }
 
+  // ── The Group and sub-brand marks ──────────────────────────────────────────
+  for (const job of groupJobs) {
+    const svg = buildMarkSvg({
+      mark: job.mark, label: job.label, variant: job.variant,
+      inkColor: brand?.ink || '#131310', clearSpace,
+    });
+    const base = `${job.key}_${job.variant}`;
+    if (formats.includes('svg')) {
+      files.push({ name: `logos/group/svg/${base}.svg`, data: svg });
+      step(`${base}.svg`);
+    }
+    if (formats.includes('pdf')) {
+      if (!pdfTools) throw new Error('PDF was requested but no PDF tools were provided.');
+      const pdf = await svgToPdf(svg, pdfTools);
+      files.push({ name: `logos/group/pdf/${base}.pdf`, data: new Uint8Array(pdf.output('arraybuffer')) });
+      step(`${base}.pdf`);
+    }
+  }
+
+  if (gradients) {
+    // Every gradient, with the RULE that produced it. A hex list without the
+    // derivation is how the next person "improves" the teal.
+    const lines = Object.entries(gradients).map(([k, g]) =>
+      `${k.padEnd(14)} ${g.from.toUpperCase()} -> ${g.to.toUpperCase()}\n${' '.repeat(14)} ${g.label}\n${' '.repeat(14)} ${g.derivation || ''}\n`
+    ).join('\n');
+    files.push({
+      name: 'gradients.txt',
+      data: `MEDARTIS GROUP · GRADIENTS\n${'='.repeat(60)}\n\n`
+          + `THE RULE\n`
+          + `  Every endpoint is a colour OWNED by a sub-brand, or a computed shade\n`
+          + `  of one. Nothing is invented, and nothing is blended into existence to\n`
+          + `  "bridge" two brand colours -- that intermediate belongs to nobody.\n\n`
+          + lines
+          + `\nNOT A GRADIENT ENDPOINT\n`
+          + `  KeriMedical grey is a real brand colour and a bad ramp end: white type\n`
+          + `  fails on it and dark type goes muddy. Use it as a rule line.\n`,
+    });
+    step('gradients.txt');
+  }
+
   const palette = Object.entries(brand ?? {})
     .filter(([, v]) => typeof v === 'string' && /^#[0-9a-f]{6}$/i.test(v))
     .map(([k, v]) => `${k.padEnd(12)} ${v.toUpperCase()}`)
@@ -137,6 +225,33 @@ WHICH FILE?
   _bone   light artwork — for dark surfaces (coal) and over photography
   Never recolour the mark to anything else, and never place the dark mark on a
   dark surface "because it still reads". It does not.
+
+THE GROUP, AND ITS BRANDS  (logos/group/)
+  Medartis Group          the house
+    |-- medartis          the main brand  (the wordmark above)
+    |-- KeriMedical
+    +-- NeoOrtho
+
+  The Group mark REPLACES the medartis wordmark. It does not join it: an asset
+  showing both says it was sent by two organisations.
+
+  kerimedical              WITH the "medartis group" byline. Use when KeriMedical
+                           appears ALONE — the byline is the only thing naming its
+                           parent.
+  kerimedical_no-byline    WITHOUT it. Use under the Medartis Group mark, where the
+                           byline would state the same relationship a second time,
+                           in the opposite direction.
+
+  Both ship because choosing wrongly is silent — the file opens, it looks right,
+  and it says the same thing twice.
+
+  _color   the brand's own colours (NeoOrtho violet/teal, KeriMedical blue/grey)
+  _white   negative artwork, for dark or saturated surfaces
+  _mono    single-colour, for gradients and anywhere colour cannot survive
+
+  The Medartis Group mark is monochrome by design; it ships _mono and _white only.
+
+  See gradients.txt for the ramps and the rule that produced them.
 
 CLEAR SPACE
   ${clearSpace ? 'BAKED IN' : 'NOT INCLUDED — these files are cropped tight to the glyphs'}
