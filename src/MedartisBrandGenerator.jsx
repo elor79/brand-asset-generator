@@ -22,7 +22,7 @@ import {
   applyCanvasGradient, gradientToSvgDefs, describeGradient,
 } from './gradient';
 import {
-  GROUP_MARK, NEOORTHO_MARK, KERIMEDICAL_MARK, KERIMEDICAL_FULL, SUB_BRANDS,
+  GROUP_MARK, NEOORTHO_MARK, KERIMEDICAL_MARK, CO_BRANDS, markGeometry, SUB_BRANDS,
   GROUP_GRADIENTS, GROUP_RULE_COLOR, markPaths, clearSpaceFor, legibleInkAt, deadZones,
 } from './groupBrands';
 import { familyRow, endorsedLockup, FAMILY_ORDER, MARK_BY_KEY, subBrandLabel } from './groupLockup';
@@ -1780,6 +1780,9 @@ const WM_GLYPH = { x: 91.89, y: 91.89, w: 342.98, h: 61.30 };
 // Group. Those are two different pieces of artwork, and the family row was drawing
 // the Group mark in the medartis slot: a lockup that names the house three times
 // and the main brand not at all. It rendered perfectly.
+const markAsFull  = (m) => ({ ...m, ...markGeometry(m, true) });
+const markAsBrand = (m) => ({ ...m, ...markGeometry(m, false) });
+
 const MEDARTIS_WORDMARK_MARK = {
   view: WM_VIEW,
   glyph: WM_GLYPH,
@@ -2676,19 +2679,26 @@ function drawGroupLockup(ctx, frame, group, palette, surface) {
   //
   // AND THE CO-BRANDS LOSE THEIR BYLINE.
   //
-  // KeriMedical's supplied artwork carries a "medartis group" byline — it exists so
-  // the brand can name its parent when it appears ALONE. Directly beneath the
-  // Medartis Group mark it states the same relationship a second time, in the
-  // opposite direction. So under a Group lead the byline comes off, and KeriMedical
-  // uses the brand paths only. Standing alone (Group off) it keeps it.
-  const kmMark = group.enabled ? KERIMEDICAL_MARK : KERIMEDICAL_FULL;
-  // Order follows the hierarchy, not the checkbox order: medartis is the main brand
-  // and reads first among the three.
+  // BOTH of them. KeriMedical says so in its file (<g id="medartis_group">, and a
+  // shipped build that hides it with display:none). NeoOrtho carries the same byline
+  // as bare outlines with no group and no text to grep for — which is exactly why it
+  // was still rendering "NeoOrtho / medartis group" directly beneath the Medartis
+  // Group mark, saying the same thing twice, in opposite directions.
+  //
+  // Under the Group mark the byline comes off. Standing alone it stays: away from
+  // the house mark it is the only thing naming the parent.
+  const withByline = !group.enabled;
   const cobs = [
-    group.coBrands?.medartis && MEDARTIS_WORDMARK_MARK,
-    group.coBrands?.neoortho && NEOORTHO_MARK,
-    group.coBrands?.kerimedical && kmMark,
-  ].filter(Boolean);
+    group.coBrands?.medartis && { mark: MEDARTIS_WORDMARK_MARK, withByline: true },
+    group.coBrands?.neoortho && { mark: NEOORTHO_MARK, withByline },
+    group.coBrands?.kerimedical && { mark: KERIMEDICAL_MARK, withByline },
+  ].filter(Boolean).map(({ mark, withByline: wb }) => {
+    const g = markGeometry(mark, wb);
+    // familyRow lays out by glyph aspect, so it must be given the glyph that
+    // matches the paths it will actually draw — a byline-off mark measured with
+    // the byline's height reserves space for artwork that is not there.
+    return { ...mark, glyph: g.glyph, paths: g.paths };
+  });
 
   let rects;
   if (!cobs.length) {
@@ -2699,7 +2709,7 @@ function drawGroupLockup(ctx, frame, group, palette, surface) {
     const rowH = boxH - headH - gapY;
     rects = [
       ...familyRow([GROUP_MARK], { x: padX, y, w: boxW, h: headH, align: 'center' }),
-      ...familyRow(cobs, { x: padX, y: y + headH + gapY, w: boxW, h: rowH, align: 'center' }),
+      ...familyRow(cobs, { x: padX, y: y + headH + gapY, w: boxW, h: rowH, align: 'center', gapRatio: group.gap ?? 0.9 }),
     ];
   }
   if (!rects?.length) return null;
@@ -5120,12 +5130,14 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
         // a menu entry that produces the same file twice under different names.
         groupMarks: [
           { key: 'medartis_group', label: 'Medartis Group', mark: GROUP_MARK, variants: ['mono', 'white'] },
-          { key: 'neoortho', label: 'NeoOrtho', mark: NEOORTHO_MARK, variants: ['color', 'white', 'mono'] },
-          // Both KeriMedical builds ship, because the choice between them is a
+          // Both builds of BOTH co-brands ship: with the "medartis group" byline for
+          // standing alone, without it for use under the Group mark. The choice is a
           // judgement about the asset, not a preference — and getting it wrong is
           // silent. The README says which is which.
-          { key: 'kerimedical', label: 'KeriMedical', mark: KERIMEDICAL_FULL, variants: ['color', 'white', 'mono'] },
-          { key: 'kerimedical_no-byline', label: 'KeriMedical', mark: KERIMEDICAL_MARK, variants: ['color', 'white', 'mono'] },
+          { key: 'neoortho', label: 'NeoOrtho', mark: markAsFull(NEOORTHO_MARK), variants: ['color', 'white', 'mono'] },
+          { key: 'neoortho_no-byline', label: 'NeoOrtho', mark: markAsBrand(NEOORTHO_MARK), variants: ['color', 'white', 'mono'] },
+          { key: 'kerimedical', label: 'KeriMedical', mark: markAsFull(KERIMEDICAL_MARK), variants: ['color', 'white', 'mono'] },
+          { key: 'kerimedical_no-byline', label: 'KeriMedical', mark: markAsBrand(KERIMEDICAL_MARK), variants: ['color', 'white', 'mono'] },
         ],
         gradients: GROUP_GRADIENTS,
         onProgress: (done, total, label) => setKitProgress({ done, total, label }),
@@ -5181,6 +5193,9 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
     pos: 'bottom',             // top | bottom
     variant: 'auto',           // auto | color | white | mono
     size: 0.14,                // fraction of the SHORT EDGE — never of the canvas
+    // The space between co-brands, as a fraction of their own drawn height — not of
+    // the canvas and not of the box, so it holds its proportion at every format.
+    gap: 0.9,
   });
 
   // The surface: flat palette colour, or a Group gradient.
@@ -7937,6 +7952,15 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
                       {(group.coBrands?.medartis || group.coBrands?.neoortho || group.coBrands?.kerimedical)
                         ? `THEY SIT BENEATH THE GROUP — ITS BRANDS, NOT ITS PEERS. MATCHED ON OPTICAL AREA, NOT HEIGHT.${group.coBrands?.kerimedical ? ' KERIMEDICAL DROPS ITS "MEDARTIS GROUP" BYLINE HERE — UNDER THE GROUP MARK IT WOULD STATE THE SAME RELATIONSHIP TWICE.' : ''}`
                         : 'A GROUP ASSET IS COMPLETE WITH THE GROUP MARK ALONE. ADD A CO-BRAND ONLY WHEN THIS PIECE IS ACTUALLY ABOUT IT.'}
+                    </div>
+
+                    <label style={lab}>Space between co-brands · {(group.gap ?? 0.9).toFixed(2)}×</label>
+                    <input type="range" min="10" max="250" value={Math.round((group.gap ?? 0.9) * 100)}
+                           onChange={(e) => set({ gap: +e.target.value / 100 })}
+                           style={{ width: '100%', marginBottom: 2 }} />
+                    <div style={{ fontFamily: BRAND.mono, fontSize: 8, color: BRAND.ink300,
+                                  letterSpacing: '0.03em', marginBottom: 10 }}>
+                      A MULTIPLE OF THE MARKS' OWN HEIGHT — SO IT HOLDS ITS PROPORTION AT EVERY FORMAT.
                     </div>
 
                     <label style={lab}>Position</label>

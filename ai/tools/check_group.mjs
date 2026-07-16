@@ -18,7 +18,7 @@
 //
 //     node ai/tools/check_group.mjs
 import { GROUP_GRADIENTS, SUB_BRANDS, GROUP_MARK, NEOORTHO_MARK, KERIMEDICAL_MARK, shade, GROUP_RULE_COLOR,
-  deadZones, legibleInkAt, pathBounds, KERIMEDICAL_FULL } from '../../src/groupBrands.js';
+  deadZones, legibleInkAt, pathBounds, markGeometry } from '../../src/groupBrands.js';
 import { colorAt } from '../../src/gradient.js';
 import fs from 'node:fs';
 
@@ -35,7 +35,10 @@ for (const [k, m] of Object.entries(MARKS)) {
   // `view` only proves the numbers are self-consistent — it passes happily after the
   // path data has been corrupted, which is worse than not checking at all, because
   // clear space is computed from these bounds.
-  const measured = pathBounds(m.paths);
+  // `glyph` describes the BRAND, not the byline — the lockup reserves space for
+  // what it will actually draw. So re-measure from the elements that survive the
+  // byline coming off.
+  const measured = pathBounds(m.paths.filter((p) => !p.byline));
   if (!measured) { bad(`${k}: path data does not parse`); continue; }
   const drift = ['x', 'y', 'w', 'h'].map((a) => Math.abs(measured[a] - g[a]));
   const worst = Math.max(...drift);
@@ -48,32 +51,57 @@ for (const [k, m] of Object.entries(MARKS)) {
   }
 }
 
-// ── 1b. The KeriMedical byline ───────────────────────────────────────────────
-// The supplied file is KeriMedical_medartis_Group_Logo.svg — the artwork carries a
-// "medartis group" byline in its own <g>. Under the Group mark that byline states
-// the relationship twice, so it must be SEPARABLE. If someone ever merges it back
-// into `paths`, the lockup silently starts repeating itself.
+// ── 1b. The byline, on BOTH co-brands ────────────────────────────────────────
+// Both files carry a "medartis group" byline. KeriMedical announces it with a
+// <g id="medartis_group">; NeoOrtho does not — its byline is bare outlines, which
+// is how it went on rendering underneath the Group mark unnoticed.
+//
+// So neither is trusted to declare itself: each must FLAG the byline, and the
+// flagged elements must sit below the brand. check_artwork.mjs proves the flags
+// match the real files.
 console.log('');
-{
-  const m = MARKS.kerimedical;
-  if (!m.byline?.length) {
-    bad('kerimedical: the medartis-group byline is gone from the mark — KeriMedical standing alone then names no parent');
-  } else if (m.paths.some((p) => m.byline.some((b) => b.d === p.d))) {
-    bad('kerimedical: byline paths are ALSO in `paths` — under the Group mark the lockup would say "a medartis group company" beneath "Medartis Group"');
-  } else {
-    const bb = pathBounds(m.byline), br = pathBounds(m.paths);
-    if (bb.y < br.y + br.h) bad(`kerimedical: the byline (y ${bb.y.toFixed(1)}) overlaps the brand (ends ${(br.y + br.h).toFixed(1)})`);
-    else ok(`kerimedical  byline separable: ${m.byline.length} paths at y ${bb.y.toFixed(1)}–${(bb.y + bb.h).toFixed(1)}, beneath the brand`);
+for (const key of ['neoortho', 'kerimedical']) {
+  const m = MARKS[key];
+  const byl = m.paths.filter((p) => p.byline);
+  const brand = m.paths.filter((p) => !p.byline);
+  if (!byl.length) {
+    bad(`${key}: no byline flagged. Both co-brands have one — if this mark truly lost it, say so here rather than letting the lockup repeat itself.`);
+    continue;
   }
-  // FULL must be brand + byline, and its bounds must span both.
-  const full = pathBounds(KERIMEDICAL_FULL.paths);
-  const drift = ['x', 'y', 'w', 'h'].map((a) => Math.abs(full[a] - KERIMEDICAL_FULL.glyph[a]));
-  if (KERIMEDICAL_FULL.paths.length !== m.paths.length + m.byline.length) {
-    bad('KERIMEDICAL_FULL is not brand + byline');
-  } else if (Math.max(...drift) > 0.01) {
-    bad(`KERIMEDICAL_FULL glyph drifted from its paths by ${Math.max(...drift).toFixed(2)}`);
+  const bb = pathBounds(byl), br = pathBounds(brand);
+  // NOT "strictly below the brand". That rule sounds obvious and is false:
+  // KeriMedical's tilted stroke descends to y=130, running down PAST the byline at
+  // y=93-114. The artwork disproved the rule, so the rule goes — inventing a
+  // geometric law and then trusting it over the real files is how you end up
+  // "fixing" correct artwork.
+  //
+  // What is true: the byline sits in the lower part of the mark. And the authority
+  // for the split is check_artwork.mjs, which diffs the flags against the brands'
+  // own byline-off builds.
+  const brandMid = br.y + br.h / 2;
+  if (bb.y < brandMid) {
+    bad(`${key}: the flagged byline starts at y ${bb.y.toFixed(1)}, above the mark's middle (${brandMid.toFixed(1)}) — that is not a byline`);
   } else {
-    ok(`kerimedical  standalone (with byline) ${full.w.toFixed(1)}×${full.h.toFixed(1)} — for use away from the Group mark`);
+    const off = markGeometry(m, false), on = markGeometry(m, true);
+    // NOT "byline-off must be SHORTER". Also false, and again the artwork said so:
+    // KeriMedical's tilted stroke reaches y=130.2, below the byline's own bottom at
+    // 114.1, so dropping the byline changes the width and not the height at all.
+    //
+    // What must hold is containment: removing elements can never make the mark
+    // cover MORE ground. That is true of every mark, it catches a stale `glyph`
+    // (the thing clear space is computed from), and it does not pretend to know
+    // where a brand chose to put its own strokes.
+    const grew = off.glyph.x < on.glyph.x - 0.01 || off.glyph.y < on.glyph.y - 0.01
+              || off.glyph.x + off.glyph.w > on.glyph.x + on.glyph.w + 0.01
+              || off.glyph.y + off.glyph.h > on.glyph.y + on.glyph.h + 0.01;
+    if (grew) {
+      bad(`${key}: byline-off bounds (${off.glyph.w.toFixed(1)}×${off.glyph.h.toFixed(1)}) fall outside byline-on (${on.glyph.w.toFixed(1)}×${on.glyph.h.toFixed(1)}) — removing artwork cannot enlarge the mark, so a glyph is stale`);
+    } else if (off.paths.length >= on.paths.length) {
+      bad(`${key}: byline-off draws ${off.paths.length} elements, byline-on ${on.paths.length} — the flag is doing nothing`);
+    } else {
+      ok(`${key.padEnd(12)} byline separable: ${byl.length} of ${m.paths.length} elements, y ${bb.y.toFixed(0)}–${(bb.y + bb.h).toFixed(0)}`);
+      ok(`${key.padEnd(12)} off ${off.paths.length} els ${off.glyph.w.toFixed(0)}×${off.glyph.h.toFixed(0)} ⊆ on ${on.paths.length} els ${on.glyph.w.toFixed(0)}×${on.glyph.h.toFixed(0)}`);
+    }
   }
 }
 
