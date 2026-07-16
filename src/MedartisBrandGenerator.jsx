@@ -2645,7 +2645,7 @@ function drawTypeOnly(ctx, frame, content, image, opts) {
   // is not — a block on the mathematical centre reads as having slipped.
   const band = bottom - top;
   const anchorY = top + band * 0.46;
-  const tFrame = { ...frame, textMaxH: Math.max(80, band), fitOut: opts.fitOut };
+  const tFrame = { ...frame, textMaxH: Math.max(80, band), fitOut: opts.fitOut, textOverflow: opts.textOverflow };
 
   // Measure first so the block can be centred on its own height rather than
   // hung from an arbitrary line.
@@ -2699,7 +2699,7 @@ function drawSideBySide(ctx, frame, content, image, opts, imageSide = 'right') {
   const top = Math.max(padY * 1.3, clearance.topY);
   const bottom = Math.min(h - padY * 1.3, clearance.bottomY);
   const textW = w - imgW - padX * 2;
-  const tFrame = { ...frame, textMaxH: Math.max(80, bottom - top), fitOut: opts.fitOut };
+  const tFrame = { ...frame, textMaxH: Math.max(80, bottom - top), fitOut: opts.fitOut, textOverflow: opts.textOverflow };
 
   const probe = layoutTextElements(ctx, content, textX, 0, textW, palette, accent, tFrame, 'top');
   const blockH = probe.length
@@ -2745,15 +2745,11 @@ function drawTable(ctx, frame, content, image, opts) {
 
   // ── head: kicker → rule → headline. The house sequence, unchanged.
   if (content.eyebrow) {
-    ctx.font = `500 ${ts.eyebrowSize}px ${BRAND.mono}`;
-    ctx.fillStyle = accent;
-    const ls = ts.eyebrowSize * 0.14;
-    let cx = x;
-    for (const ch of content.eyebrow.toUpperCase()) {
-      ctx.fillText(ch, cx, y + ts.eyebrowSize);
-      cx += ctx.measureText(ch).width + ls;
-    }
-    y += ts.eyebrowSize * 2.4;
+    // drawTrackedFit, not a bare per-char loop: this column is full width TODAY,
+    // which is the only reason the overflow was invisible here. Latent is not fixed.
+    const r = drawTrackedFit(ctx, content.eyebrow.toUpperCase(), x, y + ts.eyebrowSize,
+      tw, ts.eyebrowSize, 500, BRAND.mono, 0.14, accent);
+    y += ts.eyebrowSize * 2.4 + r.extra;
   }
   if (content.headline) {
     const size = fitFont(ctx, content.headline.split('\n')[0], tw, ts.headlineMax * 0.72, ts.headlineMin, 700);
@@ -2849,14 +2845,8 @@ function drawTable(ctx, frame, content, image, opts) {
   }
 
   if (content.cta) {
-    ctx.font = `500 ${ts.ctaSize}px ${BRAND.mono}`;
-    ctx.fillStyle = accent;
-    const ls = ts.ctaSize * 0.12;
-    let cx = x;
-    for (const ch of content.cta.toUpperCase()) {
-      ctx.fillText(ch, cx, Math.min(bottom, h - padY * 0.7));
-      cx += ctx.measureText(ch).width + ls;
-    }
+    drawTrackedFit(ctx, content.cta.toUpperCase(), x, Math.min(bottom, h - padY * 0.7),
+      tw, ts.ctaSize, 500, BRAND.mono, 0.12, accent);
   }
 
   if (!opts.skipOverlays) drawBrandBar(ctx, frame, palette, accent, false, { ...opts, safeArea });
@@ -2929,12 +2919,9 @@ function drawStat(ctx, frame, content, image, opts) {
 
   for (const b of blocks) {
     if (b.k === 'eyebrow') {
-      ctx.font = `500 ${b.size}px ${BRAND.mono}`;
-      ctx.fillStyle = accent;
-      const ls = b.size * 0.14;
-      let cx = padX;
-      for (const ch of content.eyebrow.toUpperCase()) { ctx.fillText(ch, cx, y + b.size); cx += ctx.measureText(ch).width + ls; }
-      y += b.size * (1.2 + gap.eyebrow);
+      const r = drawTrackedFit(ctx, content.eyebrow.toUpperCase(), padX, y + b.size,
+        tw, b.size, 500, BRAND.mono, 0.14, accent);
+      y += b.size * (1.2 + gap.eyebrow) + r.extra;
     } else if (b.k === 'figure') {
       ctx.font = `700 ${b.size}px ${BRAND.display}`;
       ctx.fillStyle = palette.ink;
@@ -2957,11 +2944,8 @@ function drawStat(ctx, frame, content, image, opts) {
   }
 
   if (content.cta) {
-    ctx.font = `500 ${ts.ctaSize}px ${BRAND.mono}`;
-    ctx.fillStyle = accent;
-    const ls = ts.ctaSize * 0.12;
-    let cx = padX;
-    for (const ch of content.cta.toUpperCase()) { ctx.fillText(ch, cx, Math.min(bottom, h - padY * 0.7)); cx += ctx.measureText(ch).width + ls; }
+    drawTrackedFit(ctx, content.cta.toUpperCase(), padX, Math.min(bottom, h - padY * 0.7),
+      tw, ts.ctaSize, 500, BRAND.mono, 0.12, accent);
   }
 
   if (!opts.skipOverlays) drawBrandBar(ctx, frame, palette, accent, false, { ...opts, safeArea });
@@ -3003,12 +2987,9 @@ function drawDuo(ctx, frame, content, image, opts) {
   const tw = w - padX * 2;
 
   if (content.eyebrow) {
-    ctx.font = `500 ${ts.eyebrowSize}px ${BRAND.mono}`;
-    ctx.fillStyle = accent;
-    const ls = ts.eyebrowSize * 0.14;
-    let cx = x;
-    for (const ch of content.eyebrow.toUpperCase()) { ctx.fillText(ch, cx, y + ts.eyebrowSize); cx += ctx.measureText(ch).width + ls; }
-    y += ts.eyebrowSize * 2.2;
+    const r = drawTrackedFit(ctx, content.eyebrow.toUpperCase(), x, y + ts.eyebrowSize,
+      tw, ts.eyebrowSize, 500, BRAND.mono, 0.14, accent);
+    y += ts.eyebrowSize * 2.2 + r.extra;
   }
   if (content.headline) {
     const size = fitFont(ctx, content.headline.split('\n')[0], tw, ts.headlineMax * 0.62, ts.headlineMin, 700);
@@ -3060,11 +3041,8 @@ function drawDuo(ctx, frame, content, image, opts) {
   }
 
   if (content.cta) {
-    ctx.font = `500 ${ts.ctaSize}px ${BRAND.mono}`;
-    ctx.fillStyle = accent;
-    const ls = ts.ctaSize * 0.12;
-    let cx = x;
-    for (const ch of content.cta.toUpperCase()) { ctx.fillText(ch, cx, Math.min(bottom, h - padY * 0.6)); cx += ctx.measureText(ch).width + ls; }
+    drawTrackedFit(ctx, content.cta.toUpperCase(), x, Math.min(bottom, h - padY * 0.6),
+      tw, ts.ctaSize, 500, BRAND.mono, 0.12, accent);
   }
 
   if (!opts.skipOverlays) drawBrandBar(ctx, frame, palette, accent, false, { ...opts, safeArea });
@@ -3294,6 +3272,7 @@ function drawImageTextSplit(ctx, frame, content, image, opts, textPos) {
     ...frame,
     textMaxH: Math.max(80, Math.min(bandBottom, clearance.bottomY) - adjTextY - padY * 0.5),
     fitOut: opts.fitOut,
+    textOverflow: opts.textOverflow,
   };
   // Backdrop ALWAYS draws (image-composition layer) — even in PDF skipOverlays mode
   drawTextBackdropOnly(ctx, content, textRectX, adjTextY, textRectW, palette, accent, tFrame, 'top', opts.textBackdrop);
@@ -3355,7 +3334,7 @@ function drawFullBleedOverlay(ctx, frame, content, image, opts) {
   }
   // Bottom-anchored: the block grows UPWARD from textBottomY, so its budget is the
   // distance back up to the top clearance.
-  const oFrame = { ...frame, textMaxH: Math.max(80, textBottomY - clearance.topY - padY * 1.2), fitOut: opts.fitOut };
+  const oFrame = { ...frame, textMaxH: Math.max(80, textBottomY - clearance.topY - padY * 1.2), fitOut: opts.fitOut, textOverflow: opts.textOverflow };
   drawTextBackdropOnly(ctx, content, padX, textBottomY, w - padX * 2, overlayPalette, accent, oFrame, 'bottom', opts.textBackdrop);
   if (!opts.skipOverlays) drawTextBlock(ctx, content, padX, textBottomY, w - padX * 2, overlayPalette, accent, oFrame, 'bottom', null);
   if (!opts.skipOverlays) drawBrandBar(ctx, frame, overlayPalette, accent, true, opts);
@@ -3768,6 +3747,102 @@ function computeTypeScale(frame) {
   };
 }
 
+// ═══ TRACKED LABELS MUST FIT THEIR COLUMN ════════════════════════════
+// The headline, subline and body are wrapped to the measure by wrapText. The
+// eyebrow and the CTA were not: they were emitted as ONE tracked token that
+// ignored the column width entirely — no wrap, no fit, no clamp. And the
+// shrink-to-fit that exists governs HEIGHT, so nothing ever looked at their width.
+//
+// Measured on a 1080 square, my own defaults:
+//
+//     column                       label                          width
+//     full width      929 px       "MEDARTIS FELLOWSHIP · …"      538 px   fits
+//     split-left/right 389 px      the same label                 538 px   +38%
+//     duo cell        449 px       the same label                 538 px   +20%
+//
+// That is why it survived: it is invisible on whatever format you happen to be
+// testing, and it throws nothing. IBRA hit it from both sides — the label running
+// under the photograph on one, and clipped mid-word at the canvas edge on the other.
+//
+// THE FIX IS NOT TO WRAP FIRST. An eyebrow is a LABEL; a label that wraps reads as
+// a sentence that has gone wrong. So shrink to the measure — tracking included —
+// and wrap only when even the floor cannot fit, because a two-line label still
+// beats one running under a photograph. It breaks on the middot first: "APPLY NOW ·
+// MEDARTIS.COM/…" is two thoughts, and that is the break a designer would choose.
+
+function trackedWidth(ctx, text, size, weight, family, trackFrac) {
+  ctx.font = `${weight} ${size}px ${family}`;
+  const ls = size * trackFrac;
+  let x = 0;
+  for (const ch of text) x += ctx.measureText(ch).width + ls;
+  // The tracking after the LAST glyph is not part of the drawn width — including
+  // it is the classic off-by-one that makes a tracked string measure too wide.
+  return Math.max(0, x - ls);
+}
+
+/**
+ * Fit a tracked label to `maxW`. Returns { size, lines } — usually one line.
+ * `floor` is a fraction of the label's own size, not an absolute: an eyebrow that
+ * has already been shrunk by the block-level scale should not be shrunk twice as
+ * hard.
+ */
+function fitTracked(ctx, text, maxW, size, weight, family, trackFrac, floor = 0.62) {
+  const minSize = Math.max(8, size * floor);
+  let s = size;
+  while (s > minSize && trackedWidth(ctx, text, s, weight, family, trackFrac) > maxW) {
+    s *= 0.94;
+  }
+  // The loop tests the floor BEFORE it multiplies, so the last step overshoots it:
+  // at 20px with a 0.62 floor it stops at 12.18, not 12.40. Small, and it is the
+  // difference between a floor that holds and a floor that is a suggestion — the
+  // whole point of the floor is that below it a label is no longer readable.
+  // (Found by the test, in code I had just ported. A guard that does not guard is
+  // worse than no guard: you stop looking.)
+  s = Math.max(s, minSize);
+  if (trackedWidth(ctx, text, s, weight, family, trackFrac) <= maxW) return { size: s, lines: [text] };
+
+  // Still too wide at the floor. Wrap on the separators a label actually has —
+  // the middot first, because "APPLY NOW · MEDARTIS.COM/FELLOWSHIP" is two thoughts
+  // and breaking it there is the break a designer would choose.
+  const parts = text.includes(' · ') ? text.split(' · ') : text.split(' ');
+  const joiner = text.includes(' · ') ? ' · ' : ' ';
+  const lines = [];
+  let cur = '';
+  for (const word of parts) {
+    const next = cur ? cur + joiner + word : word;
+    if (cur && trackedWidth(ctx, next, s, weight, family, trackFrac) > maxW) {
+      lines.push(cur);
+      cur = word;
+    } else {
+      cur = next;
+    }
+  }
+  if (cur) lines.push(cur);
+  return { size: s, lines };
+}
+
+/**
+ * Draw a tracked label, fitted to `maxW`. Returns the height it used, because the
+ * caller's cursor has to know when a label wrapped to two lines.
+ *
+ * The table/stat/duo layouts each drew their own labels with a bare per-char
+ * loop and no measure — the same bug the split layouts had, just not yet
+ * triggered because their columns are full-width. Latent is not fixed.
+ */
+function drawTrackedFit(ctx, text, x, baselineY, maxW, size, weight, family, trackFrac, color) {
+  const fit = fitTracked(ctx, text, maxW, size, weight, family, trackFrac);
+  ctx.font = `${weight} ${fit.size}px ${family}`;
+  ctx.fillStyle = color;
+  const ls = fit.size * trackFrac;
+  let ly = baselineY;
+  for (const line of fit.lines) {
+    let cx = x;
+    for (const ch of line) { ctx.fillText(ch, cx, ly); cx += ctx.measureText(ch).width + ls; }
+    ly += fit.size * 1.34;
+  }
+  return { size: fit.size, lines: fit.lines.length, extra: (fit.lines.length - 1) * fit.size * 1.34 };
+}
+
 function layoutTextElements(ctx, content, x, y, w, palette, accent, frame, anchor = 'top', scale = 1) {
   const ts0 = computeTypeScale(frame);
   // SHRINK-TO-FIT. The type scale says how big the type WANTS to be; the band says
@@ -3801,7 +3876,12 @@ function layoutTextElements(ctx, content, x, y, w, palette, accent, frame, ancho
   const ctaSize     = ts.ctaSize;
 
   const blocks = [];
-  if (content.eyebrow) blocks.push({ type: 'eyebrow', text: content.eyebrow, size: eyebrowSize });
+  if (content.eyebrow) {
+    // Fitted HERE, not at draw time: a label measured as one line and drawn as two
+    // puts every block beneath it in the wrong place.
+    const fit = fitTracked(ctx, content.eyebrow.toUpperCase(), w, eyebrowSize, 500, BRAND.mono, 0.16);
+    blocks.push({ type: 'eyebrow', text: content.eyebrow, size: fit.size, lines: fit.lines });
+  }
   if (content.headline) {
     ctx.font = `700 ${headlineMax}px ${BRAND.display}`;
     const fitSize = fitFont(ctx, content.headline.split('\n')[0], w, headlineMax, headlineMin, 700);
@@ -3839,22 +3919,58 @@ function layoutTextElements(ctx, content, x, y, w, palette, accent, frame, ancho
       blocks.push({ type: 'body', lines: rawLines.flatMap((l) => wrapText(ctx, l, w)), size: bodySize });
     }
   }
-  if (content.cta) blocks.push({ type: 'cta', text: content.cta, size: ctaSize });
+  if (content.cta) {
+    const fit = fitTracked(ctx, content.cta.toUpperCase(), w, ctaSize, 500, BRAND.mono, 0.08);
+    blocks.push({ type: 'cta', text: content.cta, size: fit.size, lines: fit.lines });
+  }
 
   const gaps = { eyebrow: 0.9, headline: 0.55, subline: 0.65, body: 0.85, cta: 1.0 };
   let totalH = 0;
   blocks.forEach((el, i) => {
     if (el.estH) totalH += el.estH;
+    // A tracked label that wrapped is two lines tall; before the fit it was always
+    // counted as one, so the block beneath it landed on top of the second line.
+    else if (el.type === 'eyebrow' || el.type === 'cta') totalH += el.lines.length * el.size * 1.34;
     else if (el.lines) totalH += el.lines.length * el.size * 1.18;
     else totalH += el.size * 1.2;
     if (i < blocks.length - 1) totalH += el.size * (gaps[el.type] ?? gaps.body);
   });
-  // Too tall for the band? Re-lay-out one notch smaller. 0.93 per pass, floor at
-  // 55% — below that the type is no longer the problem and something else has to
-  // give (less copy, a taller band), so we stop rather than shrink to unreadable.
+  // ── WHAT HAPPENS AT THE FLOOR ────────────────────────────────────────────
+  // The block re-lays 7% smaller until it fits, which is right. But the loop used
+  // to stop at 55% and then simply LET GO: past that floor the copy spilled over
+  // the image, through the mark's clear space, off the canvas. Silently.
+  //
+  //      9 words → fits @100%    144 words → fits @52%
+  //     36 words → fits @86%     288 words → OVERFLOWED by ~325px, unannounced
+  //
+  // Nobody chose that. It is just where the loop gave up. So the floor now has
+  // three named outcomes and you pick one — see TEXT_OVERFLOW in § 05.
   const maxH = frame.textMaxH;
-  if (maxH && totalH > maxH && scale > 0.55) {
+  const mode = frame.textOverflow ?? 'trim';
+  const floor = mode === 'shrink' ? 0.28 : 0.55;
+
+  if (maxH && totalH > maxH && scale > floor) {
     return layoutTextElements(ctx, content, x, y, w, palette, accent, frame, anchor, scale * 0.93);
+  }
+
+  // At the floor and still too tall. `trim` is the only mode that acts.
+  let trimmed = false;
+  if (maxH && totalH > maxH && mode === 'trim') {
+    // Drop trailing BODY lines first — the body is the only block written to be
+    // shortened. Losing a headline or a CTA to make room is not trimming, it is
+    // deleting the message, so those are never touched.
+    const bodyEl = [...blocks].reverse().find((b) => b.type === 'body' && b.lines?.length > 1);
+    if (bodyEl) {
+      while (totalH > maxH && bodyEl.lines.length > 1) {
+        bodyEl.lines.pop();
+        totalH -= bodyEl.size * 1.18;
+        trimmed = true;
+      }
+      if (trimmed) {
+        const last = bodyEl.lines[bodyEl.lines.length - 1].replace(/[\s,;:.\u2014-]+$/, '');
+        bodyEl.lines[bodyEl.lines.length - 1] = last + '\u2026';
+      }
+    }
   }
   // Report what actually happened. Hitting the floor and STILL not fitting is not
   // something to swallow: the copy is too long for the band, and the only honest
@@ -3863,6 +3979,8 @@ function layoutTextElements(ctx, content, x, y, w, palette, accent, frame, ancho
     frame.fitOut.scale = scale;
     frame.fitOut.overflow = maxH ? Math.max(0, totalH - maxH) : 0;
     frame.fitOut.bandH = maxH || 0;
+    frame.fitOut.trimmed = trimmed;   // so the panel can say "your copy was cut"
+    frame.fitOut.mode = mode;
   }
 
   let cursorY = anchor === 'bottom' ? y - totalH : y;
@@ -3879,8 +3997,12 @@ function layoutTextElements(ctx, content, x, y, w, palette, accent, frame, ancho
       const color = palette.mode === 'dark' ? BRAND.gold : BRAND.ink600;
       setMeasureFont(500, el.size, BRAND.mono);
       advance(el.size);
-      const upper = el.text.toUpperCase();
-      tokens.push({ type: 'tracked', text: upper, x, y: cursorY, family: 'JetBrainsMono', weight: 500, size: el.size, color, letterSpacing: el.size * 0.16 });
+      // el.lines comes from fitTracked: one line almost always, two only when even
+      // the floor could not hold it.
+      el.lines.forEach((line, i) => {
+        if (i) advance(el.size * 1.34);
+        tokens.push({ type: 'tracked', text: line, x, y: cursorY, family: 'JetBrainsMono', weight: 500, size: el.size, color, letterSpacing: el.size * 0.16 });
+      });
       advance(el.size * gaps.eyebrow);
     } else if (el.type === 'headline') {
       setMeasureFont(700, el.size, BRAND.display);
@@ -3946,8 +4068,10 @@ function layoutTextElements(ctx, content, x, y, w, palette, accent, frame, ancho
       const color = palette.mode === 'dark' ? BRAND.cream100 : BRAND.ink600;
       setMeasureFont(500, el.size, BRAND.mono);
       advance(el.size);
-      const upper = el.text.toUpperCase();
-      tokens.push({ type: 'tracked', text: upper, x, y: cursorY, family: 'JetBrainsMono', weight: 500, size: el.size, color, letterSpacing: el.size * 0.08 });
+      el.lines.forEach((line, i) => {
+        if (i) advance(el.size * 1.34);
+        tokens.push({ type: 'tracked', text: line, x, y: cursorY, family: 'JetBrainsMono', weight: 500, size: el.size, color, letterSpacing: el.size * 0.08 });
+      });
       advance(el.size * gaps.cta);
     }
   }
@@ -4336,6 +4460,8 @@ export default function MedartisBrandGenerator() {
   // Remembered answer to the template-switch question: 'keep' | 'sample' | null.
   const [tmplPref, setTmplPref] = useState(() => readTemplatePref());
   const [undo, setUndo] = useState(null);        // { snap, lostWork, label }
+  // What happens when copy is longer than its band. See layoutTextElements.
+  const [textOverflow, setTextOverflow] = useState('trim');   // trim | shrink | allow
 
   // Live mirrors, for reading state from a setTimeout that would otherwise close
   // over the render that scheduled it.
@@ -5109,6 +5235,22 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
       }
     }
 
+    // 0a · LONG COPY — what happens at the legibility floor.
+    // STATED, not measured: the text band is per-layout, and the geometry that
+    // knows it is declared BELOW this useMemo — calling it from here would be a TDZ
+    // error, the exact bug class that has bitten this file twice. So the check says
+    // which policy is in force rather than pretending to have measured it.
+    checks.push({
+      ok: textOverflow === 'allow' ? 'warn' : 'pass',
+      label: `Long copy · ${textOverflow}`,
+      note: textOverflow === 'trim'
+        ? 'the body is cut at the 55% floor and marked with an ellipsis — always fits'
+        : textOverflow === 'shrink'
+          ? 'every word kept, type may go to 28% — below what the guide calls legible'
+          : 'copy may run past its band, over the image and off the canvas — nothing will say so',
+      fix: textOverflow === 'allow' ? { label: 'Trim instead', apply: () => setTextOverflow('trim') } : null,
+    });
+
     // 0b · TYPE FITS THE BAND. Measured on the last draw, not estimated: the type
     // engine shrinks to fit (down to 55%), and if it is STILL too tall the copy is
     // simply too long for this band. Saying so beats letting the text run under the
@@ -5116,11 +5258,13 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
     if (typeFit.bandH > 0) {
       const over = typeFit.overflow;
       checks.push({
-        ok: over > 1 ? 'warn' : 'pass',
+        ok: (over > 1 || typeFit.trimmed) ? 'warn' : 'pass',
         label: 'Copy fits the text band',
-        note: over > 1
-          ? `${Math.round(over)} px too long even at the ${Math.round(typeFit.scale * 100)}% floor — shorten the copy, or pick a layout with a deeper band`
-          : `fits at ${Math.round(typeFit.scale * 100)}% of the type scale`,
+        note: typeFit.trimmed
+          ? `your copy was CUT to fit — the body ends in an ellipsis. Shorten it, or pick a layout with a deeper band`
+          : over > 1
+            ? `${Math.round(over)} px too long even at the ${Math.round(typeFit.scale * 100)}% floor — shorten the copy, or pick a layout with a deeper band`
+            : `fits at ${Math.round(typeFit.scale * 100)}% of the type scale`,
         fix: null,
       });
     }
@@ -5230,7 +5374,7 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
     }
 
     return checks;
-  }, [formatKey, wordmarkPos, wordmarkPctOverride, palette, accentColor, mutedBoost, accentSafe, layoutKey, activeImage, pdfBleed, wordmarkOverImage, logoLegib, typeFit]);
+  }, [formatKey, wordmarkPos, wordmarkPctOverride, palette, accentColor, mutedBoost, accentSafe, layoutKey, activeImage, pdfBleed, wordmarkOverImage, logoLegib, typeFit, textOverflow]);
 
   const draw = useCallback(() => {
     const canvas = canvasRef.current;
@@ -5266,7 +5410,7 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
         : null;
       layout.draw(ctx, frame, activeContent, activeImage, {
         palette, accent: accentColor, fit: activeFit,
-        lanyard, fitOut: fitRef.current,
+        lanyard, fitOut: fitRef.current, textOverflow,
         partners: { ...partners, logos: partnerLogos },
       // Duo compares TWO pictures: the next carousel slide's image is the second
       // one. No new field — a layout that demands its own content model is a
@@ -5314,7 +5458,7 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
         ctx.fill();
       }
     }
-  }, [format, layoutKey, activeContent, activeImage, activeFit, palette, carouselSlides, carouselSlide, wordmarkPos, folioPos, formatKey, wordmarkOverImage, folioOverImage, wordmarkColor, folioColor, folioText, qrConfig, qrImage, carouselBg, carouselBgImage, carouselQrPer, carouselFolioPer, textBackdrop, wordmarkPctOverride, wmReady, logoPlate, accentColor, isBrochure, brochurePage, brochureImgs, brochureTitle, curBrochure, partnerLogos, partners, lanyard]);
+  }, [format, layoutKey, activeContent, activeImage, activeFit, palette, carouselSlides, carouselSlide, wordmarkPos, folioPos, formatKey, wordmarkOverImage, folioOverImage, wordmarkColor, folioColor, folioText, qrConfig, qrImage, carouselBg, carouselBgImage, carouselQrPer, carouselFolioPer, textBackdrop, wordmarkPctOverride, wmReady, logoPlate, accentColor, isBrochure, brochurePage, brochureImgs, brochureTitle, curBrochure, partnerLogos, partners, lanyard, textOverflow]);
 
   useEffect(() => { draw(); }, [draw]);
 
@@ -5496,7 +5640,7 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
       // derived: render the layout bare, and what is left is type and mark.
       imageOverride === 'none' ? null : (imageOverride ?? activeImage), {
       palette, accent: accentColor,
-      lanyard, partners: { ...partners, logos: partnerLogos },
+      lanyard, textOverflow, partners: { ...partners, logos: partnerLogos },
       // Duo compares TWO pictures: the next carousel slide's image is the second
       // one. No new field — a layout that demands its own content model is a
       // layout nobody reaches for.
@@ -5595,7 +5739,7 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
       safeArea = { x: 0, y: 0, w: frame.w, h: frame.h };
       const clearance = brandBarClearance(measCtx, frame, { ...opts, safeArea });
       const textBottomY = Math.min(frame.h - frame.padY * 1.7, clearance.bottomY);
-      const oFrame = { ...frame, textMaxH: Math.max(80, textBottomY - clearance.topY - frame.padY * 1.2) };
+      const oFrame = { ...frame, textMaxH: Math.max(80, textBottomY - clearance.topY - frame.padY * 1.2), textOverflow };
       textTokens = layoutTextElements(measCtx, slideContent, frame.padX, textBottomY, frame.w - frame.padX * 2, effectivePalette, BRAND.gold, oFrame, 'bottom');
     } else {
       const textPos = layoutKey === 'image-bottom' ? 'top' : 'bottom';
@@ -5608,6 +5752,7 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
       const tFrame = {
         ...frame,
         textMaxH: Math.max(80, Math.min(geom.textRect.y + geom.textRect.h, clearance.bottomY) - textAreaY - frame.padY * 0.5),
+        textOverflow,   // the PDF re-lays the text: same policy, or print != preview
       };
       textTokens = layoutTextElements(measCtx, slideContent, textRectX, textAreaY, textW, palette, BRAND.gold, tFrame);
     }
@@ -6125,6 +6270,7 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
     brochureIdx: curBrochure,
     brochureTitle,
     lanyard,
+    textOverflow,
     partners,
     partnerLogos: partnerLogos.map(({ img, src, ...rest }) => ({
       ...rest,
@@ -6160,6 +6306,10 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
     }
     if (typeof preset.brochureTitle === 'string') setBrochureTitle(preset.brochureTitle);
     if (preset.lanyard) setLanyard({ ...LANYARD_DEFAULTS, ...preset.lanyard });
+    // Old presets restore as 'allow', because that WAS their behaviour. Restoring
+    // them as 'trim' would silently start cutting copy in files that were saved
+    // when nothing ever did — a migration that edits your work is not a migration.
+    setTextOverflow(preset.textOverflow ?? 'allow');
     if (preset.partners) setPartners((p) => ({ ...p, ...preset.partners }));
     if (Array.isArray(preset.partnerLogos)) {
       // Only the ones whose src survived (a library path, not a stripped data URL).
@@ -7956,6 +8106,27 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
         {/* Content fields — a brochure page carries its own fields (§ 03 BROCHURE) */}
         {!isBrochure && (
         <Section label={SEC('CONTENT', `CONTENT${format.multi ? ` · SLIDE ${carouselSlide + 1}` : ''}`)} {...sp('CONTENT')}>
+          {/* LONG COPY — the floor used to be a cliff. Three named outcomes now. */}
+          <div style={{ marginBottom: 12, paddingBottom: 10, borderBottom: `1px solid ${BRAND.ink100}` }}>
+            <div style={{ fontFamily: BRAND.mono, fontSize: 9, letterSpacing: '0.1em',
+                          textTransform: 'uppercase', color: BRAND.ink600, marginBottom: 5 }}>
+              If the copy is too long
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 4 }}>
+              {[['trim', 'Trim'], ['shrink', 'Shrink'], ['allow', 'Let it run']].map(([k, label]) => (
+                <SidebarBtn key={k} active={textOverflow === k} onClick={() => setTextOverflow(k)}>{label}</SidebarBtn>
+              ))}
+            </div>
+            <div style={{ fontFamily: BRAND.mono, fontSize: 8.5, color: BRAND.ink300,
+                          lineHeight: 1.6, letterSpacing: '0.03em', marginTop: 6 }}>
+              {textOverflow === 'trim'
+                ? 'THE TYPE SHRINKS TO THE 55% FLOOR, THEN THE BODY IS CUT AND MARKED WITH AN ELLIPSIS. THE HEADLINE AND CTA ARE NEVER TOUCHED — LOSING THOSE IS NOT TRIMMING, IT IS DELETING THE MESSAGE. ALWAYS FITS.'
+                : textOverflow === 'shrink'
+                  ? '⚠ EVERY WORD KEPT, TYPE DOWN TO 28% TO DO IT — BELOW WHAT THE GUIDE CALLS LEGIBLE. PAST ~500 WORDS EVEN THIS OVERFLOWS.'
+                  : '⚠ COPY RUNS PAST ITS BAND: OVER THE IMAGE, THROUGH THE MARK\u2019S CLEAR SPACE, OFF THE CANVAS. A DELIBERATE BLEED IS A REAL DESIGN MOVE — THIS IS THAT, ON PURPOSE.'}
+            </div>
+          </div>
+
           {template.fields.map(field => (
             <div key={field.key} style={{ marginBottom: 14 }}>
               <label style={{
