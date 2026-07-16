@@ -2816,18 +2816,19 @@ function drawGroupLockup(ctx, frame, group, palette, surface) {
 
   let rects;
   if (!cobs.length) {
-    rects = familyRow([GROUP_MARK], { x: padX, y, w: boxW, h: boxH, align: 'center' });
+    rects = familyRow([GROUP_MARK], { x: padX, y, w: boxW, h: boxH, align: group.align ?? 'center' });
   } else {
-    const gapY = boxH * 0.16;
-    const headH = boxH * 0.38;          // the house reads first
-    const rowH = boxH - headH - gapY;
+    const gapY = boxH * clamp(group.rowGap ?? 0.16, 0, 0.5);
+    const headH = boxH * clamp(group.headShare ?? 0.38, 0.15, 0.7);   // the house reads first
+    const rowH = Math.max(1, boxH - headH - gapY);
+    const align = group.align ?? 'center';
     rects = [
-      ...familyRow([GROUP_MARK], { x: padX, y, w: boxW, h: headH, align: 'center' }),
+      ...familyRow([GROUP_MARK], { x: padX, y, w: boxW, h: headH, align }),
       // baselineRow, not familyRow: these are WORDMARKS. Matched by area they stand
       // at three different heights, because a bounding box does not know where the
       // letters are.
       ...baselineRow(cobs, { x: padX, y: y + headH + gapY, w: boxW, h: rowH,
-                             align: 'center', gapRatio: group.gap ?? 2.6, withByline }),
+                             align, gapRatio: group.gap ?? 2.6, withByline }),
     ];
   }
   if (!rects?.length) return null;
@@ -5437,7 +5438,14 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
     size: 0.14,                // fraction of the SHORT EDGE — never of the canvas
     // The space between co-brands, as a fraction of their own drawn height — not of
     // the canvas and not of the box, so it holds its proportion at every format.
-    gap: 2.6,   // multiples of the CAP height — the size of the letters
+    gap: 2.6,        // between co-brands: multiples of the CAP height
+    align: 'center', // left | center | right
+    // How much of the lockup's height the GROUP mark takes, against the co-brand
+    // row beneath it. It was hardcoded at 0.38 — a number I picked, which is fine
+    // until the day it is not, and then it is unreachable.
+    headShare: 0.38,
+    // The air between the Group mark and its brands, as a fraction of the lockup.
+    rowGap: 0.16,
   });
 
   // The surface: flat palette colour, or a Group gradient.
@@ -7953,6 +7961,152 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
               DEEP BLACK · C{palettes[paletteName].cmyk[0]}/M{palettes[paletteName].cmyk[1]}/Y{palettes[paletteName].cmyk[2]}/K{palettes[paletteName].cmyk[3]} · 4-CHANNEL COMPOSITE FOR PRINT
             </div>
           )}
+
+          {(() => {
+            const setSurf = (patch) => setSurface((v) => ({ ...v, ...patch }));
+            const lab = { display: 'block', fontFamily: BRAND.mono, fontSize: 9, letterSpacing: '0.1em',
+                          textTransform: 'uppercase', color: BRAND.ink600, marginBottom: 4 };
+            const pickGradient = (key) =>
+              setSurf({ key, gradient: { ...DEFAULT_GRADIENT, ...GROUP_GRADIENTS[key] } });
+            const g = surface.gradient;
+            // The band of the ramp where NO ink is legible. Shown, not hidden: type
+            // centred there fails whichever colour the sampler picks, and it fails
+            // without complaining.
+            const dead = surface.enabled ? deadZones(g, colorAt) : [];
+            return (
+              <>
+              <div style={{ borderTop: `1px solid ${BRAND.ink100}`, paddingTop: 10, marginTop: 4 }}>
+                <SidebarBtn active={surface.enabled} onClick={() => setSurf({ enabled: !surface.enabled })}>
+                  {surface.enabled ? 'Gradient surface' : 'Flat palette colour'}
+                </SidebarBtn>
+
+                {surface.enabled && (
+                  <>
+                    <div style={{ height: 8 }} />
+                    <label style={lab}>Gradient · derived from the sub-brands</label>
+                    {Object.entries(GROUP_GRADIENTS).map(([k, def]) => (
+                      <button key={k} onClick={() => pickGradient(k)} title={def.derivation}
+                              style={{
+                                display: 'flex', alignItems: 'center', gap: 8, width: '100%', marginBottom: 4,
+                                padding: '5px 6px', cursor: 'pointer', textAlign: 'left',
+                                border: `1px solid ${surface.key === k ? BRAND.ink : BRAND.ink100}`,
+                                background: surface.key === k ? BRAND.bone : BRAND.paper,
+                              }}>
+                        <span style={{ width: 34, height: 16, flexShrink: 0,
+                                       background: `linear-gradient(90deg, ${def.from}, ${def.to})` }} />
+                        <span style={{ fontFamily: BRAND.mono, fontSize: 8.5, letterSpacing: '0.04em',
+                                       color: BRAND.ink600, lineHeight: 1.4 }}>{def.label}</span>
+                      </button>
+                    ))}
+
+                    <label style={{ ...lab, marginTop: 8 }}>Shape</label>
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4, marginBottom: 8 }}>
+                      {[['linear', 'Linear'], ['radial', 'Radial']].map(([k, l]) => (
+                        <SidebarBtn key={k} active={(g.type ?? 'linear') === k}
+                                    onClick={() => setSurf({ gradient: { ...g, type: k } })}>{l}</SidebarBtn>
+                      ))}
+                    </div>
+
+                    {(g.type ?? 'linear') === 'linear' ? (
+                      <>
+                        <label style={lab}>Angle · {g.angle}°</label>
+                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 4, marginBottom: 4 }}>
+                          {Object.entries(ANGLE_PRESETS).map(([k, a]) => (
+                            <SidebarBtn key={k} active={g.angle === a.angle}
+                                        onClick={() => setSurf({ gradient: { ...g, angle: a.angle } })}>{a.label}</SidebarBtn>
+                          ))}
+                        </div>
+                        <input type="range" min="0" max="359" value={g.angle}
+                               onChange={(e) => setSurf({ gradient: { ...g, angle: +e.target.value } })}
+                               style={{ width: '100%', marginBottom: 6 }} />
+                      </>
+                    ) : (
+                      <>
+                        <label style={lab}>Centre · {((g.cx ?? 0.5) * 100).toFixed(0)}% / {((g.cy ?? 0.5) * 100).toFixed(0)}%</label>
+                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4, marginBottom: 6 }}>
+                          <input type="range" min="0" max="100" value={Math.round((g.cx ?? 0.5) * 100)}
+                                 onChange={(e) => setSurf({ gradient: { ...g, cx: +e.target.value / 100 } })} />
+                          <input type="range" min="0" max="100" value={Math.round((g.cy ?? 0.5) * 100)}
+                                 onChange={(e) => setSurf({ gradient: { ...g, cy: +e.target.value / 100 } })} />
+                        </div>
+                        <label style={lab}>Radius · {((g.r ?? 0.7) * 100).toFixed(0)}%</label>
+                        <input type="range" min="10" max="150" value={Math.round((g.r ?? 0.7) * 100)}
+                               onChange={(e) => setSurf({ gradient: { ...g, r: +e.target.value / 100 } })}
+                               style={{ width: '100%', marginBottom: 6 }} />
+                      </>
+                    )}
+
+                    <label style={lab}>Band · {Math.round((g.start ?? 0) * 100)}–{Math.round((g.end ?? 1) * 100)}%</label>
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4, marginBottom: 2 }}>
+                      <input type="range" min="0" max="100" value={Math.round((g.start ?? 0) * 100)}
+                             onChange={(e) => setSurf({ gradient: { ...g, start: Math.min(+e.target.value / 100, (g.end ?? 1) - 0.02) } })} />
+                      <input type="range" min="0" max="100" value={Math.round((g.end ?? 1) * 100)}
+                             onChange={(e) => setSurf({ gradient: { ...g, end: Math.max(+e.target.value / 100, (g.start ?? 0) + 0.02) } })} />
+                    </div>
+                    <div style={{ fontFamily: BRAND.mono, fontSize: 8, color: BRAND.ink300,
+                                  letterSpacing: '0.03em', marginBottom: 8 }}>
+                      OUTSIDE THE BAND THE COLOUR IS FLAT — THAT IS WHAT IT IS FOR.
+                    </div>
+
+                    <label style={lab}>Midpoint · {(g.midpoint ?? 0.5).toFixed(2)}</label>
+                    <input type="range" min="5" max="95" value={Math.round((g.midpoint ?? 0.5) * 100)}
+                           onChange={(e) => setSurf({ gradient: { ...g, midpoint: +e.target.value / 100 } })}
+                           style={{ width: '100%', marginBottom: 6 }} />
+
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4, marginBottom: 8 }}>
+                      {[['smooth', 'Smooth'], ['linear', 'Linear']].map(([k, l]) => (
+                        <SidebarBtn key={k} active={(g.easing ?? 'smooth') === k}
+                                    onClick={() => setSurf({ gradient: { ...g, easing: k } })}>{l}</SidebarBtn>
+                      ))}
+                    </div>
+
+                    {/* The live ramp, sampled through colorAt() — so it shows the
+                        MIDPOINT and EASING you actually set. A CSS linear-gradient
+                        expresses neither, so a CSS preview would quietly disagree
+                        with the canvas, and the swatch is the one thing that must
+                        not lie about the ramp. */}
+                    <div style={{ display: 'flex', height: 22, marginTop: 6, marginBottom: 4,
+                                  border: `1px solid ${BRAND.ink100}` }}>
+                      {gradientStops(g, 40).map((st, i) => (
+                        <span key={i} style={{ flex: 1, background: st.color }} />
+                      ))}
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                                  gap: 6, marginTop: 4, marginBottom: 6 }}>
+                      <span style={{ fontFamily: BRAND.mono, fontSize: 8.5, letterSpacing: '0.04em',
+                                     color: BRAND.ink600 }}>{describeGradient(g).toUpperCase()}</span>
+                      <span style={{ display: 'flex', gap: 4 }}>
+                        <button onClick={() => setSurf({ gradient: { ...g, from: g.to, to: g.from } })}
+                                title="Swap the ends"
+                                style={{ fontFamily: BRAND.mono, fontSize: 8.5, letterSpacing: '0.06em',
+                                         padding: '3px 6px', cursor: 'pointer', border: `1px solid ${BRAND.ink100}`,
+                                         background: BRAND.paper, color: BRAND.ink600 }}>⇄ SWAP</button>
+                        <button onClick={() => pickGradient(surface.key)}
+                                style={{ fontFamily: BRAND.mono, fontSize: 8.5, letterSpacing: '0.06em',
+                                         padding: '3px 6px', cursor: 'pointer', border: `1px solid ${BRAND.ink100}`,
+                                         background: BRAND.paper, color: BRAND.ink600 }}>RESET</button>
+                      </span>
+                    </div>
+
+                    {dead.length > 0 && (
+                      <div style={{ fontFamily: BRAND.mono, fontSize: 8.5, lineHeight: 1.6,
+                                    letterSpacing: '0.03em', color: BRAND.goldDeep,
+                                    borderLeft: `2px solid ${BRAND.gold}`, paddingLeft: 6, marginTop: 6 }}>
+                        {`CROSSOVER AT ${(dead[0].from * 100).toFixed(0)}–${(dead[0].to * 100).toFixed(0)}% OF THE RAMP: WHITE AND COAL BOTH FALL UNDER 4.5:1 THERE. IT IS ${((dead.reduce((m, z) => Math.max(m, z.to - z.from), 0)) * 100).toFixed(0)}% WIDE — KEEP TYPE OFF IT, OR PUT A BACKDROP UNDER THE TEXT.`}
+                      </div>
+                    )}
+                    <div style={{ fontFamily: BRAND.mono, fontSize: 8.5, color: BRAND.ink300, lineHeight: 1.6,
+                                  letterSpacing: '0.03em', marginTop: 8 }}>
+                      {(GROUP_GRADIENTS[surface.key]?.derivation || '').toUpperCase()}
+                    </div>
+                  </>
+                )}
+              </div>
+
+              </>
+            );
+          })()}
+
         </Section>
 
         {/* Brand bar placement — per brand guide §logo_placement */}
@@ -8157,16 +8311,8 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
         <Section label={SEC('GROUP', 'MEDARTIS GROUP')} {...sp('GROUP')}>
           {(() => {
             const set = (patch) => setGroup((g) => ({ ...g, ...patch }));
-            const setSurf = (patch) => setSurface((v) => ({ ...v, ...patch }));
             const lab = { display: 'block', fontFamily: BRAND.mono, fontSize: 9, letterSpacing: '0.1em',
                           textTransform: 'uppercase', color: BRAND.ink600, marginBottom: 4 };
-            const pickGradient = (key) =>
-              setSurf({ key, gradient: { ...DEFAULT_GRADIENT, ...GROUP_GRADIENTS[key] } });
-            const g = surface.gradient;
-            // Where the ramp takes no ink at all. 2% on the sanctioned gradient — but
-            // it is shown rather than hidden, because type centred there fails
-            // whichever colour the sampler picks, and it fails without complaining.
-            const dead = surface.enabled ? deadZones(g, colorAt) : [];
             return (
               <>
                 <SidebarBtn active={group.enabled} onClick={() => set({ enabled: !group.enabled })}>
@@ -8207,11 +8353,36 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
                     </div>
 
                     <label style={lab}>Position</label>
-                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4, marginBottom: 10 }}>
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4, marginBottom: 8 }}>
                       {[['top', 'Top'], ['bottom', 'Bottom']].map(([k, l]) => (
                         <SidebarBtn key={k} active={(group.pos ?? 'top') === k} onClick={() => set({ pos: k })}>{l}</SidebarBtn>
                       ))}
                     </div>
+
+                    <label style={lab}>Align</label>
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 4, marginBottom: 10 }}>
+                      {[['left', 'Left'], ['center', 'Centre'], ['right', 'Right']].map(([k, l]) => (
+                        <SidebarBtn key={k} active={(group.align ?? 'center') === k} onClick={() => set({ align: k })}>{l}</SidebarBtn>
+                      ))}
+                    </div>
+
+                    {(group.coBrands?.medartis || group.coBrands?.neoortho || group.coBrands?.kerimedical) && (
+                      <>
+                        <label style={lab}>Group mark · {((group.headShare ?? 0.38) * 100).toFixed(0)}% of the lockup</label>
+                        <input type="range" min="15" max="70" value={Math.round((group.headShare ?? 0.38) * 100)}
+                               onChange={(e) => set({ headShare: +e.target.value / 100 })}
+                               style={{ width: '100%', marginBottom: 2 }} />
+                        <div style={{ fontFamily: BRAND.mono, fontSize: 8, color: BRAND.ink300,
+                                      letterSpacing: '0.03em', marginBottom: 8 }}>
+                          HOW MUCH TALLER THE HOUSE READS THAN ITS BRANDS. THE REST IS THE ROW.
+                        </div>
+
+                        <label style={lab}>Air below the Group mark · {((group.rowGap ?? 0.16) * 100).toFixed(0)}%</label>
+                        <input type="range" min="0" max="50" value={Math.round((group.rowGap ?? 0.16) * 100)}
+                               onChange={(e) => set({ rowGap: +e.target.value / 100 })}
+                               style={{ width: '100%', marginBottom: 10 }} />
+                      </>
+                    )}
 
                     <label style={lab}>Size · {(group.size * 100).toFixed(0)}% of the short edge</label>
                     <input type="range" min="3" max="40" value={Math.round(group.size * 100)}
@@ -8227,115 +8398,6 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
                   </>
                 )}
 
-                <div style={{ borderTop: `1px solid ${BRAND.ink100}`, paddingTop: 10, marginTop: 4 }}>
-                  <SidebarBtn active={surface.enabled} onClick={() => setSurf({ enabled: !surface.enabled })}>
-                    {surface.enabled ? 'Gradient surface' : 'Flat palette colour'}
-                  </SidebarBtn>
-
-                  {surface.enabled && (
-                    <>
-                      <div style={{ height: 8 }} />
-                      <label style={lab}>Gradient · derived from the sub-brands</label>
-                      {Object.entries(GROUP_GRADIENTS).map(([k, def]) => (
-                        <button key={k} onClick={() => pickGradient(k)} title={def.derivation}
-                                style={{
-                                  display: 'flex', alignItems: 'center', gap: 8, width: '100%', marginBottom: 4,
-                                  padding: '5px 6px', cursor: 'pointer', textAlign: 'left',
-                                  border: `1px solid ${surface.key === k ? BRAND.ink : BRAND.ink100}`,
-                                  background: surface.key === k ? BRAND.bone : BRAND.paper,
-                                }}>
-                          <span style={{ width: 34, height: 16, flexShrink: 0,
-                                         background: `linear-gradient(90deg, ${def.from}, ${def.to})` }} />
-                          <span style={{ fontFamily: BRAND.mono, fontSize: 8.5, letterSpacing: '0.04em',
-                                         color: BRAND.ink600, lineHeight: 1.4 }}>{def.label}</span>
-                        </button>
-                      ))}
-
-                      <label style={{ ...lab, marginTop: 8 }}>Shape</label>
-                      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4, marginBottom: 8 }}>
-                        {[['linear', 'Linear'], ['radial', 'Radial']].map(([k, l]) => (
-                          <SidebarBtn key={k} active={(g.type ?? 'linear') === k}
-                                      onClick={() => setSurf({ gradient: { ...g, type: k } })}>{l}</SidebarBtn>
-                        ))}
-                      </div>
-
-                      {(g.type ?? 'linear') === 'linear' ? (
-                        <>
-                          <label style={lab}>Angle · {g.angle}°</label>
-                          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 4, marginBottom: 4 }}>
-                            {Object.entries(ANGLE_PRESETS).map(([k, a]) => (
-                              <SidebarBtn key={k} active={g.angle === a.angle}
-                                          onClick={() => setSurf({ gradient: { ...g, angle: a.angle } })}>{a.label}</SidebarBtn>
-                            ))}
-                          </div>
-                          <input type="range" min="0" max="359" value={g.angle}
-                                 onChange={(e) => setSurf({ gradient: { ...g, angle: +e.target.value } })}
-                                 style={{ width: '100%', marginBottom: 6 }} />
-                        </>
-                      ) : (
-                        <>
-                          <label style={lab}>Centre · {((g.cx ?? 0.5) * 100).toFixed(0)}% / {((g.cy ?? 0.5) * 100).toFixed(0)}%</label>
-                          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4, marginBottom: 6 }}>
-                            <input type="range" min="0" max="100" value={Math.round((g.cx ?? 0.5) * 100)}
-                                   onChange={(e) => setSurf({ gradient: { ...g, cx: +e.target.value / 100 } })} />
-                            <input type="range" min="0" max="100" value={Math.round((g.cy ?? 0.5) * 100)}
-                                   onChange={(e) => setSurf({ gradient: { ...g, cy: +e.target.value / 100 } })} />
-                          </div>
-                          <label style={lab}>Radius · {((g.r ?? 0.7) * 100).toFixed(0)}%</label>
-                          <input type="range" min="10" max="150" value={Math.round((g.r ?? 0.7) * 100)}
-                                 onChange={(e) => setSurf({ gradient: { ...g, r: +e.target.value / 100 } })}
-                                 style={{ width: '100%', marginBottom: 6 }} />
-                        </>
-                      )}
-
-                      <label style={lab}>Band · {Math.round((g.start ?? 0) * 100)}–{Math.round((g.end ?? 1) * 100)}%</label>
-                      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4, marginBottom: 2 }}>
-                        <input type="range" min="0" max="100" value={Math.round((g.start ?? 0) * 100)}
-                               onChange={(e) => setSurf({ gradient: { ...g, start: Math.min(+e.target.value / 100, (g.end ?? 1) - 0.02) } })} />
-                        <input type="range" min="0" max="100" value={Math.round((g.end ?? 1) * 100)}
-                               onChange={(e) => setSurf({ gradient: { ...g, end: Math.max(+e.target.value / 100, (g.start ?? 0) + 0.02) } })} />
-                      </div>
-                      <div style={{ fontFamily: BRAND.mono, fontSize: 8, color: BRAND.ink300,
-                                    letterSpacing: '0.03em', marginBottom: 8 }}>
-                        OUTSIDE THE BAND THE COLOUR IS FLAT — THAT IS WHAT IT IS FOR.
-                      </div>
-
-                      <label style={lab}>Midpoint · {(g.midpoint ?? 0.5).toFixed(2)}</label>
-                      <input type="range" min="5" max="95" value={Math.round((g.midpoint ?? 0.5) * 100)}
-                             onChange={(e) => setSurf({ gradient: { ...g, midpoint: +e.target.value / 100 } })}
-                             style={{ width: '100%', marginBottom: 6 }} />
-
-                      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4, marginBottom: 8 }}>
-                        {[['smooth', 'Smooth'], ['linear', 'Linear']].map(([k, l]) => (
-                          <SidebarBtn key={k} active={(g.easing ?? 'smooth') === k}
-                                      onClick={() => setSurf({ gradient: { ...g, easing: k } })}>{l}</SidebarBtn>
-                        ))}
-                      </div>
-
-                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-                                    gap: 6, marginTop: 4, marginBottom: 6 }}>
-                        <span style={{ fontFamily: BRAND.mono, fontSize: 8.5, letterSpacing: '0.04em',
-                                       color: BRAND.ink600 }}>{describeGradient(g).toUpperCase()}</span>
-                        <button onClick={() => pickGradient(surface.key)}
-                                style={{ fontFamily: BRAND.mono, fontSize: 8.5, letterSpacing: '0.06em',
-                                         padding: '3px 6px', cursor: 'pointer', border: `1px solid ${BRAND.ink100}`,
-                                         background: BRAND.paper, color: BRAND.ink600 }}>RESET</button>
-                      </div>
-
-                      {dead.length > 0 && (
-                        <div style={{ fontFamily: BRAND.mono, fontSize: 8.5, lineHeight: 1.6,
-                                      letterSpacing: '0.03em', color: BRAND.goldDeep,
-                                      borderLeft: `2px solid ${BRAND.gold}`, paddingLeft: 6, marginTop: 6 }}>
-                          {`CROSSOVER AT ${(dead[0].from * 100).toFixed(0)}–${(dead[0].to * 100).toFixed(0)}% OF THE RAMP: WHITE AND COAL BOTH FALL UNDER 4.5:1 THERE. IT IS ${((dead.reduce((m, z) => Math.max(m, z.to - z.from), 0)) * 100).toFixed(0)}% WIDE — KEEP TYPE OFF IT, OR PUT A BACKDROP UNDER THE TEXT.`}
-                        </div>
-                      )}
-                      <div style={{ fontFamily: BRAND.mono, fontSize: 8.5, color: BRAND.ink300, lineHeight: 1.6,
-                                    letterSpacing: '0.03em', marginTop: 8 }}>
-                        {(GROUP_GRADIENTS[surface.key]?.derivation || '').toUpperCase()}
-                      </div>
-                    </>
-                  )}
-                </div>
               </>
             );
           })()}
