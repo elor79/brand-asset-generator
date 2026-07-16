@@ -306,6 +306,41 @@ export const GROUP_GRADIENTS = {
     label: 'Black → KeriMedical blue',
     derivation: "Deep black is medartis's; the blue is KeriMedical's.",
   },
+
+  // ─── The deep ramps ────────────────────────────────────────────────────────
+  // Three and four colours. These are the ones two-stop shorthand cannot say, and
+  // they are why gradient.js grew a `stops` array rather than gaining a preset.
+  //
+  // The rule does not bend for them: EVERY stop is traced, not just the ends. A
+  // middle colour is where an invented one would hide — nobody checks the inside of
+  // a ramp — so check_group walks the whole list.
+  //
+  // Note the order is not decorative. Violet sits between black and blue because it
+  // is the only path between them that belongs to somebody: black→blue direct passes
+  // through a navy that is nobody's, and NeoOrtho's violet IS that region of the
+  // wheel, owned. The four-stop adds teal at the light end for the same reason — it
+  // is where the ramp was heading anyway, and NeoOrtho owns the destination.
+  deepVioletBlue: {
+    stops: [
+      SB.medartis.colors.deepBlack,        // #000000
+      SB.neoortho.colors.primary,          // #582d83 violet
+      SB.kerimedical.colors.primary,       // #001a72 blue
+    ],
+    angle: 45,
+    label: 'Deep — black → violet → blue',
+    derivation: "Every stop is owned: medartis's black, NeoOrtho's violet, KeriMedical's blue.",
+  },
+  deepVioletTealBlue: {
+    stops: [
+      SB.medartis.colors.deepBlack,        // #000000
+      SB.neoortho.colors.primary,          // #582d83 violet
+      SB.neoortho.colors.secondary,        // #00afb9 teal
+      SB.kerimedical.colors.primary,       // #001a72 blue
+    ],
+    angle: 45,
+    label: 'Deep — black → violet → teal → blue',
+    derivation: 'All four stops owned; NeoOrtho supplies the whole middle.',
+  },
 };
 
 // The grey is real, and it has a job — just not that one.

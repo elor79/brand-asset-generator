@@ -7966,8 +7966,18 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
             const setSurf = (patch) => setSurface((v) => ({ ...v, ...patch }));
             const lab = { display: 'block', fontFamily: BRAND.mono, fontSize: 9, letterSpacing: '0.1em',
                           textTransform: 'uppercase', color: BRAND.ink600, marginBottom: 4 };
-            const pickGradient = (key) =>
-              setSurf({ key, gradient: { ...DEFAULT_GRADIENT, ...GROUP_GRADIENTS[key] } });
+            const pickGradient = (key) => {
+              const def = GROUP_GRADIENTS[key];
+              // A stops-preset must not inherit DEFAULT_GRADIENT's from/to. They would
+              // sit there unused but not unread: the swatch and the swap button both
+              // look at from/to, and they would happily describe the wrong ramp.
+              const base = { ...DEFAULT_GRADIENT };
+              if (def.stops?.length) { delete base.from; delete base.to; }
+              setSurf({ key, gradient: { ...base, ...def } });
+            };
+            // One CSS preview for either shape. Multi-stop ramps are evenly spaced,
+            // which is what colorAt() does, so the swatch and the canvas agree.
+            const cssRamp = (d) => `linear-gradient(90deg, ${(d.stops?.length ? d.stops : [d.from, d.to]).join(', ')})`;
             const g = surface.gradient;
             // The band of the ramp where NO ink is legible. Shown, not hidden: type
             // centred there fails whichever colour the sampler picks, and it fails
@@ -7993,7 +8003,7 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
                                 background: surface.key === k ? BRAND.bone : BRAND.paper,
                               }}>
                         <span style={{ width: 34, height: 16, flexShrink: 0,
-                                       background: `linear-gradient(90deg, ${def.from}, ${def.to})` }} />
+                                       background: cssRamp(def) }} />
                         <span style={{ fontFamily: BRAND.mono, fontSize: 8.5, letterSpacing: '0.04em',
                                        color: BRAND.ink600, lineHeight: 1.4 }}>{def.label}</span>
                       </button>
@@ -8076,8 +8086,10 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
                       <span style={{ fontFamily: BRAND.mono, fontSize: 8.5, letterSpacing: '0.04em',
                                      color: BRAND.ink600 }}>{describeGradient(g).toUpperCase()}</span>
                       <span style={{ display: 'flex', gap: 4 }}>
-                        <button onClick={() => setSurf({ gradient: { ...g, from: g.to, to: g.from } })}
-                                title="Swap the ends"
+                        <button onClick={() => setSurf({ gradient: g.stops?.length
+                                  ? { ...g, stops: [...g.stops].reverse() }
+                                  : { ...g, from: g.to, to: g.from } })}
+                                title="Reverse the ramp"
                                 style={{ fontFamily: BRAND.mono, fontSize: 8.5, letterSpacing: '0.06em',
                                          padding: '3px 6px', cursor: 'pointer', border: `1px solid ${BRAND.ink100}`,
                                          background: BRAND.paper, color: BRAND.ink600 }}>⇄ SWAP</button>

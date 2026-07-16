@@ -85,12 +85,36 @@ export function rampAt(g, t) {
   return (g.easing ?? 'smooth') === 'linear' ? u : u * u * (3 - 2 * u);
 }
 
+/**
+ * The colours this gradient runs through, in order.
+ *
+ * `from`/`to` is the two-stop shorthand and stays the common case — most brand
+ * ramps are two colours and writing them as a one-element-longer array helps
+ * nobody. `stops` is for the ones that are not: black → violet → teal → blue is a
+ * real gradient in the guide and cannot be said with two ends.
+ *
+ * Both forms resolve here, so every renderer downstream — canvas, SVG, PDF, the
+ * contrast sampler — sees one shape and cannot disagree about which it got.
+ */
+export function stopColors(g) {
+  if (g.stops?.length >= 2) return g.stops.map(hexToRgb);
+  const a = hexToRgb(g.from);
+  return [a, g.to ? hexToRgb(g.to) : a];
+}
+
 /** The colour at raw axis position t, as [r,g,b] floats (no rounding). */
 export function colorAt(g, t) {
-  const [r0, b0g, b0] = hexToRgb(g.from);
-  const [r1, g1, b1] = g.to ? hexToRgb(g.to) : [r0, b0g, b0];
+  const cols = stopColors(g);
   const s = rampAt(g, t);
-  return [r0 + (r1 - r0) * s, b0g + (g1 - b0g) * s, b0 + (b1 - b0) * s];
+  // The eased position walks the WHOLE ramp, then picks its segment. Easing per
+  // segment would put a soft landing at every stop and make a four-colour ramp
+  // read as three gradients glued together.
+  const seg = s * (cols.length - 1);
+  const i = Math.max(0, Math.min(cols.length - 2, Math.floor(seg)));
+  const f = seg - i;
+  const [r0, g0, b0] = cols[i];
+  const [r1, g1, b1] = cols[i + 1];
+  return [r0 + (r1 - r0) * f, g0 + (g1 - g0) * f, b0 + (b1 - b0) * f];
 }
 
 /**
@@ -171,6 +195,7 @@ ${stops}
 /** Human summary for the UI — "navy → amazonite · 45° · eased". */
 export function describeGradient(g) {
   const bits = [];
+  if (g.stops?.length > 2) bits.push(`${g.stops.length} stops`);
   bits.push(g.type === 'radial' ? 'radial' : `${Math.round(g.angle ?? 0)}°`);
   if ((g.start ?? 0) > 0.01 || (g.end ?? 1) < 0.99) {
     bits.push(`band ${Math.round((g.start ?? 0) * 100)}–${Math.round((g.end ?? 1) * 100)}%`);

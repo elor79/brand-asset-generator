@@ -123,7 +123,12 @@ function trace(hex) {
   return null;
 }
 for (const [key, g] of Object.entries(GROUP_GRADIENTS)) {
-  for (const [end, hex] of [['from', g.from], ['to', g.to]]) {
+  // EVERY stop, not just the ends. A middle colour is exactly where an invented one
+  // would hide: nobody inspects the inside of a ramp.
+  const ends = g.stops?.length
+    ? g.stops.map((hex, i) => [`stop ${i}`, hex])
+    : [['from', g.from], ['to', g.to]];
+  for (const [end, hex] of ends) {
     const src = trace(hex);
     if (src) ok(`${key.padEnd(12)} ${end.padEnd(4)} ${hex} → ${src}`);
     else bad(`${key}: ${end} ${hex} belongs to no sub-brand. Invented colours are how a house of brands stops being one.`);
@@ -133,7 +138,8 @@ for (const [key, g] of Object.entries(GROUP_GRADIENTS)) {
 
 // The grey is excluded from ramps ON PURPOSE. If someone reinstates it, say why not.
 for (const [key, g] of Object.entries(GROUP_GRADIENTS)) {
-  if ([g.from, g.to].map((c) => c.toLowerCase()).includes(GROUP_RULE_COLOR.toLowerCase())) {
+  const all = g.stops?.length ? g.stops : [g.from, g.to];
+  if (all.map((c) => c.toLowerCase()).includes(GROUP_RULE_COLOR.toLowerCase())) {
     bad(`${key}: uses ${GROUP_RULE_COLOR} as an endpoint. It is a light neutral: white type fails on it and coal goes muddy. It is a rule line, not a ramp end.`);
   }
 }
