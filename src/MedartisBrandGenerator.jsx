@@ -1196,7 +1196,7 @@ function pdfDrawMarks(pdf, {
 //       backwards through the mark it is supposed to follow.
 const LANYARD_CAP_RATIO = 0.727;   // Inter cap height ÷ font size
 
-function pdfDrawLanyard(pdf, { wMm, hMm, content, cfg, palette, accent, bleedMm = 0 }) {
+function pdfDrawLanyard(pdf, { wMm, hMm, content, cfg, palette, accent, bleedMm = 0, group }) {
   const ink   = palette.mode === 'dark' ? BRAND.bone00 : BRAND.ink;
   const muted = palette.mode === 'dark' ? BRAND.cream100 : BRAND.ink600;
   const off = bleedMm;                        // page origin → trim origin
@@ -1229,9 +1229,35 @@ function pdfDrawLanyard(pdf, { wMm, hMm, content, cfg, palette, accent, bleedMm 
 
   const items = [];
   if (cfg.mark !== 'none') {
-    const markH = wMm * clamp(cfg.markSize, 0.15, 0.75);
-    const markL = markH * (WM_GLYPH.w / WM_GLYPH.h);
-    items.push({ len: markL, kind: 'mark', h: markH });
+    if (group?.enabled) {
+      // THE SAME LOCKUP THE CANVAS DRAWS, in the same order, by the same rule —
+      // cap-matched marks on a shared baseline. The two implementations of this
+      // strap are why the Group lanyard printed a medartis wordmark on top of a
+      // Group lockup: the canvas knew about the Group and this did not.
+      const marks = [{ mark: GROUP_MARK, withByline: false }];
+      if (group.coBrands?.medartis)    marks.push({ mark: MEDARTIS_WORDMARK_MARK, withByline: false });
+      if (group.coBrands?.neoortho)    marks.push({ mark: NEOORTHO_MARK, withByline: false });
+      if (group.coBrands?.kerimedical) marks.push({ mark: KERIMEDICAL_MARK, withByline: false });
+      const ms = marks.map((m) => markMetrics(m.mark, m.withByline)).filter((q) => q.paths.length);
+      if (ms.length) {
+        const budget = clamp(cfg.markSize, 0.15, 0.75);
+        const A = Math.max(...ms.map((q) => q.above / q.cap));
+        const B = Math.max(...ms.map((q) => q.below / q.cap));
+        const capMm = (wMm * budget) / (A + B);
+        const gapMm = (group.gap ?? 2.6) * capMm;
+        const widths = ms.map((q) => q.widthPerCap * capMm);
+        const len = widths.reduce((a, b) => a + b, 0) + gapMm * (ms.length - 1);
+        const baseAcross = ((A - B) / 2) * capMm;
+        const variant = group.variant && group.variant !== 'auto'
+          ? group.variant
+          : (palette.mode === 'dark' ? 'white' : 'color');
+        items.push({ len, kind: 'group', ms, widths, gapMm, capMm, baseAcross, variant });
+      }
+    } else {
+      const markH = wMm * clamp(cfg.markSize, 0.15, 0.75);
+      const markL = markH * (WM_GLYPH.w / WM_GLYPH.h);
+      items.push({ len: markL, kind: 'mark', h: markH });
+    }
   }
   if (label) items.push({ len: measure(label, txtCap, 700, BRAND.display), kind: 'label' });
   if (strap) items.push({ len: measure(strap, strapCap, 500, BRAND.mono), kind: 'strap' });
@@ -1259,7 +1285,16 @@ function pdfDrawLanyard(pdf, { wMm, hMm, content, cfg, palette, accent, bleedMm 
         ? [off + wMm / 2 - across, off + blockCenter - a]
         : [off + wMm / 2 + across, off + blockCenter + a];
 
-      if (it.kind === 'mark') {
+      if (it.kind === 'group') {
+        let a = along;
+        it.ms.forEach((q, k) => {
+          const across = it.baseAcross - q.above * (it.capMm / q.cap);
+          const [px, py] = toPage(a, across);
+          pdfDrawMarkRotated(pdf, { paths: markPaths({ paths: q.paths }, it.variant, ink), glyph: q.glyph },
+                             px, py, it.capMm, q.cap, ink, textAngle);
+          a += it.widths[k] + it.gapMm;
+        });
+      } else if (it.kind === 'mark') {
         // The Medartis mark IS the wordmark — no signet, so the vector paths can
         // be laid down directly. pdfDrawWordmark cannot rotate, so a rotated
         // strap mark is drawn as tracked text would be: via the path API, with
@@ -1302,6 +1337,43 @@ function pdfDrawLanyard(pdf, { wMm, hMm, content, cfg, palette, accent, bleedMm 
  *
  * @param angleDeg counter-clockwise, as jsPDF measures it: +90 reads up the page.
  */
+/**
+ * ANY mark, rotated, as real PDF vector — the generalisation of
+ * pdfDrawWordmarkRotated, which hardcodes the medartis wordmark's own geometry
+ * (srcH 61, offsets 92/92) and can therefore draw exactly one logo.
+ *
+ * That limit is why the Group lanyard printed wrong: the PDF lanyard is a SECOND
+ * implementation of the strap, and the only mark it could draw was the wordmark —
+ * the one mark a Group lanyard must NOT show.
+ *
+ * `paths` carry their own fills, because the sub-brands are not monochrome.
+ */
+function pdfDrawMarkRotated(pdf, { paths, glyph }, xMm, yMm, capMm, capSrc, inkColor, angleDeg) {
+  const scale = capMm / capSrc;
+  const rad = (angleDeg * Math.PI) / 180;
+  const cos = Math.cos(rad), sin = Math.sin(rad);
+  // Same transform as pdfDrawWordmarkRotated: PDF's y grows DOWNWARD, which flips
+  // the sine signs against the textbook formula. Get it wrong and the mark is
+  // mirrored, not turned — a brand incident, not a rendering nit.
+  const map = (sx, sy) => {
+    const dx = (sx - glyph.x) * scale;
+    const dy = (sy - glyph.y) * scale;
+    return [xMm + dx * cos + dy * sin, yMm - dx * sin + dy * cos];
+  };
+  for (const pth of paths) {
+    const [r, g, b] = hexRgb(pth.fill || inkColor);
+    pdf.setFillColor(r, g, b);
+    const pdfOps = [];
+    for (const o of svgPathToPdfOps(pth.d)) {
+      if (o.op === 'M')      pdfOps.push({ op: 'm', c: map(o.x, o.y) });
+      else if (o.op === 'L') pdfOps.push({ op: 'l', c: map(o.x, o.y) });
+      else if (o.op === 'C') pdfOps.push({ op: 'c', c: [...map(o.x1, o.y1), ...map(o.x2, o.y2), ...map(o.x, o.y)] });
+      else if (o.op === 'Z') pdfOps.push({ op: 'h', c: [] });
+    }
+    pdf.path(pdfOps).fill();
+  }
+}
+
 function pdfDrawWordmarkRotated(pdf, xMm, yMm, heightMm, color, angleDeg) {
   const srcH = 61, offsetX = 92, offsetY = 92;
   const scale = heightMm / srcH;
@@ -3426,6 +3498,24 @@ function drawLanyardStrip(ctx, frame, content, image, opts) {
     });
   }
   if (!items.length) return;
+
+  // THE STRAP MUST HONOUR skipOverlays FOR ITS OWN MARK AND TEXT.
+  //
+  // It only ever honoured it for the QR. In vector-PDF mode the canvas is rendered
+  // as a text-free bitmap and the type is laid down again as real vector — so
+  // everything the strap drew got drawn TWICE, once raster and once vector, very
+  // slightly apart. That is the doubled "HELLO BRANDING" on the proof.
+  //
+  // check_layouts said this layout honoured skipOverlays. It greps for the token,
+  // and the token was present — on the QR line. A check that looks for a WORD
+  // cannot tell you the word is doing anything.
+  if (opts.skipOverlays) {
+    // The QR is deliberately NOT drawn here: it is vectorised separately too.
+    // Partner logos ARE — they are raster artwork the user uploaded, so there is no
+    // vector pass to duplicate them.
+    drawPartnerLogos(ctx, frame, opts.partners, palette);
+    return;
+  }
 
   const itemGap   = w * 1.1;                                   // between items in a block
   const blockLen  = items.reduce((s, it) => s + it.len, 0) + itemGap * (items.length - 1);
@@ -6291,6 +6381,7 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
         palette: vecPalette,
         accent: accentColor,
         bleedMm,
+        group,
       });
     } else {
       pdfDrawTextTokens(pdf, textTokens, dpi, bleedMm);

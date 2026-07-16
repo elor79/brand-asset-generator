@@ -78,6 +78,17 @@ const CONTRACT = [
     skip: ['drawBrochurePage', 'drawLanyardStrip'],
   },
   {
+    id: 'pdf-strap-parity',
+    // The lanyard exists TWICE: drawLanyardStrip (canvas) and pdfDrawLanyard
+    // (vector). I updated one and shipped a proof with a medartis wordmark printed
+    // on top of a Medartis Group lockup — the canvas knew about the Group and the
+    // PDF did not. Two implementations of one thing will drift; the only question
+    // is whether anything notices.
+    needs: /markMetrics\(/,
+    why: 'the canvas strap composes the Group via markMetrics — pdfDrawLanyard must too, or the proof prints a different lanyard from the preview',
+    only: ['pdfDrawLanyard'],
+  },
+  {
     id: 'group-inline',
     // The counterpart to the 'group' skip above. A skip is a HOLE: having excused
     // the lanyard from drawGroupLockup, nothing was left checking that it honours
@@ -118,7 +129,14 @@ const CONTRACT = [
 let fail = 0;
 console.log(`${entries.length} layouts registered\n`);
 
-for (const { key, fn } of entries) {
+// pdfDrawLanyard is not a canvas layout — it is the PDF's copy of one. It is
+// checked here because it must not DRIFT from the canvas, not because it owes the
+// canvas contract (it has no ctx, no frame.bleedPx, no QR overlay). So it is an
+// `extra` subject: only rules that name it explicitly apply.
+const SUBJECTS = [...entries.map((e) => ({ ...e, canvas: true })),
+                  { key: 'lanyard·pdf', fn: 'pdfDrawLanyard', canvas: false }];
+
+for (const { key, fn, canvas } of SUBJECTS) {
   const body = bodyOf(fn);
   if (!body) {
     console.log(`✗ ${key.padEnd(13)} → ${fn}() not found`);
@@ -126,7 +144,8 @@ for (const { key, fn } of entries) {
     continue;
   }
   const misses = CONTRACT.filter((r) => {
-    if (r.only && !r.only.includes(fn)) return false;   // rule aimed at one layout
+    if (r.only) return r.only.includes(fn) && !r.needs.test(body);  // aimed at one subject
+    if (!canvas) return false;                          // not a canvas layout: only `only` rules apply
     if (r.skip?.includes(fn)) return false;
     if (r.forbids) return r.forbids.test(body);      // presence is the failure
     return !r.needs.test(body);                      // absence is the failure
