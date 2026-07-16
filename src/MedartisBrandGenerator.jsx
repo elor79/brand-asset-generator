@@ -3,6 +3,14 @@ import { jsPDF } from 'jspdf';
 import { svg2pdf } from 'svg2pdf.js';
 import { BROCHURE_TYPES, BROCHURE_TYPE_KEYS, defaultBrochurePages, makeBrochurePage } from './brochure';
 import { buildLogoSvg, svgToPdf, buildBrandKit } from './logoVector';
+import {
+  CUSTOM_GROUP, DPI_CHOICES, TYPE_CATEGORY_KEYS, TYPE_CATEGORY_LABELS,
+  makeCustomFormat, readCustomFormats, writeCustomFormats,
+  duplicateAsCustom, validateSize, ratioLabel,
+  // NOT pxToMm/mmToPx — the engine already defines pxToMm with identical
+  // semantics further down. Importing a second name for one conversion is how
+  // two copies of the same maths quietly drift apart.
+} from './customFormats';
 import { makeZip } from './zip';
 import QRCodeStyling from 'qr-code-styling';
 import { readPsd, initializeCanvas } from 'ag-psd';
@@ -436,6 +444,18 @@ const LAYOUTS = {
   'overlay':      { label: 'Full-bleed overlay', draw: (ctx, frame, content, image, opts) => drawFullBleedOverlay(ctx, frame, content, image, opts) },
   'lanyard':      { label: 'Lanyard · repeating mark', draw: (ctx, frame, content, image, opts) => drawLanyardStrip(ctx, frame, content, image, opts) },
 };
+
+// ─── CUSTOM FORMATS ──────────────────────────────────────────────────
+// Registered INTO FORMATS, not kept beside it. FORMATS is read by module-level
+// functions (computeTypeScale, formatCategory, generateProjectName) that cannot
+// see React state — so a custom format that lived in a parallel map would work in
+// the picker and then be invisible to the type engine, which is worse than not
+// having it. One registry, one truth.
+function registerCustomFormats() {
+  for (const k of Object.keys(FORMATS)) if (FORMATS[k].custom) delete FORMATS[k];
+  for (const f of readCustomFormats()) FORMATS[f.id] = f;
+}
+registerCustomFormats();
 
 // Default to all 3 layouts; explicit overrides for formats where one doesn't make sense.
 const ALL_LAYOUTS = ['image-bottom', 'image-top', 'overlay'];
@@ -962,6 +982,108 @@ function svgPathToPdfOps(d) {
   return ops;
 }
 
+
+// ═══ PRINTER MARKS ═══════════════════════════════════════════════════
+// One function, called from BOTH pdf paths. The crop marks were previously
+// written out twice — once in the raster path and once in the vector path — which
+// is a guarantee that they eventually disagree.
+//
+// What each mark is FOR, since the panel is otherwise just a row of checkboxes:
+//   crop         where to cut. The only mark most jobs need.
+//   bleed        where the artwork must reach. Useful when the printer wants to
+//                see that the bleed is real rather than take your word for it.
+//   registration cross-hairs printed in EVERY plate — if the plates are misaligned
+//                the crosses fan out, so they are the press's own alignment check.
+//   colourBar    a strip of known patches, for ink density on press.
+//   pageInfo     filename, date, page number in the margin. Answers "which file is
+//                this?" at the exact moment nobody can remember.
+//
+// All of it lives OUTSIDE the trim, so it exists only when there is bleed to hold
+// it — a mark inside the trim is a mark that gets printed on the finished piece.
+const PDF_MARK_DEFAULTS = {
+  crop: true,
+  bleed: false,
+  registration: false,
+  colourBar: false,
+  pageInfo: false,
+  offsetMm: 2.117,        // InDesign's default: 6pt
+  weightPt: 0.25,
+};
+
+function pdfDrawMarks(pdf, {
+  trimWmm, trimHmm, bleedMm, marks, rgb, pageLabel,
+}) {
+  if (!(bleedMm > 0)) return;   // nowhere to put them without bleed
+  const m = { ...PDF_MARK_DEFAULTS, ...(marks || {}) };
+  const [r, g, b] = rgb;
+  pdf.setDrawColor(r, g, b);
+  pdf.setLineWidth(Math.max(0.05, (m.weightPt || 0.25) / 72 * 25.4));
+
+  const T = bleedMm, B = bleedMm + trimHmm;
+  const L = bleedMm, R = bleedMm + trimWmm;
+  // The offset must not exceed the bleed, or the marks land off the page and the
+  // file looks fine on screen while the printer sees nothing.
+  const off = Math.min(m.offsetMm ?? 2.117, bleedMm * 0.9);
+  const len = Math.min(4, Math.max(1.5, bleedMm * 1.1));
+
+  if (m.crop) {
+    pdf.line(L - len - off, T, L - off, T);  pdf.line(L, T - len - off, L, T - off);
+    pdf.line(R + off, T, R + len + off, T);  pdf.line(R, T - len - off, R, T - off);
+    pdf.line(L - len - off, B, L - off, B);  pdf.line(L, B + off, L, B + len + off);
+    pdf.line(R + off, B, R + len + off, B);  pdf.line(R, B + off, R, B + len + off);
+  }
+
+  // Bleed marks sit AT the bleed edge — that is the whole point of them.
+  if (m.bleed) {
+    const bl = Math.min(3, bleedMm * 0.8);
+    const bT = 0, bB = bleedMm * 2 + trimHmm, bL = 0, bR = bleedMm * 2 + trimWmm;
+    pdf.line(bL, bT, bL + bl, bT);  pdf.line(bL, bT, bL, bT + bl);
+    pdf.line(bR - bl, bT, bR, bT);  pdf.line(bR, bT, bR, bT + bl);
+    pdf.line(bL, bB, bL + bl, bB);  pdf.line(bL, bB - bl, bL, bB);
+    pdf.line(bR - bl, bB, bR, bB);  pdf.line(bR, bB - bl, bR, bB);
+  }
+
+  if (m.registration) {
+    const rad = Math.min(1.8, bleedMm * 0.5);
+    const cross = (cx, cy) => {
+      pdf.circle(cx, cy, rad, 'S');
+      pdf.line(cx - rad * 1.7, cy, cx + rad * 1.7, cy);
+      pdf.line(cx, cy - rad * 1.7, cx, cy + rad * 1.7);
+    };
+    if (bleedMm >= 2.5) {
+      cross(bleedMm + trimWmm / 2, bleedMm * 0.5);
+      cross(bleedMm + trimWmm / 2, bleedMm * 1.5 + trimHmm);
+      cross(bleedMm * 0.5, bleedMm + trimHmm / 2);
+      cross(bleedMm * 1.5 + trimWmm, bleedMm + trimHmm / 2);
+    }
+  }
+
+  if (m.colourBar && bleedMm >= 2.5) {
+    // A real density strip: process solids, then a grey ramp.
+    const patches = [
+      [0, 0, 0], [255, 255, 255], [128, 128, 128], [190, 190, 190],
+      [0, 174, 239], [236, 0, 140], [255, 241, 0],
+    ];
+    const pw = Math.min(4, trimWmm / 14);
+    const ph = Math.min(bleedMm * 0.6, 3);
+    let x = bleedMm;
+    const y = bleedMm * 1.5 + trimHmm - ph / 2;
+    for (const p of patches) {
+      pdf.setFillColor(p[0], p[1], p[2]);
+      pdf.rect(x, y, pw, ph, 'F');
+      x += pw;
+    }
+    pdf.setDrawColor(r, g, b);
+  }
+
+  if (m.pageInfo) {
+    pdf.setFontSize(5);
+    pdf.setTextColor(r, g, b);
+    try { pdf.setFont('Inter', 'normal', 400); } catch { /* fonts not registered — use the default */ }
+    const label = pageLabel || '';
+    if (label && bleedMm >= 2) pdf.text(label, bleedMm, bleedMm * 0.55);
+  }
+}
 
 // ═══ LANYARD · VECTOR PDF ════════════════════════════════════════════
 // The strap must print as VECTOR like every other format. Rasterising it at
@@ -3061,6 +3183,9 @@ const TYPE_CATEGORIES = {
 
 function formatCategory(formatKey) {
   const fmt = FORMATS[formatKey] || {};
+  // A custom format carries its category explicitly — geometry alone cannot tell
+  // a 90x50 business card from a 90x50 badge, and the two want different type.
+  if (fmt.typeCategory) return fmt.typeCategory;
   const g = fmt.group || '';
   // A6 postcard & business card are held close — treat them as "card" scale.
   if (formatKey === 'business-card' || formatKey === 'postcard-a6') return 'card';
@@ -3993,6 +4118,53 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
   const askConfirm = (o) => new Promise((resolve) => setConfirmDlg({ ...o, resolve }));
   const closeConfirm = (answer) => setConfirmDlg((d) => { d?.resolve?.(answer); return null; });
 
+  // Custom formats. `fmtVersion` exists because FORMATS is a mutable registry
+  // (module-level functions read it), so React cannot see a change to it — the
+  // counter is what tells the tree to re-read.
+  const [fmtEditor, setFmtEditor] = useState(null);   // null | { …seed }
+  const [fmtVersion, setFmtVersion] = useState(0);
+
+  // FORMATS is a mutable registry, so React cannot see a custom format appear in
+  // it. fmtVersion is the explicit signal to re-read — depending on the registry
+  // object itself would never re-run, because its identity never changes.
+  const formatGroups = useMemo(() => {
+    const acc = {};
+    for (const [key, fmt] of Object.entries(FORMATS)) {
+      const g = fmt.group || 'Other';
+      (acc[g] = acc[g] || []).push([key, fmt]);
+    }
+    // Custom formats last: they are yours, and they should not push the built-ins
+    // you use every day further down the list.
+    const order = (g) => (g === CUSTOM_GROUP ? 1 : 0);
+    return Object.fromEntries(Object.entries(acc).sort((a, b) => order(a[0]) - order(b[0])));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fmtVersion]);
+
+  const saveCustomFormat = (fmt) => {
+    const list = readCustomFormats();
+    const i = list.findIndex((f) => f.id === fmt.id);
+    // An edit keeps the id, so presets pointing at it keep working.
+    if (i >= 0) list[i] = fmt; else list.push(fmt);
+    writeCustomFormats(list);
+    registerCustomFormats();
+    setFmtVersion((v) => v + 1);
+    setFmtEditor(null);
+    setFormatKey(fmt.id);
+  };
+
+  const deleteCustomFormat = async (id) => {
+    const fmt = FORMATS[id];
+    if (!(await askConfirm({
+      title: `Delete "${fmt?.label}"?`,
+      body: 'Any preset saved with this format will fall back to A4 when opened. The preset itself is kept.',
+    }))) return;
+    writeCustomFormats(readCustomFormats().filter((f) => f.id !== id));
+    registerCustomFormats();
+    setFmtVersion((v) => v + 1);
+    setFmtEditor(null);
+    if (formatKey === id) setFormatKey('a4-portrait');
+  };
+
   // Logo files — the mark, handed out as real vector.
   const [logoBusy, setLogoBusy] = useState(false);
   const [logoColorKey, setLogoColorKey] = useState('ink');
@@ -4270,6 +4442,41 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
   const [pdfCropMarks, setPdfCropMarks] = useState(true);
   const [pdfVector, setPdfVector] = useState(true);    // vectorise text + wordmark
   const [pdfCropColor, setPdfCropColor] = useState('auto'); // 'auto' | 'ink' | 'bone'
+  const [pdfMarks, setPdfMarks] = useState({ ...PDF_MARK_DEFAULTS });
+  // IMAGE COMPRESSION. The image layer was always PNG — lossless, and a 300 dpi A4
+  // of a photograph lands around 30 MB, which bounces off mail servers. JPEG at 92
+  // is visually identical on press and roughly a tenth of the size. PNG stays
+  // available because flat colour and hard type edges are exactly where JPEG's
+  // ringing shows.
+  const [pdfImageFormat, setPdfImageFormat] = useState('jpeg');   // 'jpeg' | 'png'
+  const [pdfJpegQuality, setPdfJpegQuality] = useState(0.92);
+  const [pdfDownsample, setPdfDownsample] = useState(0);          // 0 = off, else target ppi
+  const [pdfPageRange, setPdfPageRange] = useState('');           // '' = all, else "1,3-5"
+  const [pdfSeparateFiles, setPdfSeparateFiles] = useState(false);
+
+  const pdfPageLabel = () => {
+    const d = new Date().toISOString().slice(0, 10);
+    return `${(autoName || 'medartis').slice(0, 60)} · ${formatKey} · ${d}`;
+  };
+
+  /**
+   * Which pages to export. "" → all. "1,3-5" → those.
+   * Invalid input yields ALL rather than nothing: exporting everything when the
+   * range is unparseable is recoverable; exporting an empty PDF looks like a crash.
+   */
+  const parsePageRange = (spec, count) => {
+    const t = (spec || '').trim();
+    if (!t) return Array.from({ length: count }, (_, i) => i);
+    const out = new Set();
+    for (const part of t.split(',')) {
+      const m = part.trim().match(/^(\d+)\s*(?:-\s*(\d+))?$/);
+      if (!m) continue;
+      const a = Math.max(1, parseInt(m[1], 10));
+      const b = m[2] ? Math.min(count, parseInt(m[2], 10)) : a;
+      for (let i = a; i <= b && i <= count; i++) out.add(i - 1);
+    }
+    return out.size ? [...out].sort((x, y) => x - y) : Array.from({ length: count }, (_, i) => i);
+  };
 
   // ── LIVE BRAND CHECK (guide-derived, recomputed on every change) ────
   // Every check states WHY it passed/failed with the real number, and — where a
@@ -4795,6 +5002,36 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
   // Push the current canvas (or every slide for a carousel) into a PDF.
   // Page size = trim + bleed (mm) computed from format pixels / printDpi.
   // For non-printable formats we fall back to 72dpi and no bleed/marks.
+  /**
+   * The canvas → the bytes that go in the PDF.
+   * Downsampling happens HERE, not in jsPDF: jsPDF would embed the full-resolution
+   * image and merely scale it on the page, so the file stays enormous while
+   * claiming to be 150 ppi.
+   */
+  const canvasToPdfImage = (canvas, widthMm) => {
+    let src = canvas;
+    if (pdfDownsample > 0 && widthMm > 0) {
+      const targetPx = Math.round((widthMm / 25.4) * pdfDownsample);
+      if (targetPx > 0 && targetPx < canvas.width) {
+        const k = targetPx / canvas.width;
+        const c = document.createElement('canvas');
+        c.width = targetPx;
+        c.height = Math.max(1, Math.round(canvas.height * k));
+        const cx = c.getContext('2d');
+        cx.imageSmoothingEnabled = true;
+        cx.imageSmoothingQuality = 'high';   // the closest a canvas gets to bicubic
+        cx.drawImage(canvas, 0, 0, c.width, c.height);
+        src = c;
+      }
+    }
+    return pdfImageFormat === 'jpeg'
+      // JPEG has no alpha. Every layout paints its own background first, so this is
+      // safe — but if a transparent canvas ever reaches here it would come out
+      // black, hence the explicit note rather than a silent surprise.
+      ? { data: src.toDataURL('image/jpeg', pdfJpegQuality), fmt: 'JPEG' }
+      : { data: src.toDataURL('image/png'), fmt: 'PNG' };
+  };
+
   const renderCanvasToPdf = (pdf, canvas, formatDef, bleedMm) => {
     const dpi = formatDef.printDpi || 72;
     const trimWmm = formatDef.w / dpi * 25.4;
@@ -4808,34 +5045,23 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
     if (bleedMm > 0) {
       const bleedPx = bleedMm * dpi / 25.4;
       const bleedCanvas = renderOffscreenCanvas(false, undefined, undefined, undefined, 1, undefined, bleedPx);
-      pdf.addImage(bleedCanvas.toDataURL('image/png'), 'PNG', 0, 0, totalWmm, totalHmm, undefined, 'FAST');
+      const bi = canvasToPdfImage(bleedCanvas, totalWmm);
+      pdf.addImage(bi.data, bi.fmt, 0, 0, totalWmm, totalHmm, undefined, 'FAST');
     } else {
       const dataUrl = canvas.toDataURL('image/png');
-      pdf.addImage(dataUrl, 'PNG', 0, 0, trimWmm, trimHmm, undefined, 'FAST');
+      const ti = canvasToPdfImage(canvas, trimWmm);
+      pdf.addImage(ti.data, ti.fmt, 0, 0, trimWmm, trimHmm, undefined, 'FAST');
     }
 
     // Crop marks — drawn outside the trim, inside the bleed margin.
     // Colour adapts: auto picks white-ish for dark bg, near-black for light bg.
-    if (formatDef.printable && pdfCropMarks && bleedMm > 0) {
-      const cm = resolveCropMarkRgb(palette, pdfCropColor);
-      pdf.setDrawColor(cm[0], cm[1], cm[2]);
-      pdf.setLineWidth(0.1);
-      const off = Math.min(1, bleedMm * 0.3);    // 1mm offset from trim
-      const len = Math.min(4, bleedMm * 1.1);    // 4mm long
-      const T = bleedMm, B = bleedMm + trimHmm;
-      const L = bleedMm, R = bleedMm + trimWmm;
-      // TL
-      pdf.line(L - len - off, T, L - off, T);
-      pdf.line(L, T - len - off, L, T - off);
-      // TR
-      pdf.line(R + off, T, R + len + off, T);
-      pdf.line(R, T - len - off, R, T - off);
-      // BL
-      pdf.line(L - len - off, B, L - off, B);
-      pdf.line(L, B + off, L, B + len + off);
-      // BR
-      pdf.line(R + off, B, R + len + off, B);
-      pdf.line(R, B + off, R, B + len + off);
+    if (formatDef.printable && bleedMm > 0) {
+      pdfDrawMarks(pdf, {
+        trimWmm, trimHmm, bleedMm,
+        marks: { ...pdfMarks, crop: pdfCropMarks },
+        rgb: resolveCropMarkRgb(palette, pdfCropColor),
+        pageLabel: pdfPageLabel(),
+      });
     }
     return { totalWmm, totalHmm };
   };
@@ -4870,7 +5096,8 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
     const bitmapScale = computePdfBitmapScale(slideImage, slideFit);
     const bleedPx = bleedMm * dpi / 25.4;
     const bitmap = renderOffscreenCanvas(true, slideContent, slideImage, slideFit, bitmapScale, slideIdx, bleedPx);
-    pdf.addImage(bitmap.toDataURL('image/png'), 'PNG', 0, 0, totalWmm, totalHmm, undefined, 'FAST');
+    const vi = canvasToPdfImage(bitmap, totalWmm);
+    pdf.addImage(vi.data, vi.fmt, 0, 0, totalWmm, totalHmm, undefined, 'FAST');
 
     // Vector text + brand bar on top
     const pad = Math.min(formatDef.w, formatDef.h) * 0.07;
@@ -4951,17 +5178,13 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
     }
 
     // Crop marks (adaptive colour)
-    if (formatDef.printable && pdfCropMarks && bleedMm > 0) {
-      const cm = resolveCropMarkRgb(palette, pdfCropColor);
-      pdf.setDrawColor(cm[0], cm[1], cm[2]);
-      pdf.setLineWidth(0.1);
-      const off = Math.min(1, bleedMm * 0.3);
-      const len = Math.min(4, bleedMm * 1.1);
-      const T = bleedMm, B = bleedMm + trimHmm, L = bleedMm, R = bleedMm + trimWmm;
-      pdf.line(L - len - off, T, L - off, T); pdf.line(L, T - len - off, L, T - off);
-      pdf.line(R + off, T, R + len + off, T); pdf.line(R, T - len - off, R, T - off);
-      pdf.line(L - len - off, B, L - off, B); pdf.line(L, B + off, L, B + len + off);
-      pdf.line(R + off, B, R + len + off, B); pdf.line(R, B + off, R, B + len + off);
+    if (formatDef.printable && bleedMm > 0) {
+      pdfDrawMarks(pdf, {
+        trimWmm, trimHmm, bleedMm,
+        marks: { ...pdfMarks, crop: pdfCropMarks },
+        rgb: resolveCropMarkRgb(palette, pdfCropColor),
+        pageLabel: pdfPageLabel(),
+      });
     }
     return { totalWmm, totalHmm };
   };
@@ -4978,6 +5201,30 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
     const totalWmm = trimWmm + bleedMm * 2;
     const totalHmm = trimHmm + bleedMm * 2;
 
+    // The file name says what the file IS — bleed, marks, vector. Someone opening
+    // a folder of proofs a week later has only this to go on.
+    const pdfBaseName = () => {
+      const tags = [];
+      if (bleedMm > 0) tags.push('print');
+      if (pdfCropMarks && bleedMm > 0) tags.push('marks');
+      if (pdfVector && PDF_FONT_CACHE.loaded) tags.push('vector');
+      return `medartis-${formatKey}${tags.length ? '_' + tags.join('-') : ''}`;
+    };
+
+    // One constructor, so a separate-files export produces documents identical to
+    // the combined one — including the registered fonts, without which the vector
+    // path silently falls back to raster on file 2 onwards.
+    const newPdfDoc = () => {
+      const d = new jsPDF({
+        orientation: totalWmm > totalHmm ? 'landscape' : 'portrait',
+        unit: 'mm',
+        format: [totalWmm, totalHmm],
+        compress: true,
+      });
+      if (pdfVector && PDF_FONT_CACHE.loaded) registerPdfFonts(d);
+      return d;
+    };
+
     const pdf = new jsPDF({
       orientation: totalWmm > totalHmm ? 'landscape' : 'portrait',
       unit: 'mm',
@@ -4993,70 +5240,81 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
       if (PDF_FONT_CACHE.loaded) registerPdfFonts(pdf);
     }
 
-    const renderSlide = async (slideIdx) => {
+    const renderSlide = async (slideIdx, doc = pdf) => {
       const slideContent = format.multi ? (carouselContent[slideIdx] || initialContent) : content;
       const slideImage   = format.multi ? carouselImages[slideIdx] : image;
       const slideFit     = format.multi ? (carouselFits[slideIdx] || DEFAULT_FIT) : imageFit;
 
       if (pdfVector && PDF_FONT_CACHE.loaded) {
-        await renderVectorPdfPage(pdf, slideContent, slideImage, slideFit, formatDef, bleedMm, slideIdx);
+        await renderVectorPdfPage(doc, slideContent, slideImage, slideFit, formatDef, bleedMm, slideIdx);
       } else {
         // Legacy raster path
         if (format.multi) {
           setCarouselSlide(slideIdx);
           await new Promise(r => setTimeout(r, 220));
         }
-        renderCanvasToPdf(pdf, canvasRef.current, formatDef, bleedMm);
+        renderCanvasToPdf(doc, canvasRef.current, formatDef, bleedMm);
       }
     };
 
     // A paginated agenda: one PDF page per content page (mirrors the carousel loop),
     // each with its own optional background image.
-    const renderPage = async (idx) => {
+    const renderPage = async (idx, doc = pdf) => {
       const pageContent = pages[idx] || content;
       const pageImage = pageImages[idx] || image;
       const pageFit = pageFits[idx] || DEFAULT_FIT;
       if (pdfVector && PDF_FONT_CACHE.loaded) {
-        await renderVectorPdfPage(pdf, pageContent, pageImage, pageFit, formatDef, bleedMm, 0);
+        await renderVectorPdfPage(doc, pageContent, pageImage, pageFit, formatDef, bleedMm, 0);
       } else {
         setPageIdx(idx);
         await new Promise(r => setTimeout(r, 220));
-        renderCanvasToPdf(pdf, canvasRef.current, formatDef, bleedMm);
+        renderCanvasToPdf(doc, canvasRef.current, formatDef, bleedMm);
       }
     };
 
-    if (isBrochure) {
-      // One PDF page per brochure page, rendered off-screen at print size so the
-      // live preview never flickers and every page keeps its own image + crop.
-      const bleedPx = Math.round((bleedMm / 25.4) * dpi);
-      for (let i = 0; i < brochurePages.length; i++) {
-        if (i > 0) newPdfPage(pdf, totalWmm, totalHmm);
+    // How many frames does this document have, and which were asked for?
+    const frameCount = isBrochure ? brochurePages.length
+      : pages ? pages.length
+      : format.multi ? carouselSlides : 1;
+    const wanted = parsePageRange(pdfPageRange, frameCount);
+
+    // Render ONE frame into the pdf it is handed. Separate-files mode calls this
+    // with a fresh document each time; otherwise every frame lands in one.
+    const renderFrame = async (i, doc, firstInDoc) => {
+      if (!firstInDoc) newPdfPage(doc, totalWmm, totalHmm);
+      if (isBrochure) {
+        const bleedPx = Math.round((bleedMm / 25.4) * dpi);
         const pg = brochurePages[i];
         const c = renderOffscreenCanvas(false, pg, brochureImgs[pg.id] || null, pg.fit || DEFAULT_FIT, 1, 0, bleedPx);
-        renderCanvasToPdf(pdf, c, formatDef, bleedMm);
+        renderCanvasToPdf(doc, c, formatDef, bleedMm);
+      } else if (pages) {
+        await renderPage(i, doc);
+      } else {
+        await renderSlide(i, doc);
       }
-    } else if (pages) {
-      const restore = pageIdx;
-      for (let i = 0; i < pages.length; i++) {
-        if (i > 0) newPdfPage(pdf, totalWmm, totalHmm);
-        await renderPage(i);
+    };
+
+    if (pdfSeparateFiles && wanted.length > 1) {
+      // A printer asking for "one PDF per page" is not being difficult — their
+      // imposition software often takes single-page files. Each is numbered by its
+      // REAL frame number, so page 3 is _03 even when the range started at 3.
+      for (const i of wanted) {
+        const doc = newPdfDoc();
+        await renderFrame(i, doc, true);
+        doc.save(`${pdfBaseName()}_${String(i + 1).padStart(2, '0')}.pdf`);
+        await new Promise((r) => setTimeout(r, 150));   // browsers throttle rapid saves
       }
-      setPageIdx(restore);
-    } else if (format.multi) {
-      for (let i = 0; i < carouselSlides; i++) {
-        if (i > 0) newPdfPage(pdf, totalWmm, totalHmm);
-        await renderSlide(i);
-      }
-    } else {
-      await renderSlide(0);
+      if (pages) setPageIdx(pageIdx);
+      return;
     }
 
-    const tags = [];
-    if (bleedMm > 0) tags.push('print');
-    if (pdfCropMarks && bleedMm > 0) tags.push('marks');
-    if (pdfVector && PDF_FONT_CACHE.loaded) tags.push('vector');
-    const suffix = tags.length ? '_' + tags.join('-') : '';
-    pdf.save(`medartis-${formatKey}${suffix}-${Date.now()}.pdf`);
+    const restore = pageIdx;
+    for (let n = 0; n < wanted.length; n++) {
+      await renderFrame(wanted[n], pdf, n === 0);
+    }
+    if (pages) setPageIdx(restore);
+
+    pdf.save(`${pdfBaseName()}-${Date.now()}.pdf`);
   };
 
   // ── Presets (localStorage + JSON import/export) ─────────────────
@@ -5551,6 +5809,15 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
       fontFamily: BRAND.display,
       background: BRAND.coal, color: BRAND.ink, overflow: 'hidden'
     }}>
+      {fmtEditor && (
+        <FormatEditor
+          initial={fmtEditor}
+          onSave={saveCustomFormat}
+          onCancel={() => setFmtEditor(null)}
+          onDelete={fmtEditor.id ? () => deleteCustomFormat(fmtEditor.id) : null}
+        />
+      )}
+
       {/* Branded confirm — mounted at the top of the app so it overlays everything. */}
       {confirmDlg && (
         <ConfirmDialog
@@ -5665,13 +5932,7 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
         <SideGroup n="1" label="Canvas" />
 
         <Section label={SEC('FORMAT', 'FORMAT')} {...sp('FORMAT')}>
-          {Object.entries(
-            Object.entries(FORMATS).reduce((acc, [key, fmt]) => {
-              const g = fmt.group || 'Other';
-              (acc[g] = acc[g] || []).push([key, fmt]);
-              return acc;
-            }, {})
-          ).map(([group, entries]) => {
+          {Object.entries(formatGroups).map(([group, entries]) => {
             const key = 'fmt:' + group;
             const isCollapsed = collapsed.has(key);
             const activeInGroup = entries.some(([k]) => k === formatKey);
@@ -5699,14 +5960,48 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
                   }}>{entries.length}</span>
                 </button>
                 {!isCollapsed && entries.map(([k, fmt]) => (
-                  <SidebarBtn key={k} active={formatKey === k} onClick={() => setFormatKey(k)}>
-                    <span>{fmt.label}</span>
-                    <span style={{ fontSize: 10, opacity: 0.55, fontFamily: BRAND.mono, letterSpacing: '0.04em' }}>{fmt.ratio}</span>
-                  </SidebarBtn>
+                  <div key={k} style={{ position: 'relative', display: 'flex', alignItems: 'stretch' }}>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <SidebarBtn active={formatKey === k} onClick={() => setFormatKey(k)}>
+                        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{fmt.label}</span>
+                        <span style={{ fontSize: 10, opacity: 0.55, fontFamily: BRAND.mono, letterSpacing: '0.04em' }}>{fmt.ratio}</span>
+                      </SidebarBtn>
+                    </div>
+                    {/* CUSTOM → edit. BUILT-IN → duplicate.
+                        Deliberately not an unlock: "Instagram Post" is 1080×1080
+                        because Instagram says so. Editing it in place would leave a
+                        format LABELLED Instagram Post that is not one, and every
+                        preset and caption built on it would quietly lie. Duplicating
+                        gives you the size in one click and keeps the name honest. */}
+                    <button
+                      title={fmt.custom ? 'Edit this format' : `Duplicate "${fmt.label}" as a custom format you can resize`}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setFmtEditor(fmt.custom
+                          ? { id: fmt.id, label: fmt.label, unit: fmt.srcUnit ?? 'px',
+                              w: fmt.srcW ?? fmt.w, h: fmt.srcH ?? fmt.h,
+                              dpi: fmt.printDpi ?? 300, printable: !!fmt.printable,
+                              typeCategory: fmt.typeCategory }
+                          : duplicateAsCustom(k, fmt));
+                      }}
+                      style={{
+                        width: 26, flexShrink: 0, marginLeft: 2, cursor: 'pointer',
+                        background: 'transparent', border: `1px solid ${BRAND.ink100}`,
+                        color: BRAND.ink300, fontSize: 11, borderRadius: 0, lineHeight: 1,
+                      }}>{fmt.custom ? '✎' : '⧉'}</button>
+                  </div>
                 ))}
               </div>
             );
           })}
+
+          <button onClick={() => setFmtEditor({ label: '', unit: 'px', w: 1080, h: 1080, dpi: 300, printable: false })}
+            style={{
+              width: '100%', marginTop: 6, padding: '10px', cursor: 'pointer',
+              background: 'transparent', color: BRAND.ink600,
+              border: `1px dashed ${BRAND.ink300}`, borderRadius: 0,
+              fontFamily: BRAND.mono, fontSize: 10, letterSpacing: '0.12em', textTransform: 'uppercase',
+            }}>+ New format</button>
         </Section>
 
         {!isBrochure && (
@@ -7015,7 +7310,120 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
                   </label>
                   <ColorTriToggle value={pdfCropColor} onChange={setPdfCropColor} />
                 </div>
+
+                {/* The rest of the printer's marks. Each sits OUTSIDE the trim, so
+                    they need bleed to exist in — hence the whole block folds away
+                    without it, rather than offering checkboxes that do nothing. */}
+                {pdfBleed && (
+                  <div style={{ marginTop: 8, paddingTop: 8, borderTop: `1px solid ${BRAND.ink100}` }}>
+                    {[
+                      ['bleed', 'Bleed marks', 'Shows the printer where the artwork must reach — proof that the bleed is real'],
+                      ['registration', 'Registration marks', 'Printed in every plate: if they fan out, the plates are misaligned'],
+                      ['colourBar', 'Colour bar', 'Known patches for checking ink density on press'],
+                      ['pageInfo', 'Page information', 'Filename and date in the margin — answers "which file is this?"'],
+                    ].map(([k, label, why]) => (
+                      <label key={k} title={why} style={{
+                        display: 'flex', alignItems: 'center', gap: 8, marginBottom: 5,
+                        fontFamily: BRAND.mono, fontSize: 10, color: BRAND.ink600, cursor: 'pointer',
+                      }}>
+                        <input type="checkbox" checked={!!pdfMarks[k]}
+                               onChange={(e) => setPdfMarks((m) => ({ ...m, [k]: e.target.checked }))} />
+                        {label.toUpperCase()}
+                      </label>
+                    ))}
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 6 }}>
+                      <label style={{ fontFamily: BRAND.mono, fontSize: 9, color: BRAND.ink600, letterSpacing: '0.06em' }}>
+                        OFFSET · {pdfMarks.offsetMm.toFixed(2)} MM
+                        <input type="range" min="0" max="3" step="0.1" value={pdfMarks.offsetMm}
+                               onChange={(e) => setPdfMarks((m) => ({ ...m, offsetMm: Number(e.target.value) }))}
+                               style={{ width: '100%' }} />
+                      </label>
+                      <label style={{ fontFamily: BRAND.mono, fontSize: 9, color: BRAND.ink600, letterSpacing: '0.06em' }}>
+                        WEIGHT · {pdfMarks.weightPt.toFixed(2)} PT
+                        <input type="range" min="0.1" max="1" step="0.05" value={pdfMarks.weightPt}
+                               onChange={(e) => setPdfMarks((m) => ({ ...m, weightPt: Number(e.target.value) }))}
+                               style={{ width: '100%' }} />
+                      </label>
+                    </div>
+                  </div>
+                )}
               </>
+            )}
+
+            {/* ── IMAGE COMPRESSION ─────────────────────────────────── */}
+            <div style={{ marginTop: 10, paddingTop: 8, borderTop: `1px solid ${BRAND.ink100}` }}>
+              <div style={{ fontFamily: BRAND.mono, fontSize: 9, letterSpacing: '0.1em',
+                            textTransform: 'uppercase', color: BRAND.ink600, marginBottom: 5 }}>Images</div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4, marginBottom: 6 }}>
+                <SidebarBtn active={pdfImageFormat === 'jpeg'} onClick={() => setPdfImageFormat('jpeg')}>JPEG</SidebarBtn>
+                <SidebarBtn active={pdfImageFormat === 'png'} onClick={() => setPdfImageFormat('png')}>PNG · lossless</SidebarBtn>
+              </div>
+              {pdfImageFormat === 'jpeg' && (
+                <label style={{ display: 'block', fontFamily: BRAND.mono, fontSize: 9,
+                                color: BRAND.ink600, letterSpacing: '0.06em', marginBottom: 6 }}>
+                  QUALITY · {Math.round(pdfJpegQuality * 100)}
+                  <input type="range" min="0.5" max="1" step="0.01" value={pdfJpegQuality}
+                         onChange={(e) => setPdfJpegQuality(Number(e.target.value))} style={{ width: '100%' }} />
+                </label>
+              )}
+              <label style={{ display: 'block', fontFamily: BRAND.mono, fontSize: 9,
+                              color: BRAND.ink600, letterSpacing: '0.06em', marginBottom: 4 }}>
+                RESAMPLE · {pdfDownsample === 0 ? 'OFF — FULL RESOLUTION' : `${pdfDownsample} PPI`}
+              </label>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 4, marginBottom: 6 }}>
+                {[0, 150, 220, 300].map((d) => (
+                  <SidebarBtn key={d} active={pdfDownsample === d} onClick={() => setPdfDownsample(d)}>
+                    {d === 0 ? 'Off' : d}
+                  </SidebarBtn>
+                ))}
+              </div>
+              <div style={{ fontFamily: BRAND.mono, fontSize: 8.5, color: BRAND.ink300,
+                            lineHeight: 1.6, letterSpacing: '0.03em' }}>
+                {pdfImageFormat === 'png'
+                  ? 'PNG IS LOSSLESS — RIGHT FOR FLAT COLOUR AND HARD TYPE EDGES, WHERE JPEG RINGS. A 300 DPI A4 PHOTO LANDS AROUND 30 MB.'
+                  : 'JPEG AT 90+ IS VISUALLY IDENTICAL ON PRESS AND ROUGHLY A TENTH OF THE SIZE. RESAMPLING HAPPENS BEFORE EMBEDDING, SO THE FILE REALLY IS SMALLER.'}
+              </div>
+            </div>
+
+            {/* ── PAGES ─────────────────────────────────────────────── */}
+            {(isBrochure || pages || format.multi) && (
+              <div style={{ marginTop: 10, paddingTop: 8, borderTop: `1px solid ${BRAND.ink100}` }}>
+                <div style={{ fontFamily: BRAND.mono, fontSize: 9, letterSpacing: '0.1em',
+                              textTransform: 'uppercase', color: BRAND.ink600, marginBottom: 5 }}>Pages</div>
+                <input type="text" value={pdfPageRange} onChange={(e) => setPdfPageRange(e.target.value)}
+                       placeholder="All · or 1,3-5"
+                       style={{ width: '100%', boxSizing: 'border-box', marginBottom: 6 }} />
+                <label style={{ display: 'flex', alignItems: 'center', gap: 8,
+                                fontFamily: BRAND.mono, fontSize: 10, color: BRAND.ink600, cursor: 'pointer' }}>
+                  <input type="checkbox" checked={pdfSeparateFiles}
+                         onChange={(e) => setPdfSeparateFiles(e.target.checked)} />
+                  ONE FILE PER PAGE
+                </label>
+              </div>
+            )}
+
+            {/* ── WHAT THIS EXPORT CANNOT DO ────────────────────────── */}
+            {pdfBleed && (
+              <details style={{ marginTop: 10 }}>
+                <summary style={{ cursor: 'pointer', fontFamily: BRAND.mono, fontSize: 8.5,
+                                  color: BRAND.ink300, letterSpacing: '0.06em' }}>
+                  NO PDF/X OR CMYK — WHY?
+                </summary>
+                <div style={{ marginTop: 5, padding: '8px 9px', background: BRAND.paper,
+                              border: `1px solid ${BRAND.ink100}`, fontFamily: BRAND.display,
+                              fontSize: 10.5, color: BRAND.ink600, lineHeight: 1.6 }}>
+                  These files are <b>RGB</b>. A PDF/X-3 file needs an embedded ICC output intent
+                  (FOGRA39 and the like), and true CMYK needs profile-based separation — the PDF
+                  engine here has neither. A “PDF/X” or “Convert to CMYK” checkbox would produce
+                  an RGB file wearing a label that says otherwise, and you would only find out at
+                  proof stage.
+                  <div style={{ marginTop: 6, color: BRAND.ink300 }}>
+                    Send the vector PDF to the printer and let their RIP separate it — that is what
+                    their profile is for. For a certified PDF/X, open this file in Acrobat or
+                    InDesign and export with your house preset.
+                  </div>
+                </div>
+              </details>
             )}
           </div>
           <button onClick={downloadPdf} style={{
@@ -7225,6 +7633,154 @@ function sectionNumbers(vis) {
   const map = {};
   vis.forEach((k, i) => { map[k] = String(i + 1).padStart(2, '0'); });
   return map;
+}
+
+// ═══ FORMAT EDITOR ═══════════════════════════════════════════════════
+// A printer says "210 mm", never "2480 px". So the unit toggle is not a
+// convenience — typing a millimetre size into a pixel field is how you discover,
+// at proof stage, that the job is 8% wrong.
+function FormatEditor({ initial, onSave, onCancel, onDelete }) {
+  const [label, setLabel] = useState(initial.label ?? '');
+  const [unit, setUnit] = useState(initial.unit ?? 'px');
+  const [w, setW] = useState(String(initial.w ?? 1080));
+  const [h, setH] = useState(String(initial.h ?? 1080));
+  const [dpi, setDpi] = useState(initial.dpi ?? 300);
+  const [printable, setPrintable] = useState(!!initial.printable);
+  const [cat, setCat] = useState(initial.typeCategory ?? '');
+  const [err, setErr] = useState(null);
+  const nameRef = useRef(null);
+  useEffect(() => { nameRef.current?.focus(); nameRef.current?.select(); }, []);
+
+  const nw = parseFloat(w), nh = parseFloat(h);
+  const px = unit === 'mm'
+    ? { w: Math.round((nw / 25.4) * dpi), h: Math.round((nh / 25.4) * dpi) }
+    : { w: Math.round(nw), h: Math.round(nh) };
+  const sizeErr = validateSize(px.w, px.h);
+
+  const save = () => {
+    try {
+      onSave(makeCustomFormat({
+        label, w: nw, h: nh, unit, dpi, printable,
+        typeCategory: cat || undefined,
+      }));
+    } catch (e) { setErr(e.message); }
+  };
+
+  const lab = { display: 'block', fontFamily: BRAND.mono, fontSize: 9, letterSpacing: '0.1em',
+                textTransform: 'uppercase', color: BRAND.ink600, marginBottom: 4 };
+  const fld = { width: '100%', boxSizing: 'border-box', padding: '9px 10px',
+                border: `1px solid ${BRAND.ink100}`, background: BRAND.paper, color: BRAND.ink,
+                fontSize: 12, fontFamily: BRAND.display, borderRadius: 0 };
+
+  return (
+    <div onMouseDown={(e) => { if (e.target === e.currentTarget) onCancel(); }}
+      style={{ position: 'fixed', inset: 0, zIndex: 9998, background: 'rgba(19,19,16,0.55)',
+               backdropFilter: 'blur(3px)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+      <div style={{ width: 'min(460px, calc(100vw - 48px))', background: BRAND.paper,
+                    border: `1px solid ${BRAND.ink100}`, boxShadow: '0 40px 90px rgba(0,0,0,0.45)' }}>
+        <div style={{ background: BRAND.coal, padding: '18px 22px 16px' }}>
+          <div style={{ fontFamily: BRAND.mono, fontSize: 9, letterSpacing: '0.18em',
+                        textTransform: 'uppercase', color: BRAND.gold, marginBottom: 6 }}>
+            {initial.id ? 'Edit format' : initial.from ? `Duplicated from ${initial.from}` : 'New format'}
+          </div>
+          <div style={{ fontFamily: BRAND.display, fontSize: 17, fontWeight: 600, color: BRAND.bone00 }}>
+            {initial.id ? label || 'Custom format' : 'A format of your own'}
+          </div>
+        </div>
+
+        <div style={{ padding: '18px 22px' }}>
+          <label style={lab}>Name</label>
+          <input ref={nameRef} style={{ ...fld, marginBottom: 12 }} value={label}
+                 placeholder="e.g. Congress backdrop 3×2 m"
+                 onChange={(e) => { setLabel(e.target.value); setErr(null); }} />
+
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4, marginBottom: 10 }}>
+            <SidebarBtn active={unit === 'px'} onClick={() => setUnit('px')}>Pixels</SidebarBtn>
+            <SidebarBtn active={unit === 'mm'} onClick={() => { setUnit('mm'); setPrintable(true); }}>Millimetres</SidebarBtn>
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 4 }}>
+            <div>
+              <label style={lab}>Width · {unit}</label>
+              <input style={fld} value={w} inputMode="decimal"
+                     onChange={(e) => { setW(e.target.value); setErr(null); }} />
+            </div>
+            <div>
+              <label style={lab}>Height · {unit}</label>
+              <input style={fld} value={h} inputMode="decimal"
+                     onChange={(e) => { setH(e.target.value); setErr(null); }} />
+            </div>
+          </div>
+
+          {/* Always show the OTHER unit. The mistake this prevents is silent. */}
+          <div style={{ fontFamily: BRAND.mono, fontSize: 9, color: BRAND.ink300,
+                        letterSpacing: '0.04em', marginBottom: 12 }}>
+            {Number.isFinite(nw) && Number.isFinite(nh) ? (unit === 'mm'
+              ? `= ${px.w} × ${px.h} px at ${dpi} dpi · ${ratioLabel(px.w, px.h)}`
+              : `= ${pxToMm(px.w, dpi).toFixed(1)} × ${pxToMm(px.h, dpi).toFixed(1)} mm at ${dpi} dpi · ${ratioLabel(px.w, px.h)}`) : ''}
+          </div>
+
+          <label style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10,
+                          fontSize: 12, color: BRAND.ink600 }}>
+            <input type="checkbox" checked={printable} onChange={(e) => setPrintable(e.target.checked)} />
+            For print — enables the PDF export with bleed and crop marks
+          </label>
+
+          {printable && (
+            <>
+              <label style={lab}>Resolution</label>
+              <div style={{ display: 'grid', gridTemplateColumns: `repeat(${DPI_CHOICES.length}, 1fr)`, gap: 4, marginBottom: 12 }}>
+                {DPI_CHOICES.map((d) => (
+                  <SidebarBtn key={d} active={dpi === d} onClick={() => setDpi(d)}>{d}</SidebarBtn>
+                ))}
+              </div>
+            </>
+          )}
+
+          <label style={lab}>Typography
+            <span style={{ color: BRAND.ink300, letterSpacing: 0, textTransform: 'none' }}> · leave on Auto unless it looks wrong</span>
+          </label>
+          <select style={{ ...fld, marginBottom: 6 }} value={cat} onChange={(e) => setCat(e.target.value)}>
+            <option value="">Auto — guess from the size</option>
+            {TYPE_CATEGORY_KEYS.map((k) => <option key={k} value={k}>{TYPE_CATEGORY_LABELS[k]}</option>)}
+          </select>
+          <div style={{ fontFamily: BRAND.mono, fontSize: 8.5, color: BRAND.ink300,
+                        lineHeight: 1.6, letterSpacing: '0.03em', marginBottom: 12 }}>
+            THE MODULAR SCALE SIZES TYPE BY WHAT A FORMAT IS FOR, NOT BY ITS PIXELS — SO A
+            BUSINESS CARD AND A POSTER OF THE SAME RATIO GET DIFFERENT HEADLINES.
+          </div>
+
+          {(sizeErr || err) && (
+            <div style={{ padding: '9px 10px', background: '#FDF2F0', border: '1px solid #C8200A',
+                          color: '#C8200A', fontSize: 11.5, lineHeight: 1.55, marginBottom: 12 }}>
+              {err || sizeErr}
+            </div>
+          )}
+
+          <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', alignItems: 'center' }}>
+            {initial.id && onDelete && (
+              <button onClick={onDelete} style={{
+                marginRight: 'auto', padding: '9px 14px', background: 'transparent', color: '#C8200A',
+                border: '1px solid #C8200A', borderRadius: 0, cursor: 'pointer',
+                fontFamily: BRAND.mono, fontSize: 10, letterSpacing: '0.1em', textTransform: 'uppercase',
+              }}>Delete</button>
+            )}
+            <button onClick={onCancel} style={{
+              padding: '9px 16px', background: BRAND.paper, color: BRAND.ink,
+              border: `1px solid ${BRAND.ink100}`, borderRadius: 0, cursor: 'pointer',
+              fontFamily: BRAND.mono, fontSize: 10.5, letterSpacing: '0.12em', textTransform: 'uppercase',
+            }}>Cancel</button>
+            <button onClick={save} disabled={!!sizeErr || !label.trim()} style={{
+              padding: '9px 16px', background: (sizeErr || !label.trim()) ? BRAND.ink300 : BRAND.ink,
+              color: BRAND.bone00, border: 'none', borderRadius: 0,
+              cursor: (sizeErr || !label.trim()) ? 'not-allowed' : 'pointer',
+              fontFamily: BRAND.mono, fontSize: 10.5, letterSpacing: '0.12em', textTransform: 'uppercase',
+            }}>{initial.id ? 'Save' : 'Create'}</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 // ═══ CONFIRM / NOTICE DIALOG ═════════════════════════════════════════
