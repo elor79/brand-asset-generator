@@ -2663,6 +2663,29 @@ function drawPartnerLogos(ctx, frame, partners, palette) {
 // CLEAR SPACE IS RESERVED, NOT ASSUMED. Each mark reserves 1.5x its own height,
 // per groupBrands.js — the medartis 1.5x-d rule generalised honestly rather than
 // pretended to apply to marks that have no "d".
+/**
+ * The band the Group lockup occupies, clear space included.
+ *
+ * This exists because drawGroupLockup was RETURNING this band and every caller was
+ * throwing it away, while a comment above it claimed "so text keeps out". Text did
+ * not keep out. brandBarClearance had never heard of the Group, so the lockup and
+ * the headline were laying claim to the same strip and whichever drew second won.
+ *
+ * Geometry that two functions must agree on lives in one function. The draw cannot
+ * drift from the reservation if they are the same arithmetic.
+ */
+function groupLockupBand(frame, group) {
+  const band = groupLockupBand(frame, group);
+  if (!band) return null;
+  const { w, h, padX, padY } = frame;
+  const boxH = band.h, boxW = band.w;
+  const y = group.pos === 'top' ? padY : h - padY - boxH;
+  // The mark's own clear space. GROUP_CLEAR_RATIO x its drawn height, per
+  // groupBrands.js — the 1.5x-d rule generalised rather than pretended at.
+  const clear = clearSpaceFor(GROUP_MARK, boxH) * 0.5;
+  return { x: padX, y, w: boxW, h: boxH, top: y - clear, bottom: y + boxH + clear, clear };
+}
+
 function drawGroupLockup(ctx, frame, group, palette, surface) {
   if (!group?.enabled) return null;
   const { w, h, padX, padY } = frame;
@@ -2757,9 +2780,7 @@ function drawGroupLockup(ctx, frame, group, palette, surface) {
     ctx.restore();
   }
 
-  // The band this lockup owns, INCLUDING its clear space — so text keeps out.
-  const clear = clearSpaceFor(rects[0].mark, Math.max(...rects.map((r) => r.h)));
-  return { y, h: boxH, top: y - clear, bottom: y + boxH + clear };
+  return band;
 }
 
 // ═══ LAYOUT · TYPE ONLY ══════════════════════════════════════════════
@@ -4541,6 +4562,18 @@ function brandBarClearance(ctx, frame, opts) {
     if (flBox.pos === 'tl' || flBox.pos === 'tr') topY    = Math.max(topY,    flBox.y + gap);
     if (flBox.pos === 'bl' || flBox.pos === 'br') bottomY = Math.min(bottomY, flTop - gap);
   }
+  // THE GROUP LOCKUP IS FURNITURE TOO.
+  //
+  // It replaces the wordmark, so the wordmark's own reservation above no longer
+  // covers the space actually occupied — the Group mark sits in a full-width band
+  // at the top or bottom, not in a corner. Without this the headline and the
+  // lockup both claim the strip and the later draw wins, silently.
+  const gb = groupLockupBand(frame, opts.group);
+  if (gb) {
+    if ((opts.group.pos ?? 'top') === 'top') topY = Math.max(topY, gb.bottom);
+    else bottomY = Math.min(bottomY, gb.top);
+  }
+
   return {
     topY, bottomY,
     // Legacy deltas, still measured from the safe area — kept so nothing silently
@@ -5199,7 +5232,11 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
     // sender — it is one of the three brands under the house, exactly like the other
     // two, and it appears (or not) on the same terms.
     coBrands: { medartis: false, neoortho: false, kerimedical: false },
-    pos: 'bottom',             // top | bottom
+    // TOP by default. The Group mark is the SENDER — it says who is speaking, and a
+    // sender reads before the message, not after it. The medartis wordmark defaults
+    // to a top corner for the same reason; the Group inherits the logic, not a
+    // different taste.
+    pos: 'top',                // top | bottom
     variant: 'auto',           // auto | color | white | mono
     size: 0.14,                // fraction of the SHORT EDGE — never of the canvas
     // The space between co-brands, as a fraction of their own drawn height — not of
@@ -7975,7 +8012,7 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
                     <label style={lab}>Position</label>
                     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4, marginBottom: 10 }}>
                       {[['top', 'Top'], ['bottom', 'Bottom']].map(([k, l]) => (
-                        <SidebarBtn key={k} active={group.pos === k} onClick={() => set({ pos: k })}>{l}</SidebarBtn>
+                        <SidebarBtn key={k} active={(group.pos ?? 'top') === k} onClick={() => set({ pos: k })}>{l}</SidebarBtn>
                       ))}
                     </div>
 
