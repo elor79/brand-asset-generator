@@ -443,7 +443,40 @@ const LAYOUTS = {
   'image-bottom': { label: 'Image · Text top', draw: (ctx, frame, content, image, opts) => drawImageTextSplit(ctx, frame, content, image, opts, 'top') },
   'image-top':    { label: 'Text · Image bottom', draw: (ctx, frame, content, image, opts) => drawImageTextSplit(ctx, frame, content, image, opts, 'bottom') },
   'overlay':      { label: 'Full-bleed overlay', draw: (ctx, frame, content, image, opts) => drawFullBleedOverlay(ctx, frame, content, image, opts) },
+  'split-right':  { label: 'Image right · Text left', draw: (ctx, frame, content, image, opts) => drawSideBySide(ctx, frame, content, image, opts, 'right') },
+  'split-left':   { label: 'Image left · Text right', draw: (ctx, frame, content, image, opts) => drawSideBySide(ctx, frame, content, image, opts, 'left') },
+  'type-only':    { label: 'Type only · no image', draw: (ctx, frame, content, image, opts) => drawTypeOnly(ctx, frame, content, image, opts) },
+  'table':        { label: 'Table · agenda & facts', draw: (ctx, frame, content, image, opts) => drawTable(ctx, frame, content, image, opts) },
+  'stat':         { label: 'Statistic · one number', draw: (ctx, frame, content, image, opts) => drawStat(ctx, frame, content, image, opts) },
+  'duo':          { label: 'Duo · two images compared', draw: (ctx, frame, content, image, opts) => drawDuo(ctx, frame, content, image, opts) },
   'lanyard':      { label: 'Lanyard · repeating mark', draw: (ctx, frame, content, image, opts) => drawLanyardStrip(ctx, frame, content, image, opts) },
+};
+
+// ─── WHICH LAYOUT IS A TEMPLATE FOR? ─────────────────────────────────
+// A story has a shape. "Did you know" is a statistic; an agenda is a table; a
+// quote is type on a surface with nothing else in the way. Until now every
+// template landed on whatever layout happened to be selected, so the layouts and
+// the templates — the two halves of the same decision — knew nothing about each
+// other.
+//
+// This is a SUGGESTION, not a rule: it is applied when you pick a template and
+// have not overridden the layout yourself, and it is offered as a one-click hint
+// when you have. The system should have an opinion and lose the argument.
+const TEMPLATE_LAYOUT = {
+  'quote-card':          'type-only',    // a pull quote wants nothing else on the page
+  'save-the-date':       'table',        // date · time · venue IS the content
+  'event-invitation':    'table',
+  'programme-cover':     'table',
+  'agenda-flyer':        'table',
+  'did-you-know':        'stat',         // the number is the message
+  'anniversary':         'stat',
+  'launch-countdown':    'stat',
+  'before-after':        'duo',          // a comparison must be seen together
+  'internal-comms':      'type-only',
+  'celebration-card':    'type-only',
+  'thank-you-card':      'type-only',
+  'surgeon-recognition': 'split-right',  // a portrait beside the words
+  'lanyard':             'lanyard',
 };
 
 // ─── CUSTOM FORMATS ──────────────────────────────────────────────────
@@ -459,21 +492,33 @@ function registerCustomFormats() {
 registerCustomFormats();
 
 // Default to all 3 layouts; explicit overrides for formats where one doesn't make sense.
-const ALL_LAYOUTS = ['image-bottom', 'image-top', 'overlay'];
+// The order IS the menu. Image-led first (the common case), then the composed
+// ones, then type-only — which is the right answer more often than its position
+// suggests, but should not be the first thing offered.
+const ALL_LAYOUTS = ['image-bottom', 'image-top', 'overlay', 'split-right', 'split-left', 'duo', 'stat', 'table', 'type-only'];
+// What a format can HOLD, not what we happen to have written. A 4:1 banner has no
+// room for a stat's figure or a table's rows — offering them would be offering a
+// broken result. A strap has exactly one layout, and that is not a limitation.
 const FORMAT_LAYOUTS_OVERRIDES = {
   'lanyard-20':    ['lanyard'],
   'lanyard-25':    ['lanyard'],
-  'ig-carousel':   ['image-bottom', 'overlay'],
-  'li-ad':         ['image-bottom', 'overlay'],
-  'li-banner':     ['image-bottom', 'overlay'],
-  'fb-cover':      ['image-bottom', 'overlay'],
-  'x-header':      ['image-bottom', 'overlay'],
-  'yt-banner':     ['image-bottom', 'overlay'],
-  'screensaver':   ['overlay', 'image-bottom'],
-  'screensaver-4k':['overlay', 'image-bottom'],
-  'email-header':  ['image-bottom', 'overlay'],
-  'email-footer':  ['image-bottom', 'overlay'],
-  'web-hero':      ['image-bottom', 'overlay'],
+  // Carousels: one message per slide, so duo (which wants two pictures at once)
+  // and table (which wants a page) are the wrong tools.
+  'ig-carousel':   ['image-bottom', 'overlay', 'split-right', 'split-left', 'stat', 'type-only'],
+  'li-carousel':   ['image-bottom', 'overlay', 'split-right', 'split-left', 'stat', 'type-only'],
+  // Wide + shallow: side-by-side is the natural move, a table is not.
+  'li-ad':         ['image-bottom', 'overlay', 'split-right', 'split-left', 'type-only'],
+  'li-banner':     ['image-bottom', 'overlay', 'split-right', 'split-left', 'type-only'],
+  'fb-cover':      ['image-bottom', 'overlay', 'split-right', 'split-left', 'type-only'],
+  'x-header':      ['image-bottom', 'overlay', 'split-right', 'split-left', 'type-only'],
+  'yt-banner':     ['image-bottom', 'overlay', 'split-right', 'split-left', 'type-only'],
+  'email-header':  ['image-bottom', 'overlay', 'split-right', 'split-left', 'type-only'],
+  'email-footer':  ['image-bottom', 'overlay', 'split-right', 'split-left', 'type-only'],
+  'web-hero':      ['overlay', 'image-bottom', 'split-right', 'split-left', 'type-only'],
+  'screensaver':   ['overlay', 'image-bottom', 'split-right', 'split-left', 'stat', 'type-only'],
+  'screensaver-4k':['overlay', 'image-bottom', 'split-right', 'split-left', 'stat', 'type-only'],
+  // A business card is 85 mm wide. A table on it would be a joke.
+  'business-card': ['type-only', 'split-right', 'split-left', 'image-bottom'],
 };
 const FORMAT_LAYOUTS = new Proxy({}, {
   get(_, k) { return FORMAT_LAYOUTS_OVERRIDES[k] || ALL_LAYOUTS; }
@@ -2535,6 +2580,461 @@ function drawPartnerLogos(ctx, frame, partners, palette) {
   ctx.restore();
 }
 
+// ═══ LAYOUT · TYPE ONLY ══════════════════════════════════════════════
+// No photograph. Not a fallback — a choice.
+//
+// A quote card, a save-the-date, an internal note: forcing an image onto these
+// weakens them, and the app was doing exactly that by showing a "NO IMAGE" plate
+// where the picture was supposed to be. Restraint is in the brand definition; this
+// is the layout that lets you practise it.
+//
+// The type is set on the surface with generous air and anchored to the OPTICAL
+// centre — a block centred by arithmetic sits low, because the eye reads the
+// mass, not the box.
+function drawTypeOnly(ctx, frame, content, image, opts) {
+  const { w, h, padX, padY } = frame;
+  const { palette, accent } = opts;
+  const bleed = frame.bleedPx || 0;
+
+  ctx.fillStyle = palette.bg;
+  ctx.fillRect(-bleed, -bleed, w + bleed * 2, h + bleed * 2);
+
+  const safeArea = { x: 0, y: 0, w, h };
+  const clearance = brandBarClearance(ctx, frame, { ...opts, safeArea });
+  const top = Math.max(padY * 1.4, clearance.topY);
+  const bottom = Math.min(h - padY * 1.4, clearance.bottomY);
+
+  // Optical centre: 46% rather than 50%. The difference is small and the effect
+  // is not — a block on the mathematical centre reads as having slipped.
+  const band = bottom - top;
+  const anchorY = top + band * 0.46;
+  const tFrame = { ...frame, textMaxH: Math.max(80, band), fitOut: opts.fitOut };
+
+  // Measure first so the block can be centred on its own height rather than
+  // hung from an arbitrary line.
+  const probe = layoutTextElements(ctx, content, padX, 0, w - padX * 2, palette, accent, tFrame, 'top');
+  const blockH = probe.length
+    ? Math.max(...probe.map((t) => t.y + (t.size || 0))) - Math.min(...probe.map((t) => t.y - (t.size || 0)))
+    : 0;
+  const y = Math.max(top, anchorY - blockH / 2);
+
+  drawTextBackdropOnly(ctx, content, padX, y, w - padX * 2, palette, accent, tFrame, 'top', opts.textBackdrop);
+  if (!opts.skipOverlays) drawTextBlock(ctx, content, padX, y, w - padX * 2, palette, accent, tFrame, 'top', null);
+  if (!opts.skipOverlays) drawBrandBar(ctx, frame, palette, accent, false, { ...opts, safeArea });
+  if (!opts.skipOverlays) drawQrOverlay(ctx, frame, opts.qr, opts.qrImage, palette);
+  drawPartnerLogos(ctx, frame, opts.partners, palette);
+}
+
+// ═══ LAYOUT · SIDE BY SIDE ═══════════════════════════════════════════
+// Image on one side, type on the other — on ANY format.
+//
+// The existing split already does this, but only when the canvas is wider than
+// 1.4:1; on a square or a portrait it silently becomes top/bottom. That is a good
+// default and a bad rule: a 1:1 post with the image left and the type right is a
+// perfectly ordinary editorial move, and there was no way to ask for it.
+function drawSideBySide(ctx, frame, content, image, opts, imageSide = 'right') {
+  const { w, h, padX, padY } = frame;
+  const { palette, accent, fit } = opts;
+  const bleed = frame.bleedPx || 0;
+
+  ctx.fillStyle = palette.bg;
+  ctx.fillRect(-bleed, -bleed, w + bleed * 2, h + bleed * 2);
+
+  const ratio = clamp(fit?.frameRatio ?? 0.5, 0.25, 0.75);
+  const imgW = w * ratio;
+  const imgX = imageSide === 'left' ? 0 : w - imgW;
+  const textX = imageSide === 'left' ? imgW + padX : padX;
+
+  // The image bleeds off its own three edges — the split is a hard meeting of two
+  // fields, not a picture floating in a margin.
+  const ix = imageSide === 'left' ? -bleed : imgX;
+  const iw = imgW + bleed;
+  if (image) drawImageFit(ctx, image, ix, -bleed, iw, h + bleed * 2, fit, palette.bg);
+  else {
+    ctx.fillStyle = palette.mode === 'dark' ? BRAND.coal800 : BRAND.bone;
+    ctx.fillRect(ix, -bleed, iw, h + bleed * 2);
+  }
+
+  const safeArea = imageSide === 'left'
+    ? { x: imgW, y: 0, w: w - imgW, h }
+    : { x: 0, y: 0, w: w - imgW, h };
+  const clearance = brandBarClearance(ctx, frame, { ...opts, safeArea });
+  const top = Math.max(padY * 1.3, clearance.topY);
+  const bottom = Math.min(h - padY * 1.3, clearance.bottomY);
+  const textW = w - imgW - padX * 2;
+  const tFrame = { ...frame, textMaxH: Math.max(80, bottom - top), fitOut: opts.fitOut };
+
+  const probe = layoutTextElements(ctx, content, textX, 0, textW, palette, accent, tFrame, 'top');
+  const blockH = probe.length
+    ? Math.max(...probe.map((t) => t.y + (t.size || 0))) - Math.min(...probe.map((t) => t.y - (t.size || 0)))
+    : 0;
+  const y = Math.max(top, top + ((bottom - top) * 0.46) - blockH / 2);
+
+  drawTextBackdropOnly(ctx, content, textX, y, textW, palette, accent, tFrame, 'top', opts.textBackdrop);
+  if (!opts.skipOverlays) drawTextBlock(ctx, content, textX, y, textW, palette, accent, tFrame, 'top', null);
+  if (!opts.skipOverlays) drawBrandBar(ctx, frame, palette, accent, false, { ...opts, safeArea });
+  if (!opts.skipOverlays) drawQrOverlay(ctx, frame, opts.qr, opts.qrImage, palette);
+  drawPartnerLogos(ctx, frame, opts.partners, palette);
+}
+
+// ═══ LAYOUT · TABLE ══════════════════════════════════════════════════
+// The agenda and fact rows already exist in the body — "09.15⇥Session — Faculty",
+// "DATE⇥Friday, 29 Nov". Until now they were set inside the running text block,
+// which is fine for three rows and falls apart at twelve: the columns are only as
+// aligned as the paragraph happens to allow.
+//
+// This gives them the page. One measured label column, hairline rules between
+// rows, and the gold reserved for the head rule — the INITIATOR, as everywhere
+// else in the system. Rows never wrap into each other because the row height is
+// derived from the wrapped content, not assumed.
+function drawTable(ctx, frame, content, image, opts) {
+  const { w, h, padX, padY } = frame;
+  const { palette, accent } = opts;
+  const bleed = frame.bleedPx || 0;
+
+  ctx.fillStyle = palette.bg;
+  ctx.fillRect(-bleed, -bleed, w + bleed * 2, h + bleed * 2);
+
+  const safeArea = { x: 0, y: 0, w, h };
+  const clearance = brandBarClearance(ctx, frame, { ...opts, safeArea });
+  const ts = computeTypeScale(frame);
+  const ink = palette.ink;
+  const muted = palette.muted;
+  const rule = palette.mode === 'dark' ? 'rgba(250,248,240,0.16)' : BRAND.ink100;
+
+  let y = Math.max(padY * 1.2, clearance.topY);
+  const x = padX;
+  const tw = w - padX * 2;
+
+  // ── head: kicker → rule → headline. The house sequence, unchanged.
+  if (content.eyebrow) {
+    ctx.font = `500 ${ts.eyebrowSize}px ${BRAND.mono}`;
+    ctx.fillStyle = accent;
+    const ls = ts.eyebrowSize * 0.14;
+    let cx = x;
+    for (const ch of content.eyebrow.toUpperCase()) {
+      ctx.fillText(ch, cx, y + ts.eyebrowSize);
+      cx += ctx.measureText(ch).width + ls;
+    }
+    y += ts.eyebrowSize * 2.4;
+  }
+  if (content.headline) {
+    const size = fitFont(ctx, content.headline.split('\n')[0], tw, ts.headlineMax * 0.72, ts.headlineMin, 700);
+    ctx.font = `700 ${size}px ${BRAND.display}`;
+    ctx.fillStyle = ink;
+    for (const line of wrapText(ctx, content.headline, tw)) {
+      ctx.fillText(line, x, y + size);
+      y += size * 1.16;
+    }
+    y += size * 0.35;
+  }
+  if (content.subline) {
+    ctx.font = `300 ${ts.sublineSize * 0.8}px ${BRAND.display}`;
+    ctx.fillStyle = muted;
+    for (const line of wrapText(ctx, content.subline, tw)) {
+      ctx.fillText(line, x, y + ts.sublineSize * 0.8);
+      y += ts.sublineSize * 1.05;
+    }
+    y += ts.sublineSize * 0.4;
+  }
+
+  // The head rule — gold, full measure. The only gold on the page besides the kicker.
+  ctx.fillStyle = accent;
+  ctx.fillRect(x, y, tw, Math.max(2, w * 0.0035));
+  y += Math.max(2, w * 0.0035) + ts.bodySize * 1.1;
+
+  // ── rows
+  const rawLines = (content.body || '').split('\n').map((l) => l.trim()).filter((l) => l && l !== PAGE_BREAK);
+  const rows = parseStructuredRows(rawLines);
+  const bottom = Math.min(h - padY * 1.1, clearance.bottomY);
+
+  if (!rows || !rows.length) {
+    ctx.font = `400 ${ts.bodySize}px ${BRAND.display}`;
+    ctx.fillStyle = muted;
+    // Say what this layout EATS. An empty table that just sits there is a puzzle.
+    for (const line of wrapText(ctx, content.body || 'Add rows in § CONTENT — “09.15  Session title — Faculty”, or a label and a value.', tw)) {
+      if (y + ts.bodySize > bottom) break;
+      ctx.fillText(line, x, y + ts.bodySize);
+      y += ts.bodySize * 1.5;
+    }
+  } else {
+    // Measure the label column ONCE, from the widest label, and cap it: one long
+    // label must not starve every other row of its content column.
+    let size = ts.bodySize;
+    const measureCol = (sz) => {
+      ctx.font = `500 ${sz}px ${BRAND.mono}`;
+      return Math.min(tw * 0.34, Math.max(...rows.map((r) => ctx.measureText(r.col || '').width)) + sz * 1.6);
+    };
+    // Shrink to fit, like the type engine: rows give way before the page does.
+    const heightAt = (sz) => {
+      const colW = measureCol(sz);
+      ctx.font = `400 ${sz}px ${BRAND.display}`;
+      return rows.reduce((sum, r) => {
+        const lines = wrapText(ctx, r.main || '', tw - colW) .length || 1;
+        return sum + Math.max(sz * 1.5, lines * sz * 1.28) + (r.note ? sz * 1.05 : 0) + sz * 0.85;
+      }, 0);
+    };
+    let guard = 0;
+    while (y + heightAt(size) > bottom && size > ts.bodySize * 0.55 && guard++ < 24) size *= 0.94;
+
+    const colW = measureCol(size);
+    for (const r of rows) {
+      if (y > bottom) break;
+      const rowTop = y;
+      // label / time column — mono, tracked, gold. It is a signpost, not content.
+      if (r.col) {
+        ctx.font = `500 ${size * 0.92}px ${BRAND.mono}`;
+        ctx.fillStyle = accent;
+        const ls = size * 0.06;
+        let cx = x;
+        for (const ch of r.col) { ctx.fillText(ch, cx, y + size); cx += ctx.measureText(ch).width + ls; }
+      }
+      ctx.font = `400 ${size}px ${BRAND.display}`;
+      ctx.fillStyle = ink;
+      let ly = y;
+      for (const line of wrapText(ctx, r.main || '', tw - colW)) {
+        ctx.fillText(line, x + colW, ly + size);
+        ly += size * 1.28;
+      }
+      if (r.note) {
+        ctx.font = `300 ${size * 0.86}px ${BRAND.display}`;
+        ctx.fillStyle = muted;
+        ctx.fillText(r.note, x + colW, ly + size * 0.86);
+        ly += size * 1.05;
+      }
+      y = Math.max(ly, rowTop + size * 1.5) + size * 0.85;
+      // hairline between rows — never after the last, which would read as a cut
+      if (r !== rows[rows.length - 1] && y < bottom) {
+        ctx.fillStyle = rule;
+        ctx.fillRect(x, y - size * 0.42, tw, Math.max(1, w * 0.0006));
+      }
+    }
+  }
+
+  if (content.cta) {
+    ctx.font = `500 ${ts.ctaSize}px ${BRAND.mono}`;
+    ctx.fillStyle = accent;
+    const ls = ts.ctaSize * 0.12;
+    let cx = x;
+    for (const ch of content.cta.toUpperCase()) {
+      ctx.fillText(ch, cx, Math.min(bottom, h - padY * 0.7));
+      cx += ctx.measureText(ch).width + ls;
+    }
+  }
+
+  if (!opts.skipOverlays) drawBrandBar(ctx, frame, palette, accent, false, { ...opts, safeArea });
+  if (!opts.skipOverlays) drawQrOverlay(ctx, frame, opts.qr, opts.qrImage, palette);
+  drawPartnerLogos(ctx, frame, opts.partners, palette);
+}
+
+// ═══ LAYOUT · STAT ═══════════════════════════════════════════════════
+// One number, given the room a number deserves.
+//
+// "1 in 6." "+18%." "5M implants." These already exist in the templates and were
+// being set at headline size in a paragraph, where a statistic reads as a
+// sentence. Here the figure IS the composition: it takes the optical centre, and
+// everything else defers to it.
+//
+// The number comes from the HEADLINE — no new field. A layout that demands its own
+// content model is a layout nobody uses.
+function drawStat(ctx, frame, content, image, opts) {
+  const { w, h, padX, padY } = frame;
+  const { palette, accent, fit } = opts;
+  const bleed = frame.bleedPx || 0;
+
+  ctx.fillStyle = palette.bg;
+  ctx.fillRect(-bleed, -bleed, w + bleed * 2, h + bleed * 2);
+
+  // An optional image sits BEHIND, heavily scrimmed: the figure must win.
+  if (image) {
+    drawImageFit(ctx, image, -bleed, -bleed, w + bleed * 2, h + bleed * 2, fit, palette.bg);
+    const dark = palette.mode === 'dark';
+    ctx.fillStyle = dark ? 'rgba(19,19,16,0.72)' : 'rgba(255,255,255,0.78)';
+    ctx.fillRect(-bleed, -bleed, w + bleed * 2, h + bleed * 2);
+  }
+
+  const safeArea = { x: 0, y: 0, w, h };
+  const clearance = brandBarClearance(ctx, frame, { ...opts, safeArea });
+  const ts = computeTypeScale(frame);
+  const top = Math.max(padY * 1.3, clearance.topY);
+  const bottom = Math.min(h - padY * 1.3, clearance.bottomY);
+  const tw = w - padX * 2;
+
+  const figure = (content.headline || '').split('\n')[0].trim();
+  const blocks = [];
+  if (content.eyebrow) blocks.push({ k: 'eyebrow', size: ts.eyebrowSize });
+  // The figure is deliberately allowed far past the headline cap — it is not a
+  // headline. Fitted to the measure, floored so it never becomes ordinary.
+  const figMax = Math.min(w * 0.30, h * 0.34);
+  const figSize = figure ? fitFont(ctx, figure, tw, figMax, figMax * 0.34, 700) : 0;
+  if (figure) blocks.push({ k: 'figure', size: figSize });
+  if (content.subline) blocks.push({ k: 'subline', size: ts.sublineSize });
+  if (content.body) blocks.push({ k: 'body', size: ts.bodySize });
+
+  // Height first, so the stack can be optically centred rather than hung.
+  let totalH = 0;
+  const gap = { eyebrow: 1.6, figure: 0.5, subline: 0.9, body: 0 };
+  for (const b of blocks) {
+    if (b.k === 'body') {
+      ctx.font = `400 ${b.size}px ${BRAND.display}`;
+      b.lines = wrapText(ctx, content.body, tw * 0.8);
+      totalH += b.lines.length * b.size * 1.5;
+    } else if (b.k === 'subline') {
+      ctx.font = `300 ${b.size}px ${BRAND.display}`;
+      b.lines = wrapText(ctx, content.subline, tw * 0.9);
+      totalH += b.lines.length * b.size * 1.25;
+    } else {
+      totalH += b.size * (b.k === 'figure' ? 1.0 : 1.2);
+    }
+    totalH += b.size * (gap[b.k] ?? 0.8);
+  }
+  let y = Math.max(top, top + (bottom - top) * 0.46 - totalH / 2);
+
+  for (const b of blocks) {
+    if (b.k === 'eyebrow') {
+      ctx.font = `500 ${b.size}px ${BRAND.mono}`;
+      ctx.fillStyle = accent;
+      const ls = b.size * 0.14;
+      let cx = padX;
+      for (const ch of content.eyebrow.toUpperCase()) { ctx.fillText(ch, cx, y + b.size); cx += ctx.measureText(ch).width + ls; }
+      y += b.size * (1.2 + gap.eyebrow);
+    } else if (b.k === 'figure') {
+      ctx.font = `700 ${b.size}px ${BRAND.display}`;
+      ctx.fillStyle = palette.ink;
+      ctx.fillText(figure, padX, y + b.size * 0.86);
+      y += b.size * (1.0 + gap.figure);
+      // The initiator rule, under the figure: gold, short, exact.
+      ctx.fillStyle = accent;
+      ctx.fillRect(padX, y - b.size * 0.25, Math.min(w * 0.12, tw), Math.max(2, w * 0.004));
+      y += Math.max(2, w * 0.004) + b.size * 0.30;
+    } else if (b.k === 'subline') {
+      ctx.font = `300 ${b.size}px ${BRAND.display}`;
+      ctx.fillStyle = palette.ink;
+      for (const line of b.lines) { ctx.fillText(line, padX, y + b.size); y += b.size * 1.25; }
+      y += b.size * gap.subline;
+    } else {
+      ctx.font = `400 ${b.size}px ${BRAND.display}`;
+      ctx.fillStyle = palette.muted;
+      for (const line of b.lines) { ctx.fillText(line, padX, y + b.size); y += b.size * 1.5; }
+    }
+  }
+
+  if (content.cta) {
+    ctx.font = `500 ${ts.ctaSize}px ${BRAND.mono}`;
+    ctx.fillStyle = accent;
+    const ls = ts.ctaSize * 0.12;
+    let cx = padX;
+    for (const ch of content.cta.toUpperCase()) { ctx.fillText(ch, cx, Math.min(bottom, h - padY * 0.7)); cx += ctx.measureText(ch).width + ls; }
+  }
+
+  if (!opts.skipOverlays) drawBrandBar(ctx, frame, palette, accent, false, { ...opts, safeArea });
+  if (!opts.skipOverlays) drawQrOverlay(ctx, frame, opts.qr, opts.qrImage, palette);
+  drawPartnerLogos(ctx, frame, opts.partners, palette);
+}
+
+// ═══ LAYOUT · DUO ════════════════════════════════════════════════════
+// Two images, side by side, with a caption under each.
+//
+// This exists because "before-after" already existed as a template and there was
+// no layout that could show both at once — it was two carousel slides you had to
+// swipe between, which is precisely the wrong way to present a comparison. A
+// comparison is a comparison because you see both things TOGETHER.
+//
+// The second image is the CAROUSEL's second slide image when there is one, so the
+// content model does not grow a new field; on a single-frame format it falls back
+// to the same picture, which is honest — you can see immediately that you have not
+// given it a second one.
+//
+// Captions come from the body: one line each, split on the newline you already
+// type. Nothing new to learn.
+function drawDuo(ctx, frame, content, image, opts) {
+  const { w, h, padX, padY } = frame;
+  const { palette, accent, fit } = opts;
+  const bleed = frame.bleedPx || 0;
+
+  ctx.fillStyle = palette.bg;
+  ctx.fillRect(-bleed, -bleed, w + bleed * 2, h + bleed * 2);
+
+  const safeArea = { x: 0, y: 0, w, h };
+  const clearance = brandBarClearance(ctx, frame, { ...opts, safeArea });
+  const ts = computeTypeScale(frame);
+  const ink = palette.ink;
+  const muted = palette.muted;
+
+  let y = Math.max(padY * 1.2, clearance.topY);
+  const x = padX;
+  const tw = w - padX * 2;
+
+  if (content.eyebrow) {
+    ctx.font = `500 ${ts.eyebrowSize}px ${BRAND.mono}`;
+    ctx.fillStyle = accent;
+    const ls = ts.eyebrowSize * 0.14;
+    let cx = x;
+    for (const ch of content.eyebrow.toUpperCase()) { ctx.fillText(ch, cx, y + ts.eyebrowSize); cx += ctx.measureText(ch).width + ls; }
+    y += ts.eyebrowSize * 2.2;
+  }
+  if (content.headline) {
+    const size = fitFont(ctx, content.headline.split('\n')[0], tw, ts.headlineMax * 0.62, ts.headlineMin, 700);
+    ctx.font = `700 ${size}px ${BRAND.display}`;
+    ctx.fillStyle = ink;
+    for (const line of wrapText(ctx, content.headline, tw)) { ctx.fillText(line, x, y + size); y += size * 1.14; }
+    y += size * 0.4;
+  }
+
+  // Captions are measured BEFORE the images, so the pictures take the room that
+  // is genuinely left rather than pushing the captions off the page.
+  const caps = (content.body || '').split('\n').map((l) => l.trim()).filter(Boolean).slice(0, 2);
+  const capSize = ts.bodySize * 0.88;
+  const gutter = w * 0.028;
+  const cellW = (tw - gutter) / 2;
+  ctx.font = `400 ${capSize}px ${BRAND.display}`;
+  const capLines = caps.map((c) => wrapText(ctx, c, cellW));
+  const capH = capLines.length
+    ? Math.max(...capLines.map((l) => l.length)) * capSize * 1.35 + capSize * 0.9
+    : 0;
+
+  const ctaH = content.cta ? ts.ctaSize * 2.4 : 0;
+  const bottom = Math.min(h - padY * 1.0, clearance.bottomY);
+  const cellH = Math.max(40, bottom - y - capH - ctaH);
+
+  // The second picture: slide 2's image, or this one again.
+  const imgB = (opts.duoImage ?? image) || image;
+  const cells = [
+    { x, img: image, cap: capLines[0] },
+    { x: x + cellW + gutter, img: imgB, cap: capLines[1] },
+  ];
+  for (const c of cells) {
+    if (c.img) drawImageFit(ctx, c.img, c.x, y, cellW, cellH, fit, palette.bg);
+    else {
+      ctx.fillStyle = palette.mode === 'dark' ? BRAND.coal800 : BRAND.bone;
+      ctx.fillRect(c.x, y, cellW, cellH);
+    }
+  }
+  let capY = y + cellH + capSize * 0.9;
+  for (const c of cells) {
+    if (!c.cap) continue;
+    // A gold tick above each caption — the initiator, at caption scale.
+    ctx.fillStyle = accent;
+    ctx.fillRect(c.x, capY - capSize * 0.7, Math.min(cellW * 0.18, w * 0.05), Math.max(1.5, w * 0.0022));
+    ctx.font = `400 ${capSize}px ${BRAND.display}`;
+    ctx.fillStyle = muted;
+    let ly = capY;
+    for (const line of c.cap) { ctx.fillText(line, c.x, ly + capSize); ly += capSize * 1.35; }
+  }
+
+  if (content.cta) {
+    ctx.font = `500 ${ts.ctaSize}px ${BRAND.mono}`;
+    ctx.fillStyle = accent;
+    const ls = ts.ctaSize * 0.12;
+    let cx = x;
+    for (const ch of content.cta.toUpperCase()) { ctx.fillText(ch, cx, Math.min(bottom, h - padY * 0.6)); cx += ctx.measureText(ch).width + ls; }
+  }
+
+  if (!opts.skipOverlays) drawBrandBar(ctx, frame, palette, accent, false, { ...opts, safeArea });
+  if (!opts.skipOverlays) drawQrOverlay(ctx, frame, opts.qr, opts.qrImage, palette);
+  drawPartnerLogos(ctx, frame, opts.partners, palette);
+}
+
 // ═══ LANYARD ═════════════════════════════════════════════════════════
 // A congress lanyard is printed FLAT and then folded into a neck loop, so the
 // artwork has two jobs an ordinary layout does not:
@@ -4128,6 +4628,10 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
   // Custom formats. `fmtVersion` exists because FORMATS is a mutable registry
   // (module-level functions read it), so React cannot see a change to it — the
   // counter is what tells the tree to re-read.
+  // Set when the USER picks a layout. A suggestion may fill an empty seat; it may
+  // never take one that is occupied.
+  const layoutChosen = useRef(false);
+
   const [fmtEditor, setFmtEditor] = useState(null);   // null | { …seed }
   const [fmtVersion, setFmtVersion] = useState(0);
 
@@ -4671,6 +5175,10 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
         palette, accent: accentColor, fit: activeFit,
         lanyard, fitOut: fitRef.current,
         partners: { ...partners, logos: partnerLogos },
+      // Duo compares TWO pictures: the next carousel slide's image is the second
+      // one. No new field — a layout that demands its own content model is a
+      // layout nobody reaches for.
+      duoImage: format.multi ? (carouselImages[(carouselSlide + 1) % carouselSlides] || null) : null,
         wordmarkPos,
         folioPos: slideShowsFolio ? folioPos : 'hidden',
         formatKey,
@@ -4892,6 +5400,10 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
       imageOverride === 'none' ? null : (imageOverride ?? activeImage), {
       palette, accent: accentColor,
       lanyard, partners: { ...partners, logos: partnerLogos },
+      // Duo compares TWO pictures: the next carousel slide's image is the second
+      // one. No new field — a layout that demands its own content model is a
+      // layout nobody reaches for.
+      duoImage: format.multi ? (carouselImages[(carouselSlide + 1) % carouselSlides] || null) : null,
       fit: fitOverride ?? activeFit,
       wordmarkPos,
       folioPos: slideShowsFolio ? folioPos : 'hidden',
@@ -5396,7 +5908,7 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
 
     // Nothing typed, or the sample matches what you have → just switch. Silence is
     // the correct UI here.
-    if (!impact.differs) { setTemplateKey(key); return; }
+    if (!impact.differs) { setTemplateKey(key); applySuggestedLayout(key); return; }
 
     const answer = await askTemplateChoice({
       title: `Switch to "${TEMPLATES[key].label}"?`,
@@ -5409,6 +5921,7 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
     // the template was written to show off, once.
     sampleOnceRef.current = answer === 'sample';
     setTemplateKey(key);
+    applySuggestedLayout(key);
   };
 
   // Three answers, and dismissal means CANCEL — the same rule as everywhere else:
@@ -5416,6 +5929,13 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
   const [tmplAsk, setTmplAsk] = useState(null);
   const askTemplateChoice = (o) => new Promise((resolve) => setTmplAsk({ ...o, resolve }));
   const closeTemplateAsk = (answer) => setTmplAsk((d) => { d?.resolve?.(answer ?? 'cancel'); return null; });
+
+  /** The template's own shape — but only into an empty seat. */
+  const applySuggestedLayout = (key) => {
+    if (layoutChosen.current) return;             // you chose; we defer
+    const want = TEMPLATE_LAYOUT[key];
+    if (want && FORMAT_LAYOUTS[formatKey].includes(want)) setLayoutKey(want);
+  };
 
   const snapshotState = () => ({
     v: 2,
@@ -6162,10 +6682,35 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
         {!isBrochure && (
         <Section label={SEC('LAYOUT', 'LAYOUT')} {...sp('LAYOUT')}>
           {FORMAT_LAYOUTS[formatKey].map((lk) => (
-            <SidebarBtn key={lk} active={layoutKey === lk} onClick={() => setLayoutKey(lk)}>
+            <SidebarBtn key={lk} active={layoutKey === lk}
+              onClick={() => { layoutChosen.current = true; setLayoutKey(lk); }}>
               {LAYOUTS[lk].label}
+              {TEMPLATE_LAYOUT[templateKey] === lk && (
+                <span style={{ fontSize: 9, fontFamily: BRAND.mono, color: BRAND.goldDeep,
+                               letterSpacing: '0.06em' }}>SUITED</span>
+              )}
             </SidebarBtn>
           ))}
+          {/* The system has an opinion, and loses the argument. Once you have picked
+              a layout it stops re-deciding for you — but it still says what the
+              template was written for, because that is information you cannot get
+              from the names alone. */}
+          {layoutChosen.current
+            && TEMPLATE_LAYOUT[templateKey]
+            && TEMPLATE_LAYOUT[templateKey] !== layoutKey
+            && FORMAT_LAYOUTS[formatKey].includes(TEMPLATE_LAYOUT[templateKey]) && (
+            <button
+              onClick={() => setLayoutKey(TEMPLATE_LAYOUT[templateKey])}
+              style={{
+                width: '100%', marginTop: 6, padding: '8px 9px', cursor: 'pointer', textAlign: 'left',
+                background: BRAND.bone, border: `1px solid ${BRAND.ink100}`, borderLeft: `3px solid ${BRAND.goldDeep}`,
+                fontFamily: BRAND.mono, fontSize: 9, color: BRAND.ink600,
+                letterSpacing: '0.04em', lineHeight: 1.6, borderRadius: 0,
+              }}>
+              “{TEMPLATES[templateKey]?.label}” WAS WRITTEN FOR
+              “{LAYOUTS[TEMPLATE_LAYOUT[templateKey]]?.label}” — USE IT?
+            </button>
+          )}
         </Section>
         )}
 

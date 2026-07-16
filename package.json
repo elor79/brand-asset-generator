@@ -11,7 +11,7 @@
     "setup:conditioning": "bash ai/tools/setup_conditioning.sh",
     "build": "vite build",
     "preview": "vite preview",
-    "check": "node --check vite-plugin-genai.js && node --check vite-plugin-canto.js && node ai/tools/check_hook_deps.mjs src/MedartisBrandGenerator.jsx && node ai/tools/check_brandkit.mjs",
+    "check": "node --check vite-plugin-genai.js && node --check vite-plugin-canto.js && node ai/tools/check_hook_deps.mjs src/MedartisBrandGenerator.jsx && node ai/tools/check_layouts.mjs && node ai/tools/check_brandkit.mjs",
     "link:models": "bash ai/tools/link_webui_models.sh"
   },
   "dependencies": {
