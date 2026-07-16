@@ -3,6 +3,7 @@ import { jsPDF } from 'jspdf';
 import { svg2pdf } from 'svg2pdf.js';
 import { BROCHURE_TYPES, BROCHURE_TYPE_KEYS, defaultBrochurePages, makeBrochurePage } from './brochure';
 import { buildLogoSvg, svgToPdf, buildBrandKit } from './logoVector';
+import { templateSwitchImpact, describeImpact } from './templateSwitch';
 import {
   CUSTOM_GROUP, DPI_CHOICES, TYPE_CATEGORY_KEYS, TYPE_CATEGORY_LABELS,
   makeCustomFormat, readCustomFormats, writeCustomFormats,
@@ -3757,6 +3758,8 @@ export default function MedartisBrandGenerator() {
   // (fixing a wrong template must NOT wipe content) vs. loads sample defaults
   // (a pristine canvas should still show each template's example).
   const contentEdited = useRef(false);
+  // Set for exactly one template application, then cleared by the effect itself.
+  const sampleOnceRef = useRef(false);
 
   const initialContent = useMemo(() => {
     const t = TEMPLATES[templateKey];
@@ -3788,7 +3791,11 @@ export default function MedartisBrandGenerator() {
     // template's default for keys that are still empty. A pristine canvas
     // (nothing edited yet) still loads the template's sample content, so simply
     // browsing templates behaves as before.
-    const keep = contentEdited.current;
+    // `forceSample` is the escape hatch for "the template does nothing": normally
+    // your copy is carried, which is why a switch looks like a no-op once you have
+    // typed anything. Asking for the sample explicitly overrides that, once.
+    const keep = contentEdited.current && !sampleOnceRef.current;
+    sampleOnceRef.current = false;
     const carry = (prev) => {
       const next = {};
       t.fields.forEach((f) => {
@@ -5370,6 +5377,46 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
     img.src = ref.src;
   });
 
+  /**
+   * Picking a template. The whole point of this function is that it does NOT warn
+   * on every switch: it computes what would actually differ, and only asks when
+   * there are two real outcomes. A dialog that fires every time is a dialog nobody
+   * reads by Thursday.
+   */
+  const chooseTemplate = async (key) => {
+    if (key === templateKey) return;
+    const impact = templateSwitchImpact({
+      from: TEMPLATES[templateKey],
+      to: TEMPLATES[key],
+      content,
+      carouselContent,
+      isCarousel: !!format.multi,
+      contentEdited: contentEdited.current,
+    });
+
+    // Nothing typed, or the sample matches what you have → just switch. Silence is
+    // the correct UI here.
+    if (!impact.differs) { setTemplateKey(key); return; }
+
+    const answer = await askTemplateChoice({
+      title: `Switch to "${TEMPLATES[key].label}"?`,
+      body: describeImpact(impact, TEMPLATES[key].label),
+      dropped: impact.dropped,
+      slides: impact.slidesReplaced,
+    });
+    if (answer === 'cancel') return;
+    // "sample" is the answer to "the template does nothing" — it loads the copy
+    // the template was written to show off, once.
+    sampleOnceRef.current = answer === 'sample';
+    setTemplateKey(key);
+  };
+
+  // Three answers, and dismissal means CANCEL — the same rule as everywhere else:
+  // the safe reading of a question nobody answered is "no".
+  const [tmplAsk, setTmplAsk] = useState(null);
+  const askTemplateChoice = (o) => new Promise((resolve) => setTmplAsk({ ...o, resolve }));
+  const closeTemplateAsk = (answer) => setTmplAsk((d) => { d?.resolve?.(answer ?? 'cancel'); return null; });
+
   const snapshotState = () => ({
     v: 2,
     savedAt: new Date().toISOString(),
@@ -5382,6 +5429,26 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
     carouselBg: carouselBg.imageSrc?.startsWith('data:')
       ? { ...carouselBg, imageSrc: null }   // skip giant data URLs in preset
       : carouselBg,
+    // A BROCHURE **IS** ITS PAGES. Without this, saving a 12-page publication
+    // stored the format and threw the document away — the preset would hand back
+    // an empty brochure and look like the save had silently failed.
+    //
+    // Full-resolution data URLs are stripped on the way out: two embedded pages
+    // blow the ~5 MB localStorage cap, and then NOTHING saves. A library ref
+    // (public/library/…) is a path, so it re-attaches on load; an uploaded image
+    // is the one thing that cannot survive, which is why the panel says so.
+    brochurePages: brochurePages.map((pg) => ({
+      ...pg,
+      imageSrc: pg.imageSrc && pg.imageSrc.startsWith('data:') ? null : pg.imageSrc,
+    })),
+    brochureIdx: curBrochure,
+    brochureTitle,
+    lanyard,
+    partners,
+    partnerLogos: partnerLogos.map(({ img, src, ...rest }) => ({
+      ...rest,
+      src: src && src.startsWith('data:') ? null : src,
+    })),
     carouselQrPer, carouselFolioPer,
     textBackdrop,
     content,
@@ -5404,6 +5471,26 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
     setPaletteName(preset.paletteName);
     setWordmarkPos(preset.wordmarkPos);
     setFolioPos(preset.folioPos);
+
+    // The other half of the fix: saved is worthless without restored.
+    if (Array.isArray(preset.brochurePages) && preset.brochurePages.length) {
+      setBrochurePages(preset.brochurePages);
+      setBrochureIdx(Math.min(preset.brochureIdx || 0, preset.brochurePages.length - 1));
+    }
+    if (typeof preset.brochureTitle === 'string') setBrochureTitle(preset.brochureTitle);
+    if (preset.lanyard) setLanyard({ ...LANYARD_DEFAULTS, ...preset.lanyard });
+    if (preset.partners) setPartners((p) => ({ ...p, ...preset.partners }));
+    if (Array.isArray(preset.partnerLogos)) {
+      // Only the ones whose src survived (a library path, not a stripped data URL).
+      const keep = preset.partnerLogos.filter((l) => l && l.src);
+      Promise.all(keep.map((l) => new Promise((res) => {
+        const img = new Image();
+        img.crossOrigin = 'anonymous';
+        img.onload = () => res({ ...l, img });
+        img.onerror = () => res(null);
+        img.src = l.src;
+      }))).then((loaded) => setPartnerLogos(loaded.filter(Boolean)));
+    }
     setWordmarkOverImage(!!preset.wordmarkOverImage);
     setFolioOverImage(!!preset.folioOverImage);
     if (preset.wordmarkColor) setWordmarkColor(preset.wordmarkColor);
@@ -5809,6 +5896,74 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
       fontFamily: BRAND.display,
       background: BRAND.coal, color: BRAND.ink, overflow: 'hidden'
     }}>
+      {/* Template switch — three answers, because there are three real intentions:
+          keep my words, show me what this template is for, or I misclicked. */}
+      {tmplAsk && (
+        <div onMouseDown={(e) => { if (e.target === e.currentTarget) closeTemplateAsk('cancel'); }}
+          style={{ position: 'fixed', inset: 0, zIndex: 9999, background: 'rgba(19,19,16,0.55)',
+                   backdropFilter: 'blur(3px)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          <div style={{ width: 'min(460px, calc(100vw - 48px))', background: BRAND.paper,
+                        border: `1px solid ${BRAND.ink100}`, boxShadow: '0 40px 90px rgba(0,0,0,0.45)' }}>
+            <div style={{ background: BRAND.coal, padding: '18px 22px 16px' }}>
+              <div style={{ fontFamily: BRAND.mono, fontSize: 9, letterSpacing: '0.18em',
+                            textTransform: 'uppercase', color: BRAND.gold, marginBottom: 6 }}>Content template</div>
+              <div style={{ fontFamily: BRAND.display, fontSize: 17, fontWeight: 600, color: BRAND.bone00 }}>
+                {tmplAsk.title}
+              </div>
+            </div>
+            <div style={{ padding: '16px 22px 20px' }}>
+              <div style={{ fontFamily: BRAND.display, fontSize: 13, lineHeight: 1.6, color: BRAND.ink600 }}>
+                {tmplAsk.body}
+              </div>
+              {tmplAsk.slides > 0 && (
+                <div style={{ marginTop: 8, padding: '8px 9px', background: '#FDF2F0',
+                              border: '1px solid #C8200A', color: '#C8200A',
+                              fontSize: 11.5, lineHeight: 1.55 }}>
+                  ⚠ Carousel slides cannot be carried across — they would be replaced outright,
+                  not merged. Keeping your copy leaves every slide exactly as it is.
+                </div>
+              )}
+              {tmplAsk.dropped?.length > 0 && (
+                <div style={{ marginTop: 8, fontFamily: BRAND.mono, fontSize: 9,
+                              color: BRAND.ink300, letterSpacing: '0.04em', lineHeight: 1.6 }}>
+                  EITHER WAY, THIS TEMPLATE HAS NO {tmplAsk.dropped.join(', ').toUpperCase()} FIELD —
+                  THAT TEXT IS DROPPED.
+                </div>
+              )}
+              <div style={{ display: 'grid', gap: 6, marginTop: 16 }}>
+                <button onClick={() => closeTemplateAsk('keep')} style={{
+                  padding: '11px 16px', background: BRAND.ink, color: BRAND.bone00,
+                  border: 'none', borderRadius: 0, cursor: 'pointer', textAlign: 'left',
+                  fontFamily: BRAND.mono, fontSize: 10.5, letterSpacing: '0.1em', textTransform: 'uppercase',
+                }}>
+                  Keep my copy
+                  <div style={{ fontFamily: BRAND.display, fontSize: 11, letterSpacing: 0,
+                                textTransform: 'none', opacity: 0.7, marginTop: 3 }}>
+                    Your words move into the new template's structure. Nothing is lost.
+                  </div>
+                </button>
+                <button onClick={() => closeTemplateAsk('sample')} style={{
+                  padding: '11px 16px', background: BRAND.paper, color: BRAND.ink,
+                  border: `1px solid ${BRAND.ink100}`, borderRadius: 0, cursor: 'pointer', textAlign: 'left',
+                  fontFamily: BRAND.mono, fontSize: 10.5, letterSpacing: '0.1em', textTransform: 'uppercase',
+                }}>
+                  Load the sample copy
+                  <div style={{ fontFamily: BRAND.display, fontSize: 11, letterSpacing: 0,
+                                textTransform: 'none', color: BRAND.ink600, marginTop: 3 }}>
+                    Shows what this template is FOR — and replaces what you have written.
+                  </div>
+                </button>
+                <button onClick={() => closeTemplateAsk('cancel')} style={{
+                  padding: '9px 16px', background: 'transparent', color: BRAND.ink600,
+                  border: `1px solid ${BRAND.ink100}`, borderRadius: 0, cursor: 'pointer',
+                  fontFamily: BRAND.mono, fontSize: 10, letterSpacing: '0.12em', textTransform: 'uppercase',
+                }}>Cancel</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {fmtEditor && (
         <FormatEditor
           initial={fmtEditor}
@@ -6055,7 +6210,8 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
               letterSpacing: '0.04em', lineHeight: 1.5, marginBottom: 8,
               padding: '7px 9px', background: BRAND.bone, border: `1px solid ${BRAND.ink100}`,
             }}>
-              Wrong type? Pick the right one — your content is kept.
+              Your copy is kept when you switch — which is why a template can look like it
+              did nothing. Pick one and choose <b>Load the sample copy</b> to see what it is for.
             </div>
           )}
           {(() => {
@@ -6063,7 +6219,7 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
             const single = entries.filter(([, t]) => !t.carouselContent);
             const multi  = entries.filter(([,  t]) => !!t.carouselContent);
             const renderBtn = ([key, t]) => (
-              <SidebarBtn key={key} active={templateKey === key} onClick={() => setTemplateKey(key)} column>
+              <SidebarBtn key={key} active={templateKey === key} onClick={() => chooseTemplate(key)} column>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                   <span>{t.label}</span>
                   {t.carouselContent && (
