@@ -2675,11 +2675,15 @@ function drawPartnerLogos(ctx, frame, partners, palette) {
  * drift from the reservation if they are the same arithmetic.
  */
 function groupLockupBand(frame, group) {
-  const band = groupLockupBand(frame, group);
-  if (!band) return null;
+  if (!group?.enabled) return null;
   const { w, h, padX, padY } = frame;
-  const boxH = band.h, boxW = band.w;
-  const y = group.pos === 'top' ? padY : h - padY - boxH;
+  // Off the SHORT edge, never the canvas: a fraction of the long edge on a 43:1
+  // lanyard is a lockup taller than the strap.
+  const short = Math.min(w, h);
+  const boxH = short * clamp(group.size ?? 0.14, 0.03, 0.4);
+  const boxW = w - padX * 2;
+  if (boxH <= 0 || boxW <= 0) return null;
+  const y = (group.pos ?? 'top') === 'top' ? padY : h - padY - boxH;
   // The mark's own clear space. GROUP_CLEAR_RATIO x its drawn height, per
   // groupBrands.js — the 1.5x-d rule generalised rather than pretended at.
   const clear = clearSpaceFor(GROUP_MARK, boxH) * 0.5;
@@ -2687,12 +2691,10 @@ function groupLockupBand(frame, group) {
 }
 
 function drawGroupLockup(ctx, frame, group, palette, surface) {
-  if (!group?.enabled) return null;
+  const band = groupLockupBand(frame, group);
+  if (!band) return null;
   const { w, h, padX, padY } = frame;
-  const short = Math.min(w, h);
-  const boxH = short * clamp(group.size ?? 0.14, 0.03, 0.4);
-  const boxW = w - padX * 2;
-  if (boxH <= 0 || boxW <= 0) return null;
+  const boxH = band.h, boxW = band.w;
 
   // THE HIERARCHY, which the artwork must not misstate:
   //
