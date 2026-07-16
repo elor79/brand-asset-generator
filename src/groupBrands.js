@@ -160,7 +160,18 @@ export const SUB_BRANDS = {
     // The engine owns this artwork (WORDMARK_PATHS). It is the MAIN BRAND under the
     // Group — not the Group mark, which is separate artwork living in GROUP_MARK.
     mark: 'MEDARTIS_WORDMARK_MARK',
-    colors: { primary: '#131310' },   // coal — medartis is monochrome by definition
+    colors: {
+      primary: '#131310',     // coal — medartis is monochrome by definition
+      // Deep black is a SANCTIONED medartis colour, not a convenience: the guide
+      // specifies it as a four-channel composite (C50 M40 Y40 K100, 230% total ink)
+      // for implant photography backgrounds and annual-report covers, and the engine
+      // already ships it as the 'deep-black' palette with that CMYK attached.
+      //
+      // It earns a place here because the derivation rule is "owned by a brand", and
+      // this is owned. It is NOT a licence for any dark colour: #000 is in the guide,
+      // #0a0a0a is not.
+      deepBlack: '#000000',
+    },
     note: 'The main brand under the house. Monochrome: no colour of its own to lend.',
   },
   neoortho: {
@@ -247,11 +258,53 @@ export const GROUP_GRADIENTS = {
     derivation: 'A 50% shade of #001a72, because KeriMedical has no second colour to ramp to.',
   },
   house: {
-    from: '#131310',                       // coal, the medartis colour
+    from: SB.medartis.colors.primary,      // #131310 coal
     to:   SB.kerimedical.colors.primary,   // #001a72
     angle: 45,
     label: 'House — coal → KeriMedical blue',
     derivation: 'medartis lends the ink; KeriMedical lends the colour.',
+  },
+
+  // ─── From deep black ───────────────────────────────────────────────────────
+  // Same rule, different anchor: black is medartis's, the far end is a sub-brand's.
+  // These read heavier than the coal ramps — coal is a WARM near-black (#131310 has
+  // a green cast) while deep black is neutral, so the sub-brand colour arrives out
+  // of nothing rather than out of ink.
+  //
+  // TWO HONEST CAVEATS, because a menu that hides them is worse than one entry short:
+  //
+  // 1. `blackBlue` and `house` are 31 RGB units apart at the dark end and share the
+  //    same far end. On a 45-degree ramp that difference is invisible. They are kept
+  //    apart because they mean different things — one is medartis's ink, one is the
+  //    guide's deep black — but if the picker ever feels padded, this is the pair to
+  //    collapse, and it is a brand decision, not a cleanup.
+  //
+  // 2. The guide specifies deep black as a FOUR-CHANNEL composite (C50 M40 Y40 K100).
+  //    A gradient cannot honour that. Ramps here are interpolated in RGB and jsPDF
+  //    has no real CMYK, so the RIP separates the black end however it chooses — it
+  //    will NOT be the specified composite. The flat 'deep-black' PALETTE carries its
+  //    cmyk spec and can be made to; a ramp starting from it cannot. Anyone who needs
+  //    the composite black needs a flat fill, not a gradient.
+  blackViolet: {
+    from: SB.medartis.colors.deepBlack,    // #000000
+    to:   SB.neoortho.colors.primary,      // #582d83
+    angle: 45,
+    label: 'Black → NeoOrtho violet',
+    derivation: "Deep black is medartis's; the violet is NeoOrtho's.",
+  },
+  blackTeal: {
+    from: SB.medartis.colors.deepBlack,    // #000000
+    to:   SB.neoortho.colors.secondary,    // #00afb9
+    angle: 45,
+    label: 'Black → NeoOrtho teal',
+    derivation: "Deep black is medartis's; the teal is NeoOrtho's.",
+  },
+  blackBlue: {
+    from: SB.medartis.colors.deepBlack,    // #000000
+    to:   SB.kerimedical.colors.primary,   // #001a72
+    angle: 45,
+    label: 'Black → KeriMedical blue',
+    derivation: "Deep black is medartis's; the blue is KeriMedical's.",
   },
 };
 
