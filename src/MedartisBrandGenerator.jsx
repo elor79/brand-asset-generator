@@ -992,6 +992,22 @@ function registerPdfFonts(pdf) {
 // ── SVG path parser → jsPDF line/curve commands ─────────────────────
 // Handles M/L/C/Z (absolute) and m/l/c/v/h/s (relative) — covers the
 // wordmark.svg subset used by Medartis.
+// SMOOTH CURVES REFLECT THE PREVIOUS CONTROL POINT — BUT ONLY IF THERE WAS ONE.
+//
+// The SVG spec: for S/s, if the preceding command was not C/c/S/s, the first
+// control point is COINCIDENT WITH THE CURRENT POINT. `lastCx/lastCy` were only
+// ever written by the cubic cases and never reset by a line, so `v29.257s7.619,0,
+// 7.619,0` reflected a control point from some earlier curve — often far away —
+// and flung the curve across the artwork.
+//
+// It was invisible for as long as the only artwork here was the medartis wordmark.
+// KeriMedical uses exactly that pattern, and it printed 63% too wide, bursting out
+// of a 20mm strap, while the canvas (whose Path2D implements the spec) drew it
+// perfectly. Two renderers, one right.
+//
+// The fix is to set lastC = current on every non-cubic command: the existing
+// reflection `2*cx - lastCx` then collapses to `cx`, which IS the spec, with no
+// extra flag to keep in sync.
 function svgPathToPdfOps(d) {
   const ops = [];
   const tokens = d.match(/[a-zA-Z]|-?\d*\.?\d+(?:e[+-]?\d+)?/g) || [];
@@ -1010,14 +1026,14 @@ function svgPathToPdfOps(d) {
     }
     firstOfCmd = false;
     switch (c) {
-      case 'M': { const x = nextNum(), y = nextNum(); cx = x; cy = y; startX = x; startY = y; ops.push({ op: 'M', x, y }); break; }
-      case 'm': { const dx = nextNum(), dy = nextNum(); cx += dx; cy += dy; startX = cx; startY = cy; ops.push({ op: 'M', x: cx, y: cy }); break; }
-      case 'L': { const x = nextNum(), y = nextNum(); cx = x; cy = y; ops.push({ op: 'L', x, y }); break; }
-      case 'l': { const dx = nextNum(), dy = nextNum(); cx += dx; cy += dy; ops.push({ op: 'L', x: cx, y: cy }); break; }
-      case 'H': { const x = nextNum(); cx = x; ops.push({ op: 'L', x, y: cy }); break; }
-      case 'h': { const dx = nextNum(); cx += dx; ops.push({ op: 'L', x: cx, y: cy }); break; }
-      case 'V': { const y = nextNum(); cy = y; ops.push({ op: 'L', x: cx, y }); break; }
-      case 'v': { const dy = nextNum(); cy += dy; ops.push({ op: 'L', x: cx, y: cy }); break; }
+      case 'M': { const x = nextNum(), y = nextNum(); cx = x; cy = y; startX = x; startY = y; lastCx = cx; lastCy = cy; ops.push({ op: 'M', x, y }); break; }
+      case 'm': { const dx = nextNum(), dy = nextNum(); cx += dx; cy += dy; startX = cx; startY = cy; lastCx = cx; lastCy = cy; ops.push({ op: 'M', x: cx, y: cy }); break; }
+      case 'L': { const x = nextNum(), y = nextNum(); cx = x; cy = y; lastCx = cx; lastCy = cy; ops.push({ op: 'L', x, y }); break; }
+      case 'l': { const dx = nextNum(), dy = nextNum(); cx += dx; cy += dy; lastCx = cx; lastCy = cy; ops.push({ op: 'L', x: cx, y: cy }); break; }
+      case 'H': { const x = nextNum(); cx = x; lastCx = cx; lastCy = cy; ops.push({ op: 'L', x, y: cy }); break; }
+      case 'h': { const dx = nextNum(); cx += dx; lastCx = cx; lastCy = cy; ops.push({ op: 'L', x: cx, y: cy }); break; }
+      case 'V': { const y = nextNum(); cy = y; lastCx = cx; lastCy = cy; ops.push({ op: 'L', x: cx, y }); break; }
+      case 'v': { const dy = nextNum(); cy += dy; lastCx = cx; lastCy = cy; ops.push({ op: 'L', x: cx, y: cy }); break; }
       case 'C': {
         const x1 = nextNum(), y1 = nextNum(), x2 = nextNum(), y2 = nextNum(), x = nextNum(), y = nextNum();
         ops.push({ op: 'C', x1, y1, x2, y2, x, y });
