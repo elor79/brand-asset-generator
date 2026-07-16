@@ -95,8 +95,12 @@ const FORMATS = {
   // the industry standard (≈450 mm hanging drop) and 150 dpi is the usual dye-
   // sublimation resolution for webbing — so the canvas is a real strap, not a
   // decorative long rectangle.
-  'lanyard-20':      { label: 'Lanyard 20 × 900 mm',   w: 118,  h: 5315, ratio: '20×900', group: 'Print · wearables', wmPct: 0.55, printable: true, printDpi: 150 },
-  'lanyard-25':      { label: 'Lanyard 25 × 900 mm',   w: 148,  h: 5315, ratio: '25×900', group: 'Print · wearables', wmPct: 0.55, printable: true, printDpi: 150 },
+  // NOTE: no wmPct. The strap does not draw a brand bar — its mark is composed by
+  // the lanyard layout itself, at cfg.markSize (46% of the strap's width). A wmPct
+  // here would be a number that looks authoritative and is never read, and the
+  // BRAND CHECK would measure it and report a failure that is not real.
+  'lanyard-20':      { label: 'Lanyard 20 × 900 mm',   w: 118,  h: 5315, ratio: '20×900', group: 'Print · wearables', printable: true, printDpi: 150 },
+  'lanyard-25':      { label: 'Lanyard 25 × 900 mm',   w: 148,  h: 5315, ratio: '25×900', group: 'Print · wearables', printable: true, printDpi: 150 },
 
   // ── DIGITAL SURFACE ───────────────────────────────────────
   'screensaver':     { label: '16:9 Screensaver',      w: 1920, h: 1080, ratio: '16:9',   group: 'Digital surface', wmPct: 0.10 },
@@ -114,7 +118,16 @@ const FORMATS = {
   'a4-landscape':    { label: 'A4 Landscape · 300 dpi',w: 3508, h: 2480, ratio: 'A4',     group: 'Print · paged',   wmPct: 0.27, printable: true, printDpi: 300 },
   'a5-portrait':     { label: 'A5 Portrait · 300 dpi', w: 1748, h: 2480, ratio: 'A5',     group: 'Print · paged',   wmPct: 0.27, printable: true, printDpi: 300 },
   'postcard-a6':     { label: 'Postcard A6 · 300 dpi', w: 1240, h: 1748, ratio: 'A6',     group: 'Print · paged',   wmPct: 0.27, printable: true, printDpi: 300 },
-  'business-card':   { label: 'Business Card · 300 dpi', w: 1050, h: 600, ratio: '85×55', group: 'Print · paged',   wmPct: 0.27, printable: true, printDpi: 300 },
+  // 85 × 55 mm at 300 dpi = 1004 × 650 px. It said 1050 × 600 — which is
+  // 88.9 × 50.8 mm: 3.9 mm too wide and 4.2 mm too short. A card that does not
+  // fit a wallet, discovered at the printer. The label was right and the pixels
+  // were not; every other ISO format checks out exactly, which is what made this
+  // one worth measuring rather than trusting.
+  // No wmPct: it carried 0.27 (the paged value) which on a 55 mm short side is
+  // 14.9 mm — under the guide's own 16 mm minimum, so the shipped default failed
+  // the check the app itself runs. formatCategory already calls this 'card', and
+  // the card scale (0.30) gives 16.5 mm. Deleting the override IS the fix.
+  'business-card':   { label: 'Business Card · 300 dpi', w: 1004, h: 650,  ratio: '85×55', group: 'Print · paged',   printable: true, printDpi: 300 },
 
   // ── PRINT · poster / banner ───────────────────────────────
   'poster-a3':       { label: 'Event Poster A3',       w: 1191, h: 1684, ratio: 'A3',     group: 'Print · poster',  wmPct: 0.30, printable: true, printDpi: 100 },
@@ -1067,10 +1080,25 @@ function pdfDrawMarks(pdf, {
 
   const T = bleedMm, B = bleedMm + trimHmm;
   const L = bleedMm, R = bleedMm + trimWmm;
-  // The offset must not exceed the bleed, or the marks land off the page and the
-  // file looks fine on screen while the printer sees nothing.
-  const off = Math.min(m.offsetMm ?? 2.117, bleedMm * 0.9);
-  const len = Math.min(4, Math.max(1.5, bleedMm * 1.1));
+
+  // ── THE SPACE THAT EXISTS ─────────────────────────────────────────────────
+  // The page is trim + 2 × bleed, so the room outside the trim is EXACTLY bleedMm.
+  // A crop mark occupies off + len of it. I previously capped only the OFFSET and
+  // left `len` free — the term that actually overflows. At a 3mm bleed that put
+  // the mark 2.42mm off the page.
+  //
+  // This bug is invisible on screen: content outside the MediaBox is CLIPPED, so
+  // the export looks perfect and the print is wrong. You find out from the printer.
+  //
+  // So: derive from the space, never from a wish. off + len === bleedMm, exactly,
+  // at any bleed, for any offset.
+  // NOTE the absence of a minimum length. My first fix wrote Math.max(0.6, …) —
+  // a floor that protects the MARK at the page's expense, which is the same
+  // mistake one size down: at a 1mm bleed it overflowed again. On a tiny bleed a
+  // tiny mark is the correct answer. The page always wins.
+  const offWanted = Math.max(0, m.offsetMm ?? 2.117);
+  const off = Math.min(offWanted, bleedMm * 0.55);   // the mark keeps at least 45%
+  const len = bleedMm - off;                          // …and gets exactly the rest
 
   if (m.crop) {
     pdf.line(L - len - off, T, L - off, T);  pdf.line(L, T - len - off, L, T - off);
@@ -1090,7 +1118,12 @@ function pdfDrawMarks(pdf, {
   }
 
   if (m.registration) {
-    const rad = Math.min(1.8, bleedMm * 0.5);
+    // The cross's ARMS reach rad × 1.7 from a centre at bleed × 0.5 — so the arms,
+    // not the circle, are what must fit. rad = (0.5 / 1.7) × bleed puts the arm tip
+    // exactly on the page edge; 0.28 keeps a hair inside it. Sizing this from the
+    // circle (bleed × 0.5) put the tip 1.05mm off the page at EVERY bleed the
+    // 2.5mm threshold below admits.
+    const rad = Math.min(1.8, bleedMm * 0.28);
     const cross = (cx, cy) => {
       pdf.circle(cx, cy, rad, 'S');
       pdf.line(cx - rad * 1.7, cy, cx + rad * 1.7, cy);
@@ -3692,7 +3725,26 @@ function formatCategory(formatKey) {
   if (formatKey === 'business-card' || formatKey === 'postcard-a6') return 'card';
   if (g.startsWith('Print · poster')) return 'poster';
   if (g.startsWith('Print · paged')) return 'paged';
+  if (g.startsWith('Print · brochure')) return 'paged';     // an A4 brochure IS a page
+  if (g.startsWith('Print · wearables')) return 'poster';   // a strap is read at distance
   if (g.startsWith('Digital')) return 'digital';
+  // EVERY PRINT GROUP MUST BE NAMED ABOVE.
+  // This catch-all used to swallow 'Print · brochure' and 'Print · wearables',
+  // and the cost was not a slightly-off type scale: LOGO_SHORT_PCT has no
+  // `social` key, so defaultWordmarkShortFrac took its ELSE branch and DISCARDED
+  // the format's declared wmPct entirely —
+  //
+  //     brochure-a4   asked 46.2 mm  →  rendered 27.3 mm
+  //     lanyard-20    asked 11.0 mm  →  rendered  2.6 mm   (a quarter of it)
+  //
+  // Every brochure and strap shipped with the mark under the guide's minimum. No
+  // error, no warning: a fall-through that is correct for the case you were
+  // thinking about and silently wrong for the two you were not.
+  //
+  // The guard is below — a print format that reaches this line is a bug.
+  if (import.meta.env?.DEV && g.startsWith('Print')) {
+    console.warn(`[format] "${formatKey}" (${g}) fell through to 'social'. Print groups must be named in formatCategory — the declared wmPct is otherwise discarded.`);
+  }
   return 'social';
 }
 
@@ -4023,9 +4075,16 @@ function defaultWordmarkShortFrac(formatKey, w, h) {
   const cat = formatCategory(formatKey);
   const fmt = FORMATS[formatKey] || {};
   const shortSide = Math.min(w, h);
-  let targetW = (LOGO_SHORT_PCT[cat] != null)
-    ? shortSide * (fmt.wmPct ?? LOGO_SHORT_PCT[cat])
-    : w * (LOGO_WIDTH_PCT[cat] ?? 0.13);
+  // A DECLARED wmPct IS AN INSTRUCTION, and it is expressed in short-side terms.
+  // It used to be honoured only when the category happened to have a
+  // LOGO_SHORT_PCT entry — so a format could state its size and be ignored purely
+  // because of how its group string was spelled. If a format says what it wants,
+  // that is the answer; the category is only the DEFAULT.
+  let targetW = (fmt.wmPct != null)
+    ? shortSide * fmt.wmPct
+    : (LOGO_SHORT_PCT[cat] != null)
+      ? shortSide * LOGO_SHORT_PCT[cat]
+      : w * (LOGO_WIDTH_PCT[cat] ?? 0.13);
   targetW = clamp(targetW, w * LOGO_MIN_WIDTH_FRAC, w * LOGO_MAX_WIDTH_FRAC);
   targetW = Math.min(targetW, h * LOGO_MAX_HEIGHT_FRAC * WORDMARK_AR);
   return targetW / shortSide;
@@ -5037,7 +5096,11 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
     }
 
     // 1 · Logo minimum size — below this the wordmark stops being legible.
-    if (wordmarkPos !== 'hidden') {
+    // The strap is exempt because it does not HAVE a brand bar: its mark is
+    // composed by the lanyard layout at 46% of the strap width. Measuring the
+    // brand-bar wordmark on a lanyard reports a failure about a thing that is not
+    // on the canvas — a false alarm teaches people to ignore the panel.
+    if (wordmarkPos !== 'hidden' && layoutKey !== 'lanyard') {
       const wmBox = wordmarkSizeFor({ w: fmt.w, h: fmt.h }, formatKey, wordmarkPctOverride);
       const min = { px: 60, mm: 16 };
       const val = isPrint ? (wmBox.w / dpi) * 25.4 : wmBox.w;
@@ -8032,10 +8095,20 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
                         {label.toUpperCase()}
                       </label>
                     ))}
+                    {/* The trade-off is real and it is arithmetic, so show it rather
+                        than let a printer explain it. off + len === bleed, always. */}
+                    <div style={{ fontFamily: BRAND.mono, fontSize: 8.5, color: BRAND.ink300,
+                                  lineHeight: 1.6, letterSpacing: '0.03em', marginTop: 6 }}>
+                      {(() => {
+                        const bleed = 3;
+                        const off = Math.min(pdfMarks.offsetMm, bleed * 0.55);
+                        return `AT ${bleed} MM BLEED THE MARKS GET ${(bleed - off).toFixed(1)} MM: OFFSET ${off.toFixed(1)} + LENGTH ${(bleed - off).toFixed(1)} = THE ${bleed} MM THAT EXISTS OUTSIDE THE TRIM. INDESIGN GETS LONGER MARKS BY GROWING THE PAGE PAST THE BLEED; THIS PAGE IS TRIM + BLEED BY CONTRACT, SO THE MARKS LIVE INSIDE IT.`;
+                      })()}
+                    </div>
                     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 6 }}>
                       <label style={{ fontFamily: BRAND.mono, fontSize: 9, color: BRAND.ink600, letterSpacing: '0.06em' }}>
                         OFFSET · {pdfMarks.offsetMm.toFixed(2)} MM
-                        <input type="range" min="0" max="3" step="0.1" value={pdfMarks.offsetMm}
+                        <input type="range" min="0" max="1.6" step="0.1" value={pdfMarks.offsetMm}
                                onChange={(e) => setPdfMarks((m) => ({ ...m, offsetMm: Number(e.target.value) }))}
                                style={{ width: '100%' }} />
                       </label>
