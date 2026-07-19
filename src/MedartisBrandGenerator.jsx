@@ -5190,15 +5190,42 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
   }, []);
 
   // ── SAVED LIBRARY ─────────────────────────────────────────────────
-  // User-curated images (e.g. picked from Canto) persisted to localStorage so
-  // they join the standard Medartis library across sessions. Stored compressed
-  // as data URLs; loaded into the same libraryImages map so they apply exactly
-  // like built-in assets.
+  // User-curated images (Canto picks, AI results) that join the standard
+  // library across sessions. Stored in INDEXEDDB, not localStorage: the whole
+  // origin shares one ~5 MB localStorage quota, so a dozen compressed images
+  // plus the presets filled it and the failure arrived as a quota exception at
+  // the worst possible moment. IndexedDB holds hundreds of megabytes without
+  // complaint. A legacy localStorage library migrates over once, and clearing
+  // the old key gives the presets their room back.
   const SAVED_LIB_KEY = 'medartis-saved-library-v1';
-  const [savedLibrary, setSavedLibrary] = useState(() => {
-    try { return JSON.parse(localStorage.getItem(SAVED_LIB_KEY) || '[]'); }
-    catch { return []; }
+  const idbLib = (mode, run) => new Promise((resolve, reject) => {
+    const rq = indexedDB.open('medartis-bag', 1);
+    rq.onupgradeneeded = () => rq.result.createObjectStore('saved-library', { keyPath: 'id' });
+    rq.onerror = () => reject(rq.error);
+    rq.onsuccess = () => {
+      const tx = rq.result.transaction('saved-library', mode);
+      const req = run(tx.objectStore('saved-library'));
+      tx.oncomplete = () => { resolve(req?.result); rq.result.close(); };
+      tx.onerror = () => { reject(tx.error); rq.result.close(); };
+    };
   });
+
+  const [savedLibrary, setSavedLibrary] = useState([]);
+  useEffect(() => {
+    (async () => {
+      try {
+        const legacy = localStorage.getItem(SAVED_LIB_KEY);
+        if (legacy) {
+          for (const e of JSON.parse(legacy)) await idbLib('readwrite', (st) => st.put({ savedAt: 0, ...e }));
+          localStorage.removeItem(SAVED_LIB_KEY);
+        }
+        const all = (await idbLib('readonly', (st) => st.getAll())) || [];
+        all.sort((a, b) => (b.savedAt || 0) - (a.savedAt || 0));
+        setSavedLibrary(all);
+      } catch { /* e.g. private browsing without IDB: the library is session-only */ }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   useEffect(() => {
     savedLibrary.forEach(asset => {
       if (libraryImages[asset.id]) return;
@@ -5209,12 +5236,6 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [savedLibrary]);
 
-  const persistSavedLibrary = (next) => {
-    setSavedLibrary(next);
-    try { localStorage.setItem(SAVED_LIB_KEY, JSON.stringify(next)); }
-    catch { alert('Could not save to the library — browser storage is full. Remove a few saved images and try again.'); }
-  };
-
   // Compress + persist an image element into the saved library. Returns true on success.
   const saveImageToLibrary = (img, label = 'Saved image', category = 'saved') => {
     if (!img) return false;
@@ -5222,18 +5243,22 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
     try {
       const src = compressDataUrl(img, 1600, 0.82);
       const id = 'saved-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 6);
-      const entry = { id, label: (label || 'Saved image').slice(0, 48), category, src, saved: true };
+      const entry = { id, label: (label || 'Saved image').slice(0, 48), category, src, saved: true, savedAt: Date.now() };
       setLibraryImages(prev => ({ ...prev, [id]: img }));
-      persistSavedLibrary([entry, ...savedLibrary]);
+      setSavedLibrary((cur) => [entry, ...cur]);
+      idbLib('readwrite', (st) => st.put(entry)).catch((e) => {
+        askConfirm({ title: 'Could not save to the library', body: `Storage refused the write: ${e?.message || e}. The image stays available for this session.`, notice: true, tone: 'error' });
+      });
       return true;
     } catch (e) {
-      alert('Could not save image: ' + e.message);
+      askConfirm({ title: 'Could not save the image', body: e.message, notice: true, tone: 'error' });
       return false;
     }
   };
 
   const removeFromLibrary = (id) => {
-    persistSavedLibrary(savedLibrary.filter(a => a.id !== id));
+    setSavedLibrary((cur) => cur.filter(a => a.id !== id));
+    idbLib('readwrite', (st) => st.delete(id)).catch(() => {});
     setLibraryImages(prev => { const n = { ...prev }; delete n[id]; return n; });
   };
 
@@ -10374,6 +10399,7 @@ const GenerateSection = ({
   const [draftFirst, setDraftFirst] = useState(true);   // half-res same-seed draft in seconds
   const [refine, setRefine] = useState(false);          // latent hi-res second pass (print)
   const [lockSeed, setLockSeed] = useState(false);      // reuse the last seed (iterate on one image)
+  const [steps, setSteps] = useState(null);             // null = the engine's own default
   const [lastSeed, setLastSeed] = useState(null);
   const [busy, setBusy] = useState(false);
   const [job, setJob] = useState(null);
@@ -10448,6 +10474,7 @@ const GenerateSection = ({
           fast: engine === 'sdxl' ? fast : false,
           draft: draftFirst,
           refine,
+          steps: steps ?? undefined,
           seed: lockSeed && Number.isFinite(lastSeed) ? lastSeed : undefined,
           w: format.w, h: format.h,
           // Conditioning. The server reports back what it could actually honour.
@@ -10613,6 +10640,105 @@ const GenerateSection = ({
             placeholder="Subject only — e.g. “instrument tray on a brushed-steel bench, morning light”. The house look, realism and negative are added for you."
             style={{ width: '100%', boxSizing: 'border-box', marginBottom: 8 }}
           />
+
+          {/* ── RENDER MODES ─────────────────────────────────────────
+              Five best-practice bundles. Every mode is a KNOWN-GOOD recipe —
+              engine, steps, draft, refine, negatives — so the fragile
+              combinations (refine on a sketch, strict negatives on Turbo)
+              simply never happen by accident. The raw controls below remain
+              for anyone who wants to leave the path. */}
+          {(() => {
+            const engines = status?.engines || [];
+            const zi = engines.includes('zimage');
+            const MODES = [
+              {
+                key: 'instant', label: 'INSTANT', tag: '~5s',
+                desc: 'Composition sketches while you think. Lowest fidelity, immediate — for finding the idea, not keeping it.',
+                available: engines.includes('sdxl-turbo') || zi,
+                apply: () => {
+                  if (engines.includes('sdxl-turbo')) { setEngine('sdxl-turbo'); setSteps(null); }
+                  else { setEngine('zimage'); setSteps(4); }
+                  setDraftFirst(false); setRefine(false); setFast(false); setStrictNegative(false);
+                },
+                match: () => (engine === 'sdxl-turbo' || (engine === 'zimage' && steps === 4)) && !refine && !draftFirst,
+              },
+              {
+                key: 'daily', label: 'DAILY', tag: zi ? '~15s' : '~25s',
+                desc: zi
+                  ? 'The default: Z-Image at its 8-step sweet spot — photoreal, licensed to ship, draft in seconds, final anchored on it.'
+                  : 'SDXL with the Lightning fast recipe — quick, shippable, draft-first. (Install Z-Image for the better default.)',
+                available: zi || engines.includes('sdxl'),
+                apply: () => {
+                  if (zi) { setEngine('zimage'); setFast(false); } else { setEngine('sdxl'); setFast(true); }
+                  setSteps(null); setDraftFirst(true); setRefine(false); setStrictNegative(false); setRealism(true);
+                },
+                match: () => draftFirst && !refine && steps === null && ((zi && engine === 'zimage') || (!zi && engine === 'sdxl' && fast)),
+              },
+              {
+                key: 'realism', label: 'REALISM+', tag: '~1min',
+                desc: 'Flux dev with strict negatives: the richest light and skin a local model produces — at 2x the time, and non-commercial (internal drafts only).',
+                available: engines.includes('flux'),
+                apply: () => { setEngine('flux'); setSteps(null); setDraftFirst(true); setRefine(false); setStrictNegative(true); setRealism(true); setFast(false); },
+                match: () => engine === 'flux' && strictNegative && !refine,
+              },
+              {
+                key: 'print', label: 'PRINT', tag: '~2min',
+                desc: 'Maximal resolution: draft, anchored final, latent refine to ~2K (tiled decode on Macs), upscaler to 3K. For A-formats, posters, roll-ups.',
+                available: zi || engines.includes('sdxl'),
+                apply: () => { setEngine(zi ? 'zimage' : 'sdxl'); setSteps(null); setDraftFirst(true); setRefine(true); setRealism(true); setStrictNegative(false); setFast(false); },
+                match: () => refine && (engine === 'zimage' || engine === 'sdxl'),
+              },
+              {
+                key: 'layout', label: 'LAYOUT-TRUE', tag: 'SDXL',
+                desc: 'Your layout becomes a depth map: the scene keeps the space where your type sits. Pair with a photoreal checkpoint (★).',
+                available: engines.includes('sdxl') && !!status?.conditioning?.control,
+                apply: () => {
+                  setEngine('sdxl'); setSteps(null); setDraftFirst(true); setRefine(false); setStrictNegative(false); setFast(false);
+                  setCtrlSource('layout'); setCtrlType('depth');
+                  const map = makeControlMap && makeControlMap();
+                  if (map) setCtrlImage(map);
+                },
+                match: () => engine === 'sdxl' && ctrlSource === 'layout' && !!ctrlImage && !refine,
+              },
+            ].filter((m) => m.available);
+            const active = MODES.find((m) => { try { return m.match(); } catch { return false; } });
+            return (
+              <>
+                <div style={{ fontSize: 9.5, color: BRAND.ink600, marginBottom: 5, fontFamily: BRAND.mono, letterSpacing: '0.1em', textTransform: 'uppercase' }}>
+                  Render mode <span style={{ color: BRAND.ink300, letterSpacing: 0, textTransform: 'none' }}> · {active ? active.desc : 'custom — your own combination of the controls below'}</span>
+                </div>
+                <div style={{ display: 'grid', gridTemplateColumns: `repeat(${Math.min(MODES.length, 5)}, 1fr)`, gap: 3, marginBottom: 10 }}>
+                  {MODES.map((m) => (
+                    <button key={m.key} onClick={m.apply} title={`${m.desc}`} style={{ ...btn(active?.key === m.key), padding: '7px 2px' }}>
+                      <span style={{ display: 'block' }}>{m.label}</span>
+                      <span style={{ display: 'block', fontSize: 7.5, opacity: 0.7, marginTop: 1 }}>{m.tag}</span>
+                    </button>
+                  ))}
+                </div>
+              </>
+            );
+          })()}
+
+          {/* Example prompts — the house look in practice. Click to load; the
+              gate's own guidance applies: generate the place, not the person. */}
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 3, marginBottom: 10 }}>
+            {[
+              ['OR theatre', 'an empty, immaculate operating theatre, cool daylight, surgical instruments laid out on a tray'],
+              ['Implant macro', 'titanium osteosynthesis plate on brushed steel, extreme macro, precision studio light, shallow depth of field'],
+              ['Hands at work', 'close-up of gloved hands assembling a small titanium implant, cool neutral light, real skin texture'],
+              ['Clinic dawn', 'modern hospital corridor at dawn, glass and pale stone, long shadows, nobody in sight'],
+              ['Congress booth', 'empty trade-fair booth with clean architectural lines, warm spotlights, polished floor reflections'],
+            ].map(([label, text]) => (
+              <button key={label} onClick={() => setPrompt(text)} title={text}
+                style={{
+                  padding: '3px 8px', cursor: 'pointer', background: BRAND.paper,
+                  border: `1px solid ${BRAND.ink100}`, color: BRAND.ink600,
+                  fontFamily: BRAND.mono, fontSize: 8.5, letterSpacing: '0.06em',
+                }}>
+                {label}
+              </button>
+            ))}
+          </div>
 
           {/* Engine */}
           <div style={{ fontSize: 9.5, color: BRAND.ink600, marginBottom: 5, fontFamily: BRAND.mono, letterSpacing: '0.1em', textTransform: 'uppercase' }}>Engine</div>
@@ -10984,8 +11110,24 @@ const GenerateSection = ({
                     background: 'rgba(19,19,16,0.82)', color: BRAND.gold,
                     fontFamily: BRAND.mono, fontSize: 8.5, letterSpacing: '0.12em',
                   }}>
-                    {job.draftImages ? 'DRAFT · FINAL RENDERING' : 'LIVE PREVIEW'}
+                    {job.draftImages
+                      ? 'DRAFT · FINAL RENDERING'
+                      : job.steps
+                        ? `DENOISING · ${Math.round(((job.step ?? 0) / job.steps) * 100)}%`
+                        : 'LIVE PREVIEW'}
                   </span>
+                </div>
+              )}
+              {/* The one silent failure mode: an ALREADY-RUNNING ComfyUI that was
+                  started without --preview-method streams no frames — steps tick,
+                  nothing shows. Name it and name the fix, right here. */}
+              {!job.preview && (job.step ?? 0) >= 2 && (
+                <div style={{
+                  fontFamily: BRAND.mono, fontSize: 8.5, color: BRAND.ink300,
+                  lineHeight: 1.5, letterSpacing: '0.04em', marginBottom: 5,
+                }}>
+                  NO LIVE PREVIEW FROM THIS COMFYUI — IT WAS STARTED WITHOUT A PREVIEW METHOD.
+                  QUIT IT AND RELAUNCH VIA npm start TO WATCH THE DENOISING LIVE.
                 </div>
               )}
               <div style={{ height: 4, background: BRAND.ink100, overflow: 'hidden' }}>
