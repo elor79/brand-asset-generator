@@ -1101,6 +1101,11 @@ export default function genai() {
               if (b.steps) wf['17'].inputs.steps = clampInt(b.steps, 4, 50);
             }
 
+            // How many variants in one run. Cost is linear; the queue is one
+            // ComfyUI, so 4 is the honest ceiling before the panel feels stuck.
+            const batch = clampInt(b.batch ?? 1, 1, 4);
+            if (wf['5']?.inputs) wf['5'].inputs.batch_size = batch;
+
             configureUpscale(wf, target, upscaler);
 
             const { wf: ready, usedLora, ckpt: usedCkpt, engine } = await resolveWorkflow(wf);
@@ -1125,7 +1130,7 @@ export default function genai() {
             if (b.draft !== false && engine !== 'sdxl-turbo') {
               draftWf = JSON.parse(JSON.stringify(ready));
               const d = latentSize(b.w, b.h, engineKey, 0.25); // half the edge
-              if (draftWf['5']?.inputs) { draftWf['5'].inputs.width = d.width; draftWf['5'].inputs.height = d.height; }
+              if (draftWf['5']?.inputs) { draftWf['5'].inputs.width = d.width; draftWf['5'].inputs.height = d.height; draftWf['5'].inputs.batch_size = 1; }
               if (draftWf['3']?.class_type === 'KSampler') {
                 draftWf['3'].inputs.steps = Math.max(4, Math.round(draftWf['3'].inputs.steps * 0.6));
               } else if (draftWf['17']?.class_type === 'BasicScheduler') {
@@ -1178,7 +1183,7 @@ export default function genai() {
             const negativeHonoured = engine === 'flux' ? fluxNegativeHonoured : engine !== 'zimage';
             const meta = {
               prompt: positive, width, height, target, upscaler, lora: usedLora, ckpt: usedCkpt || null, engine,
-              fast: usedFast, seed, draft: !!draftWf, refine: refineInfo,
+              fast: usedFast, seed, draft: !!draftWf, refine: refineInfo, batch,
               negative, negativeHonoured, realism: b.realism !== false,
               conditioning,
             };
@@ -1199,7 +1204,10 @@ export default function genai() {
                 // stay independent and the report says so.
                 try {
                   const draftImg = j.draftImages?.[0];
-                  if (draftImg && ready['3']?.class_type === 'KSampler' && ready['8']?.inputs?.vae) {
+                  // With batch > 1 the POINT is variety — anchoring every variant
+                  // on one draft would collapse them into near-copies. The draft
+                  // then serves as preview only, and the report says so.
+                  if (batch === 1 && draftImg && ready['3']?.class_type === 'KSampler' && ready['8']?.inputs?.vae) {
                     const name = await comfyUploadImage(draftImg);
                     ready['50'] = { class_type: 'LoadImage', inputs: { image: name } };
                     ready['51'] = { class_type: 'ImageScale', inputs: { image: ['50', 0], upscale_method: 'lanczos', width, height, crop: 'disabled' } };

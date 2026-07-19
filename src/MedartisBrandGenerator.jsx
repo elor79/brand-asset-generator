@@ -10400,6 +10400,7 @@ const GenerateSection = ({
   const [refine, setRefine] = useState(false);          // latent hi-res second pass (print)
   const [lockSeed, setLockSeed] = useState(false);      // reuse the last seed (iterate on one image)
   const [steps, setSteps] = useState(null);             // null = the engine's own default
+  const [batch, setBatch] = useState(1);                // outputs per run (1 / 2 / 4)
   const [lastSeed, setLastSeed] = useState(null);
   const [busy, setBusy] = useState(false);
   const [job, setJob] = useState(null);
@@ -10475,6 +10476,7 @@ const GenerateSection = ({
           draft: draftFirst,
           refine,
           steps: steps ?? undefined,
+          batch,
           seed: lockSeed && Number.isFinite(lastSeed) ? lastSeed : undefined,
           w: format.w, h: format.h,
           // Conditioning. The server reports back what it could actually honour.
@@ -10658,7 +10660,7 @@ const GenerateSection = ({
                 apply: () => {
                   if (engines.includes('sdxl-turbo')) { setEngine('sdxl-turbo'); setSteps(null); }
                   else { setEngine('zimage'); setSteps(4); }
-                  setDraftFirst(false); setRefine(false); setFast(false); setStrictNegative(false);
+                  setDraftFirst(false); setRefine(false); setFast(false); setStrictNegative(false); setBatch(4);
                 },
                 match: () => (engine === 'sdxl-turbo' || (engine === 'zimage' && steps === 4)) && !refine && !draftFirst,
               },
@@ -10670,7 +10672,7 @@ const GenerateSection = ({
                 available: zi || engines.includes('sdxl'),
                 apply: () => {
                   if (zi) { setEngine('zimage'); setFast(false); } else { setEngine('sdxl'); setFast(true); }
-                  setSteps(null); setDraftFirst(true); setRefine(false); setStrictNegative(false); setRealism(true);
+                  setSteps(null); setDraftFirst(true); setRefine(false); setStrictNegative(false); setRealism(true); setBatch(1);
                 },
                 match: () => draftFirst && !refine && steps === null && ((zi && engine === 'zimage') || (!zi && engine === 'sdxl' && fast)),
               },
@@ -10678,14 +10680,14 @@ const GenerateSection = ({
                 key: 'realism', label: 'REALISM+', tag: '~1min',
                 desc: 'Flux dev with strict negatives: the richest light and skin a local model produces — at 2x the time, and non-commercial (internal drafts only).',
                 available: engines.includes('flux'),
-                apply: () => { setEngine('flux'); setSteps(null); setDraftFirst(true); setRefine(false); setStrictNegative(true); setRealism(true); setFast(false); },
+                apply: () => { setEngine('flux'); setSteps(null); setDraftFirst(true); setRefine(false); setStrictNegative(true); setRealism(true); setFast(false); setBatch(1); },
                 match: () => engine === 'flux' && strictNegative && !refine,
               },
               {
                 key: 'print', label: 'PRINT', tag: '~2min',
                 desc: 'Maximal resolution: draft, anchored final, latent refine to ~2K (tiled decode on Macs), upscaler to 3K. For A-formats, posters, roll-ups.',
                 available: zi || engines.includes('sdxl'),
-                apply: () => { setEngine(zi ? 'zimage' : 'sdxl'); setSteps(null); setDraftFirst(true); setRefine(true); setRealism(true); setStrictNegative(false); setFast(false); },
+                apply: () => { setEngine(zi ? 'zimage' : 'sdxl'); setSteps(null); setDraftFirst(true); setRefine(true); setRealism(true); setStrictNegative(false); setFast(false); setBatch(1); },
                 match: () => refine && (engine === 'zimage' || engine === 'sdxl'),
               },
               {
@@ -10824,8 +10826,8 @@ const GenerateSection = ({
             </button>
           )}
 
-          {/* Speed & quality ladder: draft-first, print refine, seed lock */}
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 3, marginBottom: 6 }}>
+          {/* Speed & quality ladder: draft-first, print refine, seed lock, outputs */}
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: 3, marginBottom: 6 }}>
             <button onClick={() => setDraftFirst((v) => !v)} style={btn(draftFirst)}
               title="Render a half-resolution draft with the same seed FIRST — it appears in seconds and stands in while the full-quality pass finishes. Same models, nothing reloads.">
               ▶ Draft first
@@ -10837,6 +10839,10 @@ const GenerateSection = ({
             <button onClick={() => setLockSeed((v) => !v)} style={btn(lockSeed)}
               title={Number.isFinite(lastSeed) ? `Re-use seed ${lastSeed} — iterate on this exact image (change the prompt, keep the composition).` : 'After the first render, lock the seed to iterate on that exact image.'}>
               ⟳ Same seed{Number.isFinite(lastSeed) && lockSeed ? ` · ${String(lastSeed).slice(0, 6)}` : ''}
+            </button>
+            <button onClick={() => setBatch((n) => (n === 1 ? 2 : n === 2 ? 4 : 1))} style={btn(batch > 1)}
+              title="Variants per run — click to cycle 1 → 2 → 4. Time is linear. With more than one output, the draft stays a preview and each variant composes freely (anchoring one draft onto all of them would make near-copies).">
+              ▤ Outputs ×{batch}
             </button>
           </div>
 
@@ -11190,6 +11196,7 @@ const GenerateSection = ({
               </span>
               {lastMeta.realism ? ' · REALISM ON' : ''}
               {Number.isFinite(lastMeta.seed) ? ` · SEED ${lastMeta.seed}` : ''}
+              {lastMeta.batch > 1 ? ` · ${lastMeta.batch} OUTPUTS` : ''}
               {lastMeta.anchored ? ' · FINAL ANCHORED ON DRAFT (SAME COMPOSITION, DENOISE 0.58)' : lastMeta.draft ? ' · DRAFT-FIRST (INDEPENDENT)' : ''}
               {lastMeta.refine ? ` · REFINED ${lastMeta.refine.width}×${lastMeta.refine.height} @ ${lastMeta.refine.denoise}` : ''}
               {lastMeta.tookMs ? ` · ${(lastMeta.tookMs / 1000).toFixed(1)}S` : ''}
