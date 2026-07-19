@@ -7176,6 +7176,41 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
     reader.readAsText(f);
   };
 
+  // The preset LIBRARY lives only in this browser's localStorage — one profile
+  // wipe deletes every saved layout. These two round-trip the whole library
+  // (thumbnails included) as one JSON file. Import MERGES: a name that already
+  // exists gets " (imported)" appended, so nothing is silently overwritten.
+  const exportPresetLibrary = () => {
+    const blob = new Blob([JSON.stringify({ kind: 'medartis-bag-preset-library', version: 1, presets: readPresets() }, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.download = `medartis-preset-library-${new Date().toISOString().slice(0, 10)}.json`;
+    link.href = url;
+    link.click();
+    URL.revokeObjectURL(url);
+  };
+  const importPresetLibrary = (e) => {
+    const f = e.target.files?.[0];
+    e.target.value = '';
+    if (!f) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      try {
+        const doc = JSON.parse(ev.target.result);
+        const incoming = doc?.kind === 'medartis-bag-preset-library' ? doc.presets : null;
+        if (!incoming || typeof incoming !== 'object') throw new Error('not a preset-library file (export one with EXPORT LIBRARY)');
+        const next = { ...readPresets() };
+        for (const [name, p] of Object.entries(incoming)) {
+          let n = name;
+          while (n in next) n = `${n} (imported)`;
+          next[n] = p;
+        }
+        if (writePresets(next)) setPresets(next);
+      } catch (err) { alert('Could not read preset library: ' + err.message); }
+    };
+    reader.readAsText(f);
+  };
+
   const template = TEMPLATES[templateKey];
 
   if (view === 'playground') {
@@ -9328,6 +9363,24 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
             fontFamily: BRAND.mono, letterSpacing: '0.04em', lineHeight: 1.5
           }}>
             AUTO-NAMED IF BLANK · {presetName.trim() ? 'CUSTOM' : 'AUTO'}: <span style={{ color: BRAND.ink }}>{presetName.trim() || autoName}</span>
+          </div>
+
+          {/* The library is localStorage-only — a file round-trip means a lost
+              browser profile can't take every saved preset with it. */}
+          <div style={{ display: 'flex', gap: 4, marginBottom: 10 }}>
+            <button onClick={exportPresetLibrary} style={{
+              flex: 1, padding: '5px 0', background: 'none', border: `1px solid ${BRAND.ink100}`,
+              cursor: 'pointer', fontFamily: BRAND.mono, fontSize: 9.5, letterSpacing: '0.08em', color: BRAND.ink600,
+            }}>
+              ↓ EXPORT LIBRARY ({Object.keys(presets).length})
+            </button>
+            <label style={{
+              flex: 1, padding: '5px 0', border: `1px solid ${BRAND.ink100}`, cursor: 'pointer',
+              fontFamily: BRAND.mono, fontSize: 9.5, letterSpacing: '0.08em', color: BRAND.ink600, textAlign: 'center',
+            }}>
+              ↑ IMPORT LIBRARY
+              <input type="file" accept="application/json,.json" onChange={importPresetLibrary} style={{ display: 'none' }} />
+            </label>
           </div>
 
           {(() => {
