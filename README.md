@@ -25,7 +25,7 @@ npm install
 npm start          # boots ComfyUI *and* the app
 ```
 
-The app opens automatically at http://localhost:5173, and the AI backend on
+The app opens automatically at http://localhost:5174 (Cadence owns 5173), and the AI backend on
 http://127.0.0.1:8188.
 
 `npm start` (or double-clicking **Start Medartis Asset Generator.command**) is
@@ -40,9 +40,11 @@ IBRA generator's ComfyUI, and `~/ComfyUI`. One backend, shared — the weights a
 | `npm run dev` | the app only — § 12 GENERATE will report no backend |
 | `npm run comfy` | ComfyUI only |
 | `npm run setup:conditioning` | one-time: IP-Adapter + ControlNet, for § 12 |
+| `npm test` | the whole check suite: artwork, layouts, Group derivation, PDF parity, docs figures |
 
-Ports are pinned (`strictPort`). If 5173 is taken, the app says so rather than
-quietly moving to 5174 and leaving you looking at a stale tab.
+Ports are pinned (`strictPort`). If 5174 is taken, the app says so rather than
+quietly moving to another port and leaving your saved work stranded in a
+different browser-storage bucket (storage is per port).
 
 ## Build for production
 
