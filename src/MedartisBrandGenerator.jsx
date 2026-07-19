@@ -10601,6 +10601,28 @@ const GenerateSection = ({
             </button>
           </div>
 
+          {/* The safety gate is a brand-owner DECISION — so it lives here as a
+              visible switch with its state named, not as a buried JSON flag.
+              Flipping it moves the archived term list in or out of force. */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+            <button
+              onClick={async () => {
+                await fetch('/api/gen/safety', {
+                  method: 'POST', headers: { 'content-type': 'application/json' },
+                  body: JSON.stringify({ enabled: !status?.safetyEnabled }),
+                }).catch(() => {});
+                probe();
+              }}
+              style={btn(!!status?.safetyEnabled)}
+              title="When on, prompts naming people-as-clinicians (surgeon, patient, …) are refused with an explanation — people stay real photography. When off, no prompt is refused. Changing this is a brand-owner decision; the switch edits ai/prompt/house_style.json."
+            >
+              ▣ Safety gate · {status?.safetyEnabled ? 'ON' : 'OFF'}
+            </button>
+            <span style={{ fontSize: 9, fontFamily: BRAND.mono, color: status?.safetyEnabled ? '#0A7D3E' : BRAND.ink300, letterSpacing: '0.04em' }}>
+              {status?.safetyEnabled ? 'PEOPLE-AS-CLINICIAN PROMPTS ARE REFUSED' : 'NO PROMPT IS REFUSED · PEOPLE STAY REAL PHOTOGRAPHY BY POLICY'}
+            </span>
+          </div>
+
           {/* The honesty line — never imply the negative did something it didn't. */}
           <div style={{
             fontSize: 9, fontFamily: BRAND.mono, lineHeight: 1.55, marginBottom: 8,

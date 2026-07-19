@@ -47,6 +47,28 @@ function loadWorkflow(file) {
   return wf;
 }
 const STYLE = () => readJson('ai/prompt/house_style.json');
+const writeStyle = (s) => fs.writeFileSync(path.join(__dirname, 'ai/prompt/house_style.json'), JSON.stringify(s, null, 2) + '\n');
+
+// Flip the prompt gate as a DECISION, not a buried flag: enabling moves the
+// archived terms back into force; disabling archives them again. Either way the
+// current state is visible in the UI (§ GENERATE) and in this file's history.
+function setSafetyGate(enabled) {
+  const s = STYLE();
+  if (enabled) {
+    const active = (s.blocklist || []).length ? s.blocklist : (s.blocklist_archived || []);
+    s.blocklist = active;
+    s.blocklist_enabled = true;
+    if (!s.blocklist_message) {
+      s.blocklist_message = 'The Medartis safety gate stopped this prompt. People presented as clinicians stay real photography — generate the place, not the person.';
+    }
+  } else {
+    s.blocklist_archived = [...new Set([...(s.blocklist_archived || []), ...(s.blocklist || [])])];
+    s.blocklist = [];
+    s.blocklist_enabled = false;
+  }
+  writeStyle(s);
+  return { enabled: s.blocklist_enabled === true, terms: (enabled ? s.blocklist : s.blocklist_archived).length };
+}
 
 // ── jobs ───────────────────────────────────────────────────────────────
 // In-memory; a dev tool doesn't need a queue. { status, progress, images, error }
@@ -754,12 +776,24 @@ export default function genai() {
         const url = new URL(req.url, 'http://localhost');
 
         try {
+          // ── safety gate (read/flip) ───────────────────────────────
+          if (url.pathname === '/api/gen/safety') {
+            if (req.method === 'POST') {
+              const b = await body(req);
+              return send(res, 200, setSafetyGate(b?.enabled === true));
+            }
+            const s = STYLE();
+            const enabled = s.blocklist_enabled === true;
+            return send(res, 200, { enabled, terms: (enabled ? s.blocklist : s.blocklist_archived || []).length });
+          }
+
           // ── status ────────────────────────────────────────────────
           if (url.pathname === '/api/gen/status') {
             const out = {
               providers: [], lora: LORA(), missing: [],
               nonCommercial: true,
               blocklistMessage: STYLE().blocklist_message,
+              safetyEnabled: STYLE().blocklist_enabled === true,
             };
             if (!(await comfyAlive())) {
               out.comfyError = `No ComfyUI at ${COMFY()} — start it (npm start), or set COMFY_URL.`;
