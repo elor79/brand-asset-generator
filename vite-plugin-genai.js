@@ -161,6 +161,21 @@ function targetSize(w, h, maxEdge = 2560) {
   return { width: even(w || 1024), height: even(h || 1024) };
 }
 
+// Apple's MPSGraph refuses single tensors past INT_MAX elements — which is what
+// a one-shot VAEDecode of a ~2048px latent builds ("MPSGraph does not support
+// tensor dims larger than INT_MAX"). Tiled decoding produces the identical
+// image in 512px tiles and never allocates the monster. Applied automatically
+// on MPS whenever the decode is big enough to matter.
+function useTiledVaeDecode(wf) {
+  if (wf['8']?.class_type === 'VAEDecode') {
+    wf['8'] = {
+      class_type: 'VAEDecodeTiled',
+      inputs: { ...wf['8'].inputs, tile_size: 512, overlap: 64, temporal_size: 64, temporal_overlap: 8 },
+    };
+  }
+  return wf;
+}
+
 // The upscale tail (nodes 90/91/92) is part of the workflow FILES, so the graph
 // in ComfyUI's sidebar is the graph we run. Here we only bind it to reality:
 // the real model name, the real canvas size — or bypass it entirely when no
@@ -690,6 +705,11 @@ async function comfyRun(jobId, workflow, opts = {}) {
     // Flux / SD3 / video-model file, all of which keep their text encoders in
     // separate files. ComfyUI's wording sends people hunting through their graph;
     // the fix is always "load a different checkpoint".
+    if (/INT_MAX/i.test(detail)) {
+      detail = 'Apple MPS refused a single tensor this large during VAE decode. ' +
+        'The refine pass now decodes in tiles automatically on Macs — if you still see this, ' +
+        'update ComfyUI (VAEDecodeTiled) or turn off Refine for this run.';
+    }
     if (/clip input is invalid/i.test(detail)) {
       const ck = workflow['4']?.inputs?.ckpt_name || '(unknown)';
       detail = `The checkpoint “${ck}” contains no text encoder (CLIP), so the prompt cannot be encoded. ` +
@@ -727,7 +747,13 @@ async function comfyRun(jobId, workflow, opts = {}) {
         .map(([, d]) => `${d.node_type || d.node_id}: ${d.exception_message || 'failed'}`)
         .join(' · ');
       detach();
-      patchJob(jobId, { status: 'error', error: msg || 'ComfyUI execution error — see comfyui.log.' });
+      let friendly = msg;
+      if (/INT_MAX/i.test(friendly)) {
+        friendly = 'Apple MPS refused a single tensor this large during VAE decode. ' +
+          'The refine pass now decodes in tiles automatically on Macs — retry the run; ' +
+          'if it persists, update ComfyUI (VAEDecodeTiled) or turn off Refine.';
+      }
+      patchJob(jobId, { status: 'error', error: friendly || 'ComfyUI execution error — see comfyui.log.' });
       return;
     }
     const images = [];
@@ -1135,6 +1161,9 @@ export default function genai() {
                   },
                 };
                 ready['8'].inputs.samples = ['41', 0];
+                // The refined latent is the one decode big enough to hit the
+                // MPS INT_MAX ceiling — decode it tiled on Apple hardware.
+                if ((await comfyDevice().catch(() => 'unknown')) === 'mps') useTiledVaeDecode(ready);
                 const printTarget = targetSize(b.w, b.h, 3072);
                 if (ready['92']) { ready['92'].inputs.width = printTarget.width; ready['92'].inputs.height = printTarget.height; }
                 refineInfo = { width: rw, height: rh, denoise: 0.45 };
