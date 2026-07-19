@@ -1,0 +1,22 @@
+# Brand Asset Generator CI — the same gate as `npm test` locally:
+# the full check suite (artwork, layouts, Group derivation, PDF parity, …),
+# the docs figure linter, and a production build.
+name: ci
+on:
+  push:
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Check suite + figure linter
+        run: npm test
+      - name: Production build
+        run: npm run build
