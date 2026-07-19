@@ -10677,11 +10677,11 @@ const GenerateSection = ({
                 match: () => draftFirst && !refine && steps === null && ((zi && engine === 'zimage') || (!zi && engine === 'sdxl' && fast)),
               },
               {
-                key: 'realism', label: 'REALISM+', tag: '~1min',
-                desc: 'Flux dev with strict negatives: the richest light and skin a local model produces — at 2x the time, and non-commercial (internal drafts only).',
+                key: 'realism', label: 'REALISM+', tag: 'slowest',
+                desc: 'Flux dev as designed (guidance 3.5, no CFG): the richest light and material a local model produces. Minutes on a Mac, non-commercial — for internal drafts when DAILY is not enough. Strict negatives stay OFF here: forcing real CFG onto a distilled model doubles the time and softens the image.',
                 available: engines.includes('flux'),
-                apply: () => { setEngine('flux'); setSteps(null); setDraftFirst(true); setRefine(false); setStrictNegative(true); setRealism(true); setFast(false); setBatch(1); },
-                match: () => engine === 'flux' && strictNegative && !refine,
+                apply: () => { setEngine('flux'); setSteps(null); setDraftFirst(true); setRefine(false); setStrictNegative(false); setRealism(true); setFast(false); setBatch(1); },
+                match: () => engine === 'flux' && !strictNegative && !refine,
               },
               {
                 key: 'print', label: 'PRINT', tag: '~2min',

@@ -1088,7 +1088,10 @@ export default function genai() {
                     model: wf['22'].inputs.model,
                     positive: wf['22'].inputs.conditioning, // FluxGuidance-wrapped positive
                     negative: ['7', 0],
-                    cfg: clampNum(b.cfg ?? 3.0, 1.1, 8),
+                    // Guidance-distilled models degrade fast under real CFG —
+                    // 3.0 was visibly softening the image. 2.0 keeps the
+                    // negative branch active without cooking the distillation.
+                    cfg: clampNum(b.cfg ?? 2.0, 1.1, 8),
                   },
                 };
                 fluxNegativeHonoured = true;
@@ -1109,6 +1112,21 @@ export default function genai() {
             configureUpscale(wf, target, upscaler);
 
             const { wf: ready, usedLora, ckpt: usedCkpt, engine } = await resolveWorkflow(wf);
+
+            // THE TRIGGER WORD IS FOR THE LORA, NOT THE PICTURE. Without the
+            // house LoRA loaded, "medartishouse" is just a made-up word in the
+            // prompt — and Flux/Z-Image render typography well enough to PAINT
+            // it as a wordmark across the image. Strip it whenever the LoRA
+            // did not resolve; with the LoRA loaded it stays (that is what the
+            // model was trained on).
+            let cleanPositive = positive;
+            if (!usedLora && ready['6']?.inputs?.text) {
+              const trig = (STYLE().trigger || '').trim();
+              if (trig) {
+                cleanPositive = positive.split(trig).join('').replace(/^[,\s]+/, '').replace(/,\s*,/g, ',').trim();
+                ready['6'].inputs.text = cleanPositive;
+              }
+            }
 
             // CONDITIONING — reference look (IP-Adapter) and/or composition
             // (ControlNet, incl. the map the layout canvas emits). Applied AFTER
@@ -1182,7 +1200,7 @@ export default function genai() {
             // Flux and Z-Image at CFG 1 ignore it entirely — say so rather than pretend.
             const negativeHonoured = engine === 'flux' ? fluxNegativeHonoured : engine !== 'zimage';
             const meta = {
-              prompt: positive, width, height, target, upscaler, lora: usedLora, ckpt: usedCkpt || null, engine,
+              prompt: cleanPositive, width, height, target, upscaler, lora: usedLora, ckpt: usedCkpt || null, engine,
               fast: usedFast, seed, draft: !!draftWf, refine: refineInfo, batch,
               negative, negativeHonoured, realism: b.realism !== false,
               conditioning,
