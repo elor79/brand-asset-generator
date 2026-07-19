@@ -8021,9 +8021,17 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
             return (
               <>
               <div style={{ borderTop: `1px solid ${BRAND.ink100}`, paddingTop: 10, marginTop: 4 }}>
-                <SidebarBtn active={surface.enabled} onClick={() => setSurf({ enabled: !surface.enabled })}>
-                  {surface.enabled ? 'Gradient surface' : 'Flat palette colour'}
-                </SidebarBtn>
+                {/* Two explicit choices, not one toggle whose label could read as
+                    either the current state or the action. Both are always
+                    visible; the active one is marked. */}
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4 }}>
+                  <SidebarBtn active={!surface.enabled} onClick={() => setSurf({ enabled: false })}>
+                    Flat colour
+                  </SidebarBtn>
+                  <SidebarBtn active={surface.enabled} onClick={() => setSurf({ enabled: true })}>
+                    Gradient
+                  </SidebarBtn>
+                </div>
 
                 {surface.enabled && (
                   <>
@@ -10470,7 +10478,17 @@ const GenerateSection = ({
       if (Number.isFinite(sub.seed)) setLastSeed(sub.seed);
       const done = await poll(sub.jobId);
       setLastMeta(done);
-      setResults((done.images || []).concat(results).slice(0, 8));
+      // Auto-keep EVERYTHING the run produced — final AND draft — each with the
+      // prompt, seed and engine that made it. A draft that looked great must
+      // never be lost to the final that replaced it.
+      const stamp = (src, extra = {}) => ({
+        src, prompt, seed: sub.seed, engine, savedAt: Date.now(), ...extra,
+      });
+      const produced = [
+        ...(done.images || []).map((src) => stamp(src)),
+        ...(done.draftImages || []).map((src) => stamp(src, { draft: true })),
+      ];
+      setResults(produced.concat(results).slice(0, 12));
     } catch (e) {
       setError(e.message);
     } finally {
@@ -10479,6 +10497,29 @@ const GenerateSection = ({
   };
 
   const cancel = () => { if (jobId) fetch(`/api/gen/cancel/${jobId}`, { method: 'POST' }).catch(() => {}); };
+
+  // Manual upscale for any produced image: ESRGAN + lanczos on the server, the
+  // result lands in the grid next to its source.
+  const [upscaling, setUpscaling] = useState(null);
+  const upscaleResult = async (entry, i) => {
+    if (upscaling !== null) return;
+    setUpscaling(i);
+    try {
+      const r = await fetch('/api/gen/upscale', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ image: entry.src, w: format.w, h: format.h }),
+      });
+      const sub = await r.json();
+      if (!r.ok) throw new Error(sub.error || 'Upscale rejected.');
+      const done = await poll(sub.jobId);
+      const up = (done.images || [])[0];
+      if (up) setResults((rs) => [{ ...entry, src: up, upscaled: true, draft: false }, ...rs].slice(0, 12));
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setUpscaling(null);
+    }
+  };
 
   // Will the negative actually reach the sampler with the current choices?
   const negWorks = engine === 'flux' ? strictNegative : engine !== 'zimage';
@@ -11007,7 +11048,7 @@ const GenerateSection = ({
               </span>
               {lastMeta.realism ? ' · REALISM ON' : ''}
               {Number.isFinite(lastMeta.seed) ? ` · SEED ${lastMeta.seed}` : ''}
-              {lastMeta.draft ? ' · DRAFT-FIRST' : ''}
+              {lastMeta.anchored ? ' · FINAL ANCHORED ON DRAFT (SAME COMPOSITION, DENOISE 0.58)' : lastMeta.draft ? ' · DRAFT-FIRST (INDEPENDENT)' : ''}
               {lastMeta.refine ? ` · REFINED ${lastMeta.refine.width}×${lastMeta.refine.height} @ ${lastMeta.refine.denoise}` : ''}
               {lastMeta.tookMs ? ` · ${(lastMeta.tookMs / 1000).toFixed(1)}S` : ''}
               {/* Conditioning, reported by the SERVER — never by the checkbox. One
@@ -11039,23 +11080,33 @@ const GenerateSection = ({
                 CLICK TO USE · <span style={{ color: BRAND.gold }}>+LIB</span> SAVES IT
               </div>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4 }}>
-                {results.map((src, i) => (
-                  <div key={i} style={{
+                {results.map((r0, i) => {
+                  const entry = typeof r0 === 'string' ? { src: r0 } : r0; // legacy entries survive
+                  const src = entry.src;
+                  const info = [
+                    entry.engine ? String(entry.engine).toUpperCase() : null,
+                    Number.isFinite(entry.seed) ? `SEED ${entry.seed}` : null,
+                    entry.draft ? 'DRAFT (half-res)' : null,
+                    entry.upscaled ? 'UPSCALED' : null,
+                    entry.prompt || null,
+                  ].filter(Boolean).join('\n');
+                  return (
+                  <div key={i} title={info} style={{
                     position: 'relative', aspectRatio: '1', overflow: 'hidden',
-                    border: `1px solid ${BRAND.ink100}`, cursor: 'pointer', background: BRAND.bone,
+                    border: `1px solid ${entry.draft ? BRAND.gold : BRAND.ink100}`, cursor: 'pointer', background: BRAND.bone,
                   }}
                     onClick={() => { const im = new Image(); im.onload = () => onPickImage(im); im.src = src; }}>
                     <img src={src} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />
                     <span style={{
                       position: 'absolute', top: 3, left: 3, padding: '1px 4px',
-                      background: 'rgba(19,19,16,0.72)', color: BRAND.bone00,
+                      background: 'rgba(19,19,16,0.72)', color: entry.draft ? BRAND.gold : BRAND.bone00,
                       fontSize: 8, fontFamily: BRAND.mono, letterSpacing: '0.06em',
-                    }}>AI</span>
+                    }}>{entry.draft ? 'DRAFT' : entry.upscaled ? 'AI · 2X' : 'AI'}</span>
                     <span
                       onClick={(e) => {
                         e.stopPropagation();
                         const im = new Image();
-                        im.onload = () => onSaveToLibrary(im, `AI · ${prompt.slice(0, 28)}`, 'ai');
+                        im.onload = () => onSaveToLibrary(im, `AI · ${(entry.prompt || prompt).slice(0, 28)}`, 'ai');
                         im.src = src;
                       }}
                       title="Save to the standard library"
@@ -11064,8 +11115,35 @@ const GenerateSection = ({
                         background: 'rgba(19,19,16,0.72)', color: BRAND.bone00,
                         fontSize: 8.5, fontFamily: BRAND.mono, cursor: 'pointer', borderRadius: 2,
                       }}>+LIB</span>
+                    {/* Bottom action row: reuse the recipe, or upscale THIS image. */}
+                    <div style={{ position: 'absolute', bottom: 3, left: 3, right: 3, display: 'flex', gap: 3 }}
+                         onClick={(e) => e.stopPropagation()}>
+                      {entry.prompt && (
+                        <span
+                          onClick={() => {
+                            setPrompt(entry.prompt);
+                            if (Number.isFinite(entry.seed)) { setLastSeed(entry.seed); setLockSeed(true); }
+                          }}
+                          title={`Reuse this image's recipe: puts the prompt back in the box and locks its seed.\n${entry.prompt}`}
+                          style={{
+                            padding: '1px 5px', background: 'rgba(19,19,16,0.72)', color: BRAND.bone00,
+                            fontSize: 8.5, fontFamily: BRAND.mono, cursor: 'pointer', borderRadius: 2,
+                          }}>⟳ RECIPE</span>
+                      )}
+                      {!entry.upscaled && (
+                        <span
+                          onClick={() => upscaleResult(entry, i)}
+                          title="Upscale this image with the installed ESRGAN model (server-side), full print target."
+                          style={{
+                            padding: '1px 5px', background: 'rgba(19,19,16,0.72)',
+                            color: upscaling === i ? BRAND.gold : BRAND.bone00,
+                            fontSize: 8.5, fontFamily: BRAND.mono, cursor: 'pointer', borderRadius: 2, marginLeft: 'auto',
+                          }}>{upscaling === i ? '…' : '⤢ 2X'}</span>
+                      )}
+                    </div>
                   </div>
-                ))}
+                  );
+                })}
               </div>
             </>
           )}

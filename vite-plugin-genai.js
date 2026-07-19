@@ -1157,12 +1157,56 @@ export default function genai() {
             (async () => {
               if (draftWf) {
                 await comfyRun(id, draftWf, { draft: true });
-                const st = JOBS.get(id)?.status;
-                if (st === 'error' || st === 'done') return; // cancelled or failed during the draft
+                const j = JOBS.get(id);
+                if (!j || j.status === 'error' || j.status === 'done') return; // cancelled or failed during the draft
+                // ANCHOR THE FINAL ON THE DRAFT. Same seed at a different
+                // resolution still composes differently — which is exactly the
+                // "the draft looked great, the final is something else" problem.
+                // So the final is img2img FROM the draft: upscale the draft to
+                // the final latent size, encode it, and re-sample at moderate
+                // denoise. The composition you approved is the composition you
+                // get; the final pass adds resolution and detail, not a new
+                // picture. KSampler graphs only (Z-Image, SDXL) — Flux drafts
+                // stay independent and the report says so.
+                try {
+                  const draftImg = j.draftImages?.[0];
+                  if (draftImg && ready['3']?.class_type === 'KSampler' && ready['8']?.inputs?.vae) {
+                    const name = await comfyUploadImage(draftImg);
+                    ready['50'] = { class_type: 'LoadImage', inputs: { image: name } };
+                    ready['51'] = { class_type: 'ImageScale', inputs: { image: ['50', 0], upscale_method: 'lanczos', width, height, crop: 'disabled' } };
+                    ready['52'] = { class_type: 'VAEEncode', inputs: { pixels: ['51', 0], vae: ready['8'].inputs.vae } };
+                    ready['3'].inputs.latent_image = ['52', 0];
+                    ready['3'].inputs.denoise = 0.58;
+                    patchJob(id, { anchored: true });
+                  }
+                } catch { /* anchoring is an upgrade, never a blocker */ }
               }
               await comfyRun(id, ready);
             })().catch((e) => patchJob(id, { status: 'error', error: e.message }));
             return send(res, 202, { jobId: id, ...meta });
+          }
+
+          // ── manual upscale: ESRGAN + lanczos on any produced image ─
+          if (url.pathname === '/api/gen/upscale' && req.method === 'POST') {
+            const b = await body(req);
+            if (!b.image) return send(res, 400, { error: 'No source image.' });
+            const models = await comfyModels();
+            const upscaler = ['4x-UltraSharp.pth', 'RealESRGAN_x4plus.pth', '4x_foolhardy_Remacri.pth']
+              .find((n) => models.upscalers.includes(n)) || models.upscalers[0];
+            if (!upscaler) return send(res, 400, { error: 'No upscale model installed in ComfyUI (models/upscale_models).' });
+            const name = await comfyUploadImage(b.image);
+            const t = targetSize(b.w || 2048, b.h || 2048, 3072);
+            const wf = {
+              '20': { class_type: 'LoadImage', inputs: { image: name } },
+              '90': { class_type: 'UpscaleModelLoader', inputs: { model_name: upscaler } },
+              '91': { class_type: 'ImageUpscaleWithModel', inputs: { upscale_model: ['90', 0], image: ['20', 0] } },
+              '92': { class_type: 'ImageScale', inputs: { image: ['91', 0], upscale_method: 'lanczos', width: t.width, height: t.height, crop: 'disabled' } },
+              '9': { class_type: 'SaveImage', inputs: { images: ['92', 0], filename_prefix: 'medartis_upscale' } },
+            };
+            const id = newJob();
+            patchJob(id, { kind: 'upscale', upscaler, target: t });
+            comfyRun(id, wf).catch((e) => patchJob(id, { status: 'error', error: e.message }));
+            return send(res, 202, { jobId: id, upscaler, target: t });
           }
 
           // ── generative expand: one hero → every format ────────────
