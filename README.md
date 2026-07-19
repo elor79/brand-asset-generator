@@ -41,6 +41,7 @@ IBRA generator's ComfyUI, and `~/ComfyUI`. One backend, shared — the weights a
 | `npm run comfy` | ComfyUI only |
 | `npm run setup:conditioning` | one-time: IP-Adapter + ControlNet, for § 12 |
 | `npm test` | the whole check suite: artwork, layouts, Group derivation, PDF parity, docs figures |
+| `npm run setup:zimage` | one-time: Z-Image Turbo — the recommended Mac engine (~20 GB) |
 
 Ports are pinned (`strictPort`). If 5174 is taken, the app says so rather than
 quietly moving to another port and leaving your saved work stranded in a

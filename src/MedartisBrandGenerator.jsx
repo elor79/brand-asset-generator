@@ -10363,6 +10363,10 @@ const GenerateSection = ({
   const [engine, setEngine] = useState('flux');
   const [ckpt, setCkpt] = useState('');   // '' = let the server pick
   const [fast, setFast] = useState(false);  // Lightning / LCM LoRA on top of the checkpoint
+  const [draftFirst, setDraftFirst] = useState(true);   // half-res same-seed draft in seconds
+  const [refine, setRefine] = useState(false);          // latent hi-res second pass (print)
+  const [lockSeed, setLockSeed] = useState(false);      // reuse the last seed (iterate on one image)
+  const [lastSeed, setLastSeed] = useState(null);
   const [busy, setBusy] = useState(false);
   const [job, setJob] = useState(null);
   const [jobId, setJobId] = useState(null);
@@ -10372,10 +10376,16 @@ const GenerateSection = ({
   const [results, setResults] = useState([]);
   const [lastMeta, setLastMeta] = useState(null);
 
-  // Prefer an engine whose output can actually be published.
+  // Prefer an engine whose output can actually be published. Z-Image Turbo
+  // (Apache-2.0) beats SDXL on both photorealism and speed on a Mac, so it wins
+  // when installed; SDXL remains the conditioning engine.
   useEffect(() => {
-    if (status?.engines?.includes('sdxl')) setEngine((e) => (e === 'flux' ? 'sdxl' : e));
+    if (status?.engines?.includes('zimage')) setEngine((e) => (e === 'flux' || e === 'sdxl' ? 'zimage' : e));
+    else if (status?.engines?.includes('sdxl')) setEngine((e) => (e === 'flux' ? 'sdxl' : e));
   }, [status?.engines?.join(',')]);
+
+  // Refine defaults ON for print formats — that is where the resolution matters.
+  useEffect(() => { setRefine(!!format?.printable); }, [format?.key]);
 
   // The checkpoint is the single biggest lever on realism — bigger than any
   // prompt wording. If a photoreal fine-tune is installed, start there rather
@@ -10428,6 +10438,9 @@ const GenerateSection = ({
           prompt, surface, engine, realism, strictNegative, extraNegative,
           ckpt: engine === 'sdxl' ? (ckpt || undefined) : undefined,
           fast: engine === 'sdxl' ? fast : false,
+          draft: draftFirst,
+          refine,
+          seed: lockSeed && Number.isFinite(lastSeed) ? lastSeed : undefined,
           w: format.w, h: format.h,
           // Conditioning. The server reports back what it could actually honour.
           refImage: canCondition && refImage ? refImage : null,
@@ -10454,6 +10467,7 @@ const GenerateSection = ({
         throw new Error(sub.error || 'Request rejected.');
       }
       setJobId(sub.jobId);
+      if (Number.isFinite(sub.seed)) setLastSeed(sub.seed);
       const done = await poll(sub.jobId);
       setLastMeta(done);
       setResults((done.images || []).concat(results).slice(0, 8));
@@ -10467,7 +10481,7 @@ const GenerateSection = ({
   const cancel = () => { if (jobId) fetch(`/api/gen/cancel/${jobId}`, { method: 'POST' }).catch(() => {}); };
 
   // Will the negative actually reach the sampler with the current choices?
-  const negWorks = engine !== 'flux' || strictNegative;
+  const negWorks = engine === 'flux' ? strictNegative : engine !== 'zimage';
 
   // Conditioning is SDXL-only: Flux ControlNet/IP-Adapter weights are tied to a
   // specific checkpoint, so offering them on Flux would only move the failure
@@ -10563,6 +10577,7 @@ const GenerateSection = ({
           <div style={{ fontSize: 9.5, color: BRAND.ink600, marginBottom: 5, fontFamily: BRAND.mono, letterSpacing: '0.1em', textTransform: 'uppercase' }}>Engine</div>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 3, marginBottom: 10 }}>
             {[
+              ['zimage', '◆ Z-Image', 'Tongyi Z-Image Turbo · Flux-level photorealism in 8 steps · ~3× faster than Flux on Apple Silicon · Apache-2.0 (shippable) · CFG 1: the negative is not consumed'],
               ['flux', 'Flux', 'Best look · guidance-distilled: IGNORES the negative unless Strict is on · non-commercial'],
               ['sdxl', 'SDXL', 'Licensable output · always honours the negative'],
               ['sdxl-turbo', 'Turbo', '4 steps, seconds · always honours the negative · lower fidelity'],
@@ -10642,6 +10657,22 @@ const GenerateSection = ({
             </button>
           )}
 
+          {/* Speed & quality ladder: draft-first, print refine, seed lock */}
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 3, marginBottom: 6 }}>
+            <button onClick={() => setDraftFirst((v) => !v)} style={btn(draftFirst)}
+              title="Render a half-resolution draft with the same seed FIRST — it appears in seconds and stands in while the full-quality pass finishes. Same models, nothing reloads.">
+              ▶ Draft first
+            </button>
+            <button onClick={() => setRefine((v) => !v)} style={btn(refine)}
+              title="Latent hi-res second pass (~2x, low denoise): the model itself paints the extra resolution before the upscaler. Slower; meant for print. Z-Image and SDXL engines.">
+              ▲ Refine · print
+            </button>
+            <button onClick={() => setLockSeed((v) => !v)} style={btn(lockSeed)}
+              title={Number.isFinite(lastSeed) ? `Re-use seed ${lastSeed} — iterate on this exact image (change the prompt, keep the composition).` : 'After the first render, lock the seed to iterate on that exact image.'}>
+              ⟳ Same seed{Number.isFinite(lastSeed) && lockSeed ? ` · ${String(lastSeed).slice(0, 6)}` : ''}
+            </button>
+          </div>
+
           {/* Realism + strict negatives */}
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 3, marginBottom: 6 }}>
             <button onClick={() => setRealism((v) => !v)} style={btn(realism)}
@@ -10684,7 +10715,9 @@ const GenerateSection = ({
           }}>
             {negWorks
               ? '✓ THE NEGATIVE PROMPT REACHES THE SAMPLER WITH THESE SETTINGS.'
-              : '⚠ FLUX AT CFG 1 IGNORES THE NEGATIVE ENTIRELY. TURN ON STRICT NEGATIVES (SLOWER), OR SWITCH TO SDXL — OTHERWISE REALISM COMES ONLY FROM THE POSITIVE BLOCK.'}
+              : engine === 'zimage'
+                ? '⚠ Z-IMAGE RUNS AT CFG 1 — THE NEGATIVE IS STRUCTURALLY ZEROED. REALISM AND EXCLUSIONS LIVE IN THE POSITIVE BLOCK (ALREADY HANDLED FOR YOU).'
+                : '⚠ FLUX AT CFG 1 IGNORES THE NEGATIVE ENTIRELY. TURN ON STRICT NEGATIVES (SLOWER), OR SWITCH TO SDXL — OTHERWISE REALISM COMES ONLY FROM THE POSITIVE BLOCK.'}
           </div>
 
           <div style={{ fontSize: 9.5, color: BRAND.ink600, marginBottom: 5, fontFamily: BRAND.mono, letterSpacing: '0.1em', textTransform: 'uppercase' }}>
@@ -10712,8 +10745,8 @@ const GenerateSection = ({
             {!isSdxl && (
               <>
                 <div style={{ fontFamily: BRAND.mono, fontSize: 9, color: '#C8200A', lineHeight: 1.55, letterSpacing: '0.04em', marginBottom: 7 }}>
-                  ⚠ CONDITIONING IS SDXL-ONLY — FLUX CONTROLNET / IP-ADAPTER WEIGHTS ARE
-                  CHECKPOINT-SPECIFIC, SO OFFERING THEM HERE WOULD ONLY FAIL INSIDE COMFYUI.
+                  ⚠ CONDITIONING RUNS ON SDXL — CONTROLNET / IP-ADAPTER WEIGHTS ARE
+                  ARCHITECTURE-SPECIFIC, SO OFFERING THEM ON {engine === 'zimage' ? 'Z-IMAGE' : 'FLUX'} WOULD ONLY FAIL INSIDE COMFYUI.
                 </div>
                 {/* A warning that tells you what to do but makes you do it elsewhere is
                     half a warning. Fix it from where it is raised. */}
@@ -10896,9 +10929,24 @@ const GenerateSection = ({
             {busy ? `✕ Cancel · ${elapsed}s` : '✦ Generate'}
           </button>
 
-          {/* Real steps from ComfyUI's socket — not a fake bar */}
+          {/* Real steps from ComfyUI's socket — not a fake bar. And, when the
+              backend streams preview frames (--preview-method, set by npm
+              start), the actual image FORMS in front of you: latent previews
+              per step, then the finished half-res draft, then the final. */}
           {busy && job && (
             <div style={{ marginTop: 8 }}>
+              {job.preview && (
+                <div style={{ position: 'relative', marginBottom: 6 }}>
+                  <img src={job.preview} alt="live preview" style={{ width: '100%', display: 'block', filter: job.phase === 'draft' ? 'none' : undefined }} />
+                  <span style={{
+                    position: 'absolute', top: 6, left: 6, padding: '2px 6px',
+                    background: 'rgba(19,19,16,0.82)', color: BRAND.gold,
+                    fontFamily: BRAND.mono, fontSize: 8.5, letterSpacing: '0.12em',
+                  }}>
+                    {job.draftImages ? 'DRAFT · FINAL RENDERING' : 'LIVE PREVIEW'}
+                  </span>
+                </div>
+              )}
               <div style={{ height: 4, background: BRAND.ink100, overflow: 'hidden' }}>
                 <div style={{
                   height: '100%', width: `${Math.round((job.progress || 0) * 100)}%`,
@@ -10906,8 +10954,10 @@ const GenerateSection = ({
                 }} />
               </div>
               <div style={{ fontSize: 9, fontFamily: BRAND.mono, color: BRAND.ink600, marginTop: 4, letterSpacing: '0.06em' }}>
+                {job.phase === 'draft' ? 'DRAFT · ' : ''}
                 {job.steps ? `STEP ${job.step ?? 0} / ${job.steps}` : (job.status || 'QUEUED').toUpperCase()}
                 {job.node ? ` · ${String(job.node).toUpperCase()}` : ''}
+                {job.draftMs ? ` · DRAFT IN ${(job.draftMs / 1000).toFixed(1)}S` : ''}
               </div>
             </div>
           )}
@@ -10956,6 +11006,10 @@ const GenerateSection = ({
                 {lastMeta.negativeHonoured ? 'APPLIED' : 'IGNORED BY THIS ENGINE'}
               </span>
               {lastMeta.realism ? ' · REALISM ON' : ''}
+              {Number.isFinite(lastMeta.seed) ? ` · SEED ${lastMeta.seed}` : ''}
+              {lastMeta.draft ? ' · DRAFT-FIRST' : ''}
+              {lastMeta.refine ? ` · REFINED ${lastMeta.refine.width}×${lastMeta.refine.height} @ ${lastMeta.refine.denoise}` : ''}
+              {lastMeta.tookMs ? ` · ${(lastMeta.tookMs / 1000).toFixed(1)}S` : ''}
               {/* Conditioning, reported by the SERVER — never by the checkbox. One
                   line per input, present or absent. Buried in a wrapping sentence
                   you cannot tell "the reference was ignored" from "the text ran off

@@ -137,10 +137,11 @@ const clampNum = (v, lo, hi) => Math.max(lo, Math.min(hi, Number(v) || lo));
 const NATIVE_PX = {
   'sdxl-turbo': 512 * 512,
   flux: 1024 * 1024,
+  zimage: 1024 * 1024,   // Z-Image Turbo (S3-DiT, 6B) — 1MP native like Flux
 };
 
-function latentSize(w, h, engine = 'flux') {
-  const budget = NATIVE_PX[engine] || NATIVE_PX.flux;
+function latentSize(w, h, engine = 'flux', budgetScale = 1) {
+  const budget = (NATIVE_PX[engine] || NATIVE_PX.flux) * budgetScale;
   const ratio = (w || 1024) / (h || 1024);
   let lw = Math.sqrt(budget * ratio);
   let lh = lw / ratio;
@@ -153,8 +154,8 @@ function latentSize(w, h, engine = 'flux') {
 
 // Target size on the canvas — what we upscale TO. Capped so a 3508 px A4 doesn't
 // ask for a 4×-of-4× monster.
-function targetSize(w, h) {
-  const MAX_EDGE = 2560;
+function targetSize(w, h, maxEdge = 2560) {
+  const MAX_EDGE = maxEdge;
   const scale = Math.min(1, MAX_EDGE / Math.max(w || 1, h || 1));
   const even = (v) => Math.max(64, Math.round(v * scale / 8) * 8);
   return { width: even(w || 1024), height: even(h || 1024) };
@@ -315,6 +316,7 @@ async function comfyModels() {
     loras: pick('LoraLoaderModelOnly', 'lora_name'),
     vaes:  pick('VAELoader', 'vae_name'),
     clips: pick('DualCLIPLoader', 'clip_name1'),
+    textEncoders: pick('CLIPLoader', 'clip_name'),
     ckpts: pick('CheckpointLoaderSimple', 'ckpt_name'),
     upscalers: pick('UpscaleModelLoader', 'model_name'),
   };
@@ -375,6 +377,21 @@ async function resolveWorkflow(wf) {
     }
 
     return { wf, usedLora, ckpt, engine: isBase ? 'sdxl' : 'sdxl-turbo' };
+  }
+
+  // Z-IMAGE TURBO graph: UNETLoader(28) + single CLIPLoader(30, lumina2) + VAELoader(29).
+  if (wf['28']?.class_type === 'UNETLoader' && wf['30']?.class_type === 'CLIPLoader') {
+    const unet = pick(m.unets, wf['28'].inputs.unet_name, 'z_image_turbo');
+    const enc = pick(m.textEncoders || [], 'qwen_3_4b.safetensors', 'qwen_3_4b');
+    if (!unet || !enc) {
+      throw new Error('Z-Image Turbo is not installed (needs z_image_turbo_bf16.safetensors in models/diffusion_models ' +
+        'and qwen_3_4b.safetensors in models/text_encoders). Run: bash ai/tools/setup_zimage.sh');
+    }
+    wf['28'].inputs.unet_name = unet;
+    wf['30'].inputs.clip_name = enc;
+    const zvae = pick(m.vaes, 'ae.safetensors', 'ae');
+    if (zvae) wf['29'].inputs.vae_name = zvae;
+    return { wf, usedLora: null, engine: 'zimage' };
   }
 
   const unetWanted = wf['12'].inputs.unet_name;
@@ -583,8 +600,27 @@ function attachProgress(jobId, clientId) {
   if (typeof WebSocket === 'undefined') return () => {};   // older Node: no live steps
   const wsUrl = COMFY().replace(/^http/, 'ws') + `/ws?clientId=${encodeURIComponent(clientId)}`;
   let ws;
-  try { ws = new WebSocket(wsUrl); } catch { return () => {}; }
+  try { ws = new WebSocket(wsUrl); ws.binaryType = 'arraybuffer'; } catch { return () => {}; }
   ws.onmessage = (ev) => {
+    // BINARY frames are live preview images (sent only when ComfyUI runs with
+    // --preview-method): 8-byte header = two big-endian uint32s (event type 1 =
+    // preview image, then format 1=JPEG 2=PNG), rest is the image itself. This
+    // is what makes something VISIBLE within a second or two of pressing
+    // Generate, instead of a bar crawling for the whole render.
+    if (ev.data instanceof ArrayBuffer) {
+      try {
+        const dv = new DataView(ev.data);
+        if (dv.byteLength > 8 && dv.getUint32(0) === 1) {
+          const mime = dv.getUint32(4) === 2 ? 'image/png' : 'image/jpeg';
+          const b64 = Buffer.from(new Uint8Array(ev.data, 8)).toString('base64');
+          const job = JOBS.get(jobId);
+          if (job && job.status !== 'done' && job.status !== 'error') {
+            patchJob(jobId, { preview: `data:${mime};base64,${b64}` });
+          }
+        }
+      } catch { /* a malformed frame is not worth failing a render over */ }
+      return;
+    }
     let msg;
     try { msg = JSON.parse(typeof ev.data === 'string' ? ev.data : ''); } catch { return; }
     if (!msg?.type) return;
@@ -620,10 +656,11 @@ function assertNodes(wf) {
   return wf;
 }
 
-async function comfyRun(jobId, workflow) {
+async function comfyRun(jobId, workflow, opts = {}) {
   assertNodes(workflow);
   const clientId = `medartis-${jobId}`;
-  patchJob(jobId, { workflow, startedAt: Date.now() });
+  patchJob(jobId, { workflow, phase: opts.draft ? 'draft' : 'final', ...(opts.draft ? {} : { startedAt: Date.now() }) });
+  if (opts.draft && !JOBS.get(jobId)?.startedAt) patchJob(jobId, { startedAt: Date.now() });
   const detach = attachProgress(jobId, clientId);
   const r = await fetch(`${COMFY()}/prompt`, {
     method: 'POST',
@@ -703,11 +740,22 @@ async function comfyRun(jobId, workflow) {
     }
     if (images.length) {
       detach();
-      patchJob(jobId, {
-        status: 'done', progress: 1, images, provider: 'local',
-        aiGenerated: true, nonCommercial: true, workflow: null,
-        tookMs: Date.now() - (JOBS.get(jobId)?.startedAt || Date.now()),
-      });
+      if (opts.draft) {
+        // The draft IS the first visible result: same models, same seed, half
+        // resolution, fewer steps. It lands in seconds and stands in as the
+        // preview while the full-quality pass renders behind it.
+        patchJob(jobId, {
+          status: 'running', phase: 'final', progress: 0.12,
+          draftImages: images, preview: images[0],
+          draftMs: Date.now() - (JOBS.get(jobId)?.startedAt || Date.now()),
+        });
+      } else {
+        patchJob(jobId, {
+          status: 'done', progress: 1, images, provider: 'local',
+          aiGenerated: true, nonCommercial: true, workflow: null,
+          tookMs: Date.now() - (JOBS.get(jobId)?.startedAt || Date.now()),
+        });
+      }
       return;
     }
   }
@@ -808,7 +856,13 @@ export default function genai() {
               out.weightDtype = await weightDtype(out.device);
               if (!m.unets.includes('flux1-dev.safetensors')) out.missing.push('flux1-dev.safetensors (UNETLoader)');
               out.engines = [];
-              // SDXL base first: it is the only engine whose output can ship.
+              // Z-Image Turbo first when installed: Apache-2.0 (shippable), Flux-level
+              // photorealism, and by far the best quality-per-second on Apple Silicon.
+              const hasZimage = m.unets.some((f) => /z[-_]?image/i.test(f)) && (m.textEncoders || []).some((f) => /qwen_3_4b/i.test(f));
+              if (hasZimage) out.engines.push('zimage');
+              out.zimage = hasZimage;
+              if (!hasZimage) out.missing.push('Z-Image Turbo — the recommended Mac engine (bash ai/tools/setup_zimage.sh)');
+              // SDXL base: the conditioning engine (IP-Adapter / ControlNet run here).
               if (m.ckpts.some((f) => f.toLowerCase().includes('sd_xl_base'))) out.engines.push('sdxl');
               if (m.unets.some((f) => f.toLowerCase().includes('flux1-dev'))) out.engines.push('flux');
               if (m.ckpts.some((f) => f.toLowerCase().includes('sd_xl_turbo'))) out.engines.push('sdxl-turbo');
@@ -882,7 +936,8 @@ export default function genai() {
             const seed = Number.isFinite(b.seed) ? b.seed : Math.floor(Math.random() * 2 ** 31);
             const turbo = b.engine === 'sdxl-turbo';
             const sdxl  = b.engine === 'sdxl';          // SDXL base 1.0 — the licensable engine
-            const engineKey = turbo ? 'sdxl-turbo' : sdxl ? 'sdxl' : 'flux';
+            const zimage = b.engine === 'zimage';        // Z-Image Turbo — best quality/second on a Mac
+            const engineKey = zimage ? 'zimage' : turbo ? 'sdxl-turbo' : sdxl ? 'sdxl' : 'flux';
 
             // Generate at the model's NATIVE resolution (in the canvas's aspect),
             // then upscale to the canvas. Asking SDXL Turbo for 941px was what
@@ -901,7 +956,19 @@ export default function genai() {
             // the panel can state the truth rather than imply the negative worked.
             let fluxNegativeHonoured = false;
             let usedFast = null;
-            if (sdxl) {
+            if (zimage) {
+              // Z-IMAGE TURBO — Tongyi's 6B S3-DiT, Apache-2.0. Flux-level
+              // photorealism in 8 steps at CFG 1; on Apple Silicon roughly 3×
+              // faster than Flux. CFG 1 means the negative is structurally
+              // zeroed (like Flux) — realism lives in the positive block, and
+              // the run report says the negative was not consumed.
+              wf = loadWorkflow('ai/workflows/zimage_turbo_txt2img.api.json');
+              wf['6'].inputs.text = positive;
+              wf['5'].inputs.width = width;
+              wf['5'].inputs.height = height;
+              wf['3'].inputs.seed = seed;
+              wf['3'].inputs.steps = clampInt(b.steps ?? 8, 4, 16);
+            } else if (sdxl) {
               // SDXL base 1.0 + house LoRA — the commercially licensable path.
               wf = loadWorkflow('ai/workflows/sdxl_txt2img_lora.api.json');
               // An explicit checkpoint wins. resolveWorkflow() below looks for
@@ -926,28 +993,9 @@ export default function genai() {
                 wf['4'].inputs.ckpt_name = b.ckpt;
               }
 
-              // ── FAST (Lightning / LCM) ──────────────────────────────────
-              // A distilled few-step LoRA. It is NOT just "fewer steps": these
-              // models are trained to work at CFG ~1, and leaving CFG at 6 with 4
-              // steps produces the burnt, oversaturated mess people blame on the
-              // LoRA. Sampler and scheduler matter too. So the whole recipe moves
-              // together, or not at all.
-              const fastLora = b.fast
-                ? models.loras.find((f) => /lightning/i.test(f))
-                  || models.loras.find((f) => /hyper/i.test(f))
-                  || models.loras.find((f) => /lcm/i.test(f))
-                : null;
-              if (fastLora) {
-                const lightning = /lightning|hyper/i.test(fastLora);
-                wf['10'].inputs.lora_name = fastLora;
-                wf['10'].inputs.strength_model = 1.0;
-                wf['10'].inputs.strength_clip  = 1.0;
-                wf['3'].inputs.steps = clampInt(b.steps ?? (lightning ? 6 : 8), 2, 12);
-                wf['3'].inputs.cfg = lightning ? 1.2 : 1.8;
-                wf['3'].inputs.sampler_name = 'euler';
-                wf['3'].inputs.scheduler = 'sgm_uniform';
-                usedFast = fastLora;
-              }
+              // Base recipe FIRST — then FAST may override it. (The old order set
+              // the Lightning recipe and then unconditionally reset steps to 28
+              // and swapped the house LoRA back in: ⚡ Fast never actually ran.)
               wf['6'].inputs.text = positive;
               wf['7'].inputs.text = negative;
               wf['5'].inputs.width = width;
@@ -957,6 +1005,37 @@ export default function genai() {
               wf['10'].inputs.lora_name = SDXL_LORA();
               wf['10'].inputs.strength_model = b.strength ?? 0.85;
               wf['10'].inputs.strength_clip = b.strength ?? 0.85;
+
+              // ── FAST (Lightning / LCM) ──────────────────────────────────
+              // A distilled few-step LoRA. It is NOT just "fewer steps": these
+              // models are trained to work at CFG ~1, and leaving CFG at 6 with 4
+              // steps produces the burnt, oversaturated mess people blame on the
+              // LoRA. Sampler and scheduler matter too. So the whole recipe moves
+              // together, or not at all. The fast LoRA STACKS on the house LoRA
+              // (a chained loader) — speed must not cost the house look.
+              const fastLora = b.fast
+                ? models.loras.find((f) => /lightning/i.test(f))
+                  || models.loras.find((f) => /hyper/i.test(f))
+                  || models.loras.find((f) => /lcm/i.test(f))
+                : null;
+              if (fastLora) {
+                const lightning = /lightning|hyper/i.test(fastLora);
+                wf['10fast'] = {
+                  class_type: 'LoraLoader',
+                  inputs: { model: ['10', 0], clip: ['10', 1], lora_name: fastLora, strength_model: 1.0, strength_clip: 1.0 },
+                };
+                for (const [nid, node] of Object.entries(wf)) {
+                  if (nid === '10fast') continue;
+                  for (const [k, v] of Object.entries(node.inputs || {})) {
+                    if (Array.isArray(v) && v[0] === '10') node.inputs[k] = ['10fast', v[1]];
+                  }
+                }
+                wf['3'].inputs.steps = clampInt(b.steps ?? (lightning ? 6 : 8), 2, 12);
+                wf['3'].inputs.cfg = lightning ? 1.2 : 1.8;
+                wf['3'].inputs.sampler_name = 'euler';
+                wf['3'].inputs.scheduler = 'sgm_uniform';
+                usedFast = fastLora;
+              }
             } else if (turbo) {
               wf = loadWorkflow('ai/workflows/sdxl_turbo_txt2img.api.json');
               wf['6'].inputs.text = positive;
@@ -1010,18 +1089,79 @@ export default function genai() {
               conditioning = { ip: false, control: false, notes: [`Conditioning failed: ${e.message}`] };
             }
 
+            // ── DRAFT LADDER — the fastest visible result ─────────────────
+            // A half-resolution, reduced-step clone of the FINAL workflow: same
+            // resolved models (nothing reloads), same seed (the draft *is* the
+            // final, softer), same conditioning. It lands in a few seconds and
+            // fills the preview while the real render runs. Turbo needs no
+            // draft — it is one.
+            let draftWf = null;
+            if (b.draft !== false && engine !== 'sdxl-turbo') {
+              draftWf = JSON.parse(JSON.stringify(ready));
+              const d = latentSize(b.w, b.h, engineKey, 0.25); // half the edge
+              if (draftWf['5']?.inputs) { draftWf['5'].inputs.width = d.width; draftWf['5'].inputs.height = d.height; }
+              if (draftWf['3']?.class_type === 'KSampler') {
+                draftWf['3'].inputs.steps = Math.max(4, Math.round(draftWf['3'].inputs.steps * 0.6));
+              } else if (draftWf['17']?.class_type === 'BasicScheduler') {
+                draftWf['17'].inputs.steps = Math.max(8, Math.min(12, draftWf['17'].inputs.steps));
+              }
+              // No ESRGAN on a draft — exact-size resize only.
+              if (draftWf['92']) {
+                draftWf['92'].inputs.image = ['8', 0];
+                delete draftWf['90']; delete draftWf['91'];
+                draftWf['92'].inputs.width = d.width; draftWf['92'].inputs.height = d.height;
+              }
+            }
+
+            // ── HI-RES REFINE — the maximal-quality path for print ────────
+            // A true latent second pass (not just ESRGAN): upscale the latent
+            // ~2× and re-sample at low denoise, so the model itself paints the
+            // extra resolution. KSampler engines only (Z-Image, SDXL); Flux
+            // keeps its ESRGAN tail and the report says so.
+            let refineInfo = null;
+            if (b.refine === true) {
+              if (ready['3']?.class_type === 'KSampler' && ready['8']) {
+                const r = latentSize(b.w, b.h, engineKey, 4); // 2× the edge, capped below
+                const rw = Math.min(2048, r.width), rh = Math.min(2048, r.height);
+                ready['40'] = { class_type: 'LatentUpscale', inputs: { samples: ['3', 0], upscale_method: 'bislerp', width: rw, height: rh, crop: 'disabled' } };
+                ready['41'] = {
+                  class_type: 'KSampler',
+                  inputs: {
+                    model: ready['3'].inputs.model, positive: ready['3'].inputs.positive, negative: ready['3'].inputs.negative,
+                    latent_image: ['40', 0], seed,
+                    steps: engine === 'sdxl' ? 18 : 8, cfg: ready['3'].inputs.cfg,
+                    sampler_name: ready['3'].inputs.sampler_name, scheduler: ready['3'].inputs.scheduler,
+                    denoise: 0.45,
+                  },
+                };
+                ready['8'].inputs.samples = ['41', 0];
+                const printTarget = targetSize(b.w, b.h, 3072);
+                if (ready['92']) { ready['92'].inputs.width = printTarget.width; ready['92'].inputs.height = printTarget.height; }
+                refineInfo = { width: rw, height: rh, denoise: 0.45 };
+              } else {
+                conditioning.notes = [...(conditioning.notes || []), 'Refine runs on Z-Image/SDXL (KSampler graphs) — Flux keeps its ESRGAN tail.'];
+              }
+            }
+
             const id = newJob();
             // negativeHonoured: whether the negative prompt was genuinely consumed.
-            // Flux at CFG 1 ignores it entirely — say so rather than pretend.
-            const negativeHonoured = engine !== 'flux' ? true : fluxNegativeHonoured;
+            // Flux and Z-Image at CFG 1 ignore it entirely — say so rather than pretend.
+            const negativeHonoured = engine === 'flux' ? fluxNegativeHonoured : engine !== 'zimage';
             const meta = {
               prompt: positive, width, height, target, upscaler, lora: usedLora, ckpt: usedCkpt || null, engine,
-              fast: usedFast,
+              fast: usedFast, seed, draft: !!draftWf, refine: refineInfo,
               negative, negativeHonoured, realism: b.realism !== false,
               conditioning,
             };
             patchJob(id, meta);
-            comfyRun(id, ready).catch((e) => patchJob(id, { status: 'error', error: e.message }));
+            (async () => {
+              if (draftWf) {
+                await comfyRun(id, draftWf, { draft: true });
+                const st = JOBS.get(id)?.status;
+                if (st === 'error' || st === 'done') return; // cancelled or failed during the draft
+              }
+              await comfyRun(id, ready);
+            })().catch((e) => patchJob(id, { status: 'error', error: e.message }));
             return send(res, 202, { jobId: id, ...meta });
           }
 

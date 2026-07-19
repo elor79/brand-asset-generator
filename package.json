@@ -16,7 +16,8 @@
     "link:models": "bash ai/tools/link_webui_models.sh",
     "check:figures": "node scripts/check-figures.mjs",
     "test": "npm run check && npm run check:figures",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "setup:zimage": "bash ai/tools/setup_zimage.sh"
   },
   "dependencies": {
     "ag-psd": "^30.1.1",
