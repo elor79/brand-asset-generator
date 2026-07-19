@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Medartis Brand Asset Generator — Documentation</title>
+<!--
+  ─────────────────────────────────────────────────────────────────────────────
+  MEDARTIS BRAND ASSET GENERATOR · DOCUMENTATION
+  ─────────────────────────────────────────────────────────────────────────────
+  A single self-contained file on purpose: it opens with a double-click, needs no
+  server, no build, and no network — every figure below is drawn in SVG from the
+  same numbers the application uses, and every logo is the real artwork, not a
+  screenshot that will drift the day the marks are re-exported.
+
+  Two guides live here, switched by the tabs in the header:
+    · USER GUIDE     — how to use the tool. Task-first, no code.
+    · TECHNICAL GUIDE — how it works, and why it is built to survive a deep review.
+
+  The palette, type and mark geometry are the brand's own, pulled from the source.
+-->
+<style>
+  :root {
+    /* The brand tokens, verbatim from src/MedartisBrandGenerator.jsx */
+    --coal:    #131310;
+    --coal800: #1C1C17;
+    --ink:     #1d1d1b;
+    --ink600:  #555550;
+    --ink300:  #9A9A8E;
+    --ink100:  #D8D6CA;
+    --paper:   #FFFFFF;
+    --bone:    #F4F2EA;
+    --bone00:  #FAF8F0;
+    --cream100:#E6E3D5;
+    --cream300:#9E9B8B;
+    --gold:    #CFAB5C;
+    --goldDeep:#8A6828;
+    /* The sub-brand colours — the source of every Group gradient */
+    --neo-violet: #582d83;
+    --neo-teal:   #00afb9;
+    --keri-blue:  #001a72;
+    --keri-grey:  #bbbdbd;
+
+    --display: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    --mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+    --maxw: 940px;
+  }
+
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    font-family: var(--display);
+    color: var(--ink);
+    background: var(--bone00);
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* ── Header / nav ───────────────────────────────────────────────────────── */
+  header {
+    position: sticky; top: 0; z-index: 50;
+    background: var(--coal);
+    color: var(--bone00);
+    border-bottom: 1px solid var(--coal800);
+  }
+  .bar {
+    max-width: var(--maxw); margin: 0 auto; padding: 14px 24px;
+    display: flex; align-items: center; gap: 20px;
+  }
+  .bar .wm { height: 20px; }
+  .bar .wm svg { height: 100%; width: auto; }
+  .bar .tag {
+    font-family: var(--mono); font-size: 10px; letter-spacing: 0.14em;
+    text-transform: uppercase; color: var(--cream300);
+  }
+  .tabs { margin-left: auto; display: flex; gap: 4px; }
+  .tabs button {
+    font-family: var(--mono); font-size: 11px; letter-spacing: 0.08em;
+    text-transform: uppercase; cursor: pointer;
+    background: transparent; color: var(--cream300);
+    border: 1px solid transparent; padding: 6px 14px;
+  }
+  .tabs button.active { color: var(--coal); background: var(--gold); }
+
+  /* ── Layout: sticky side-nav + content ──────────────────────────────────── */
+  .wrap { max-width: var(--maxw); margin: 0 auto; padding: 0 24px; display: flex; gap: 40px; }
+  nav.side {
+    position: sticky; top: 70px; align-self: flex-start;
+    width: 190px; flex-shrink: 0; padding: 40px 0;
+    font-size: 13px;
+  }
+  nav.side a {
+    display: block; padding: 5px 0; color: var(--ink600);
+    text-decoration: none; border-left: 2px solid transparent; padding-left: 12px;
+  }
+  nav.side a:hover { color: var(--coal); }
+  nav.side a.active { color: var(--coal); border-left-color: var(--gold); font-weight: 600; }
+  nav.side .grp {
+    font-family: var(--mono); font-size: 9px; letter-spacing: 0.14em;
+    text-transform: uppercase; color: var(--ink300);
+    margin: 22px 0 6px 12px;
+  }
+  nav.side .grp:first-child { margin-top: 0; }
+
+  main { flex: 1; min-width: 0; padding: 40px 0 120px; }
+
+  /* ── Typography ─────────────────────────────────────────────────────────── */
+  h1 { font-size: 34px; line-height: 1.15; letter-spacing: -0.02em; margin: 0 0 8px; font-weight: 700; }
+  h2 {
+    font-size: 22px; letter-spacing: -0.01em; margin: 56px 0 4px; font-weight: 650;
+    padding-top: 16px; border-top: 1px solid var(--ink100);
+  }
+  h3 { font-size: 15px; margin: 30px 0 6px; font-weight: 650; }
+  .lede { font-size: 17px; color: var(--ink600); margin: 0 0 8px; max-width: 62ch; }
+  p { max-width: 68ch; }
+  section > p, section > .fig, section > .callout, section > pre, section > .cards { margin-top: 14px; }
+  a.inline { color: var(--goldDeep); text-decoration: underline; text-underline-offset: 2px; }
+  .eyebrow {
+    font-family: var(--mono); font-size: 11px; letter-spacing: 0.16em;
+    text-transform: uppercase; color: var(--goldDeep); margin-bottom: 10px;
+  }
+  code {
+    font-family: var(--mono); font-size: 0.86em;
+    background: var(--cream100); padding: 1px 5px; border-radius: 2px;
+  }
+  pre {
+    background: var(--coal); color: var(--bone00);
+    font-family: var(--mono); font-size: 12.5px; line-height: 1.55;
+    padding: 16px 18px; overflow-x: auto; border-radius: 3px;
+  }
+  pre code { background: none; padding: 0; color: inherit; }
+
+  /* ── Figures ────────────────────────────────────────────────────────────── */
+  .fig {
+    background: var(--paper); border: 1px solid var(--ink100);
+    border-radius: 4px; padding: 26px; margin: 22px 0;
+  }
+  .fig svg { display: block; width: 100%; height: auto; }
+  .fig .cap {
+    font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.04em;
+    color: var(--ink600); margin-top: 16px; padding-top: 12px;
+    border-top: 1px solid var(--ink100);
+  }
+  .fig .cap b { color: var(--coal); font-weight: 600; }
+
+  /* ── Callouts ───────────────────────────────────────────────────────────── */
+  .callout {
+    border-left: 3px solid var(--gold); background: var(--bone);
+    padding: 14px 18px; border-radius: 0 3px 3px 0; margin: 20px 0;
+    font-size: 14.5px;
+  }
+  .callout.rule { border-left-color: var(--keri-blue); }
+  .callout .k {
+    font-family: var(--mono); font-size: 10px; letter-spacing: 0.12em;
+    text-transform: uppercase; color: var(--goldDeep); display: block; margin-bottom: 4px;
+  }
+  .callout.rule .k { color: var(--keri-blue); }
+
+  /* ── Cards ──────────────────────────────────────────────────────────────── */
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin: 20px 0; }
+  .card {
+    background: var(--paper); border: 1px solid var(--ink100); border-radius: 4px; padding: 16px;
+  }
+  .card .n {
+    font-family: var(--mono); font-size: 10px; letter-spacing: 0.1em; color: var(--goldDeep);
+    text-transform: uppercase;
+  }
+  .card h4 { margin: 6px 0 4px; font-size: 14px; }
+  .card p { font-size: 13px; color: var(--ink600); margin: 0; }
+
+  /* ── The two guides ─────────────────────────────────────────────────────── */
+  .guide { display: none; }
+  .guide.active { display: block; }
+
+  .footer {
+    max-width: var(--maxw); margin: 0 auto; padding: 30px 24px 60px;
+    font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.04em;
+    color: var(--ink300); border-top: 1px solid var(--ink100);
+  }
+
+  @media (max-width: 760px) {
+    nav.side { display: none; }
+    .wrap { padding: 0 18px; }
+    h1 { font-size: 26px; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="bar">
+    <span class="wm" id="hdr-wm"></span>
+    <span class="tag">Brand Asset Generator · Docs</span>
+    <div class="tabs">
+      <button id="tab-user" class="active" onclick="showGuide('user')">User guide</button>
+      <button id="tab-tech" onclick="showGuide('tech')">Technical</button>
+    </div>
+  </div>
+</header>
+
+<div class="wrap">
+  <nav class="side" id="sidenav"></nav>
+  <main>
+    <!-- USER GUIDE + TECHNICAL GUIDE injected below -->
+    <div id="guide-user" class="guide active"></div>
+    <div id="guide-tech" class="guide"></div>
+  </main>
+</div>
+
+<div class="footer">
+  MEDARTIS BRAND ASSET GENERATOR · DOCUMENTATION · EVERY FIGURE DRAWN FROM THE SOURCE VALUES · EVERY MARK THE REAL ARTWORK
+</div>
+
+<script>
+  // Guide switching + side-nav rebuild. Kept vanilla so the file has no dependency
+  // and opens offline.
+  function showGuide(which) {
+    for (const g of ['user', 'tech']) {
+      document.getElementById('guide-' + g).classList.toggle('active', g === which);
+      document.getElementById('tab-' + g).classList.toggle('active', g === which);
+    }
+    buildNav(which);
+    window.scrollTo(0, 0);
+  }
+  // The header wordmark, from the real Group artwork.
+  function headerWordmark() {
+    const m = window.MARKS.group, g = m.glyph;
+    const paths = m.paths.map((p) => `<path fill="#FAF8F0" d="${p.d}"/>`).join('');
+    document.getElementById('hdr-wm').innerHTML =
+      `<svg viewBox="${g.x} ${g.y} ${g.w} ${g.h}">${paths}</svg>`;
+  }
+  function buildNav(which) {
+    const guide = document.getElementById('guide-' + which);
+    const nav = document.getElementById('sidenav');
+    nav.innerHTML = '';
+    guide.querySelectorAll('[data-nav]').forEach((el) => {
+      if (el.dataset.group) {
+        const g = document.createElement('div'); g.className = 'grp'; g.textContent = el.dataset.group;
+        nav.appendChild(g);
+      }
+      const a = document.createElement('a');
+      a.href = '#' + el.id; a.textContent = el.dataset.nav;
+      a.onclick = (e) => { e.preventDefault(); el.scrollIntoView(); };
+      nav.appendChild(a);
+    });
+  }
+</script>
+<!-- Content is inlined at build time by scripts/inline-docs.mjs so the file is
+     self-contained. During editing these load as separate files. -->
+<script src="marks.js"></script>
+<script src="content.js"></script>
+<script src="content-text.js"></script>
+<script>headerWordmark();</script>
+</body>
+</html>

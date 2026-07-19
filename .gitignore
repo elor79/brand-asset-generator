@@ -8,3 +8,4 @@ vite.config.js.timestamp-*.mjs
 # Scratch probes. The mount forbids unlink(), so throwaway files can only be
 # renamed aside, never deleted — they must not be allowed to drift into a commit.
 *.scratch-*
+*.safetensors
