@@ -20,3 +20,19 @@ jobs:
         run: npm test
       - name: Production build
         run: npm run build
+
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      # Playwright is deliberately not in the lockfile yet (pin it locally with
+      # `npm i -D @playwright/test` when convenient); CI adds it without saving.
+      - run: npm i --no-save @playwright/test
+      - run: npx playwright install --with-deps chromium
+      - name: Browser smoke tests
+        run: npx playwright test

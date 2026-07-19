@@ -9,3 +9,7 @@ vite.config.js.timestamp-*.mjs
 # renamed aside, never deleted — they must not be allowed to drift into a commit.
 *.scratch-*
 *.safetensors
+
+# playwright artifacts
+test-results/
+playwright-report/
