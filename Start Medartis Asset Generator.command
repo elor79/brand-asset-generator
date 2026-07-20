@@ -191,31 +191,29 @@ start_comfy() {
     # Its own venv if it has one, so it can never fight another Python on the box.
     [ -f venv/bin/activate ] && . venv/bin/activate
 
-    # ── Apple Silicon tuning ────────────────────────────────────────────────
-    # --preview-method auto      → ComfyUI streams a preview image every step
-    #                              over the websocket; the panel shows the
-    #                              picture forming instead of a bare bar. This
-    #                              one flag is the difference between "is it
-    #                              doing anything?" and watching it paint.
-    # --use-pytorch-cross-attention → 30–50% faster sampling on M3/M4 MPS.
-    # --force-fp16               → never silently fall back to fp32 on MPS.
-    # --mac-max-memory           → let PyTorch use ~70% of unified memory
-    #                              instead of its conservative default.
-    # PYTORCH_ENABLE_MPS_FALLBACK → preprocessor nodes with an unimplemented
-    #                              MPS op fall back to CPU instead of crashing.
+    # ── Tuning flags, VERSION-PROOFED ──────────────────────────────────────
+    # An unknown flag makes ComfyUI's argparse exit instantly ("unrecognized
+    # arguments") — which looked like "ComfyUI isn't starting". So probe
+    # `main.py --help` once and pass each flag ONLY if this build knows it.
+    HELPTEXT="$(python main.py --help 2>&1 || true)"
+    supported() { case "$HELPTEXT" in *"$1"*) return 0 ;; *) return 1 ;; esac; }
     EXTRA_FLAGS=""
+    supported "--preview-method" && EXTRA_FLAGS="$EXTRA_FLAGS --preview-method auto"
     if [ "$(uname -s)" = "Darwin" ] && [ "$(uname -m)" = "arm64" ]; then
       export PYTORCH_ENABLE_MPS_FALLBACK=1
-      MEM_BYTES=$(sysctl -n hw.memsize 2>/dev/null || echo 0)
-      if [ "$MEM_BYTES" -gt 0 ]; then
-        MEM_MB=$(( MEM_BYTES / 1024 / 1024 * 70 / 100 ))
-        EXTRA_FLAGS="--use-pytorch-cross-attention --force-fp16 --mac-max-memory $MEM_MB"
-      else
-        EXTRA_FLAGS="--use-pytorch-cross-attention --force-fp16"
+      supported "--use-pytorch-cross-attention" && EXTRA_FLAGS="$EXTRA_FLAGS --use-pytorch-cross-attention"
+      supported "--force-fp16" && EXTRA_FLAGS="$EXTRA_FLAGS --force-fp16"
+      if supported "--mac-max-memory"; then
+        MEM_BYTES=$(sysctl -n hw.memsize 2>/dev/null || echo 0)
+        if [ "$MEM_BYTES" -gt 0 ]; then
+          MEM_MB=$(( MEM_BYTES / 1024 / 1024 * 70 / 100 ))
+          EXTRA_FLAGS="$EXTRA_FLAGS --mac-max-memory $MEM_MB"
+        fi
       fi
     fi
+    echo "  flags: $EXTRA_FLAGS" >&2
     # shellcheck disable=SC2086
-    exec python main.py --listen 127.0.0.1 --port "$COMFY_PORT" --preview-method auto $EXTRA_FLAGS >"$APP_DIR/comfyui.log" 2>&1
+    exec python main.py --listen 127.0.0.1 --port "$COMFY_PORT" $EXTRA_FLAGS >"$APP_DIR/comfyui.log" 2>&1
   ) &
   COMFY_PID=$!
 
