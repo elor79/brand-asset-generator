@@ -12,7 +12,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "docs": "node scripts/inline-docs.mjs",
-    "check": "node --check vite-plugin-genai.js && node --check vite-plugin-canto.js && node ai/tools/check_hook_deps.mjs src/MedartisBrandGenerator.jsx && node ai/tools/check_layouts.mjs && node ai/tools/check_formats.mjs && node ai/tools/test_marks.mjs && node ai/tools/test_tracked.mjs && node ai/tools/test_overflow.mjs && node ai/tools/test_templatepref.mjs && node ai/tools/check_brandkit.mjs && node ai/tools/check_group.mjs && node ai/tools/test_grouplockup.mjs && node ai/tools/check_artwork.mjs && node ai/tools/test_baselinerow.mjs && node ai/tools/test_groupband.mjs && node ai/tools/test_pdfpaths.mjs && node ai/tools/test_gradient.mjs",
+    "check": "node --check vite-plugin-genai.js && node --check vite-plugin-canto.js && node ai/tools/check_hook_deps.mjs src/MedartisBrandGenerator.jsx src/GenerateSection.jsx src/uiKit.jsx && node ai/tools/check_layouts.mjs && node ai/tools/check_formats.mjs && node ai/tools/test_marks.mjs && node ai/tools/test_tracked.mjs && node ai/tools/test_overflow.mjs && node ai/tools/test_templatepref.mjs && node ai/tools/check_brandkit.mjs && node ai/tools/check_group.mjs && node ai/tools/test_grouplockup.mjs && node ai/tools/check_artwork.mjs && node ai/tools/test_baselinerow.mjs && node ai/tools/test_groupband.mjs && node ai/tools/test_pdfpaths.mjs && node ai/tools/test_gradient.mjs",
     "link:models": "bash ai/tools/link_webui_models.sh",
     "check:figures": "node scripts/check-figures.mjs",
     "test": "npm run check && npm run check:figures",

@@ -30,8 +30,11 @@ Port **5174** (strictPort; Cadence owns 5173). AI backend = ComfyUI on
    Docs drift is a failing review, exactly like a failing test.
 
 ## Architecture
-One big component `src/MedartisBrandGenerator.jsx` (~12k lines — known debt,
-documented; extract modules only when touching an area) + split modules
+One big component `src/MedartisBrandGenerator.jsx` (~11k lines — known debt,
+documented; extract modules only when touching an area; the § GENERATE panel
+is already out, in `src/GenerateSection.jsx`, with the shared primitives it
+needs — BRAND, Section, imgToDataUrl — moved to `src/uiKit.jsx` so neither
+file imports the other) + split modules
 (`customFormats.js`, `brochure.js`, `gradient.js`, `groupBrands.js`,
 `groupLockup.js`, `zip.js`, `templatePref.js`). Sidebar sections are numbered
 from `SECTION_ORDER` (visible-only). Gen pipeline = `vite-plugin-genai.js`
@@ -47,6 +50,8 @@ house-look strength slider. Both generators share the same feature set. Live pre
 LoRA trigger word is stripped when the LoRA did not resolve.
 
 ## Key files
+- `src/GenerateSection.jsx` — the § GENERATE panel (extracted from the monolith)
+- `src/uiKit.jsx` — BRAND tokens + Section + imgToDataUrl, shared by both
 - `vite-plugin-genai.js` — the whole gen backend (workflows patched by node id)
 - `ai/workflows/*.api.json` — node graphs (ids: 6 prompt, 5 latent, 3/17
   sampler, 8 VAEDecode, 90/91/92 upscale tail, 9 save)
@@ -65,5 +70,5 @@ LoRA trigger word is stripped when the LoRA did not resolve.
 
 ## Token-efficiency rules for agents
 - Grep anchors; patch by string-replacement with assert-on-count.
-- Never read MedartisBrandGenerator.jsx end-to-end; navigate by § names and
-  the state variables listed in the GenerateSection.
+- Never read MedartisBrandGenerator.jsx end-to-end; navigate by § names.
+  Generation UI questions start in src/GenerateSection.jsx, not the monolith.
