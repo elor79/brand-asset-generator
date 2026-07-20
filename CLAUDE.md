@@ -23,6 +23,12 @@ Port **5174** (strictPort; Cadence owns 5173). AI backend = ComfyUI on
 5. **Comments explain WHY** — every brand rule cites its reason (clear space
    = 1.5 × the 'd', lanyard single line because 20 mm has no second line…).
 
+6. **Documentation moves with the code — same commit, no exceptions.**
+   User-visible changes update the generator chapter in the Cadence manual
+   (`../cadence/public/manual/generator.html`) in the SAME commit; anything
+   that makes a statement in this file untrue is fixed in the same commit.
+   Docs drift is a failing review, exactly like a failing test.
+
 ## Architecture
 One big component `src/MedartisBrandGenerator.jsx` (~12k lines — known debt,
 documented; extract modules only when touching an area) + split modules
