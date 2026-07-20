@@ -1,0 +1,23 @@
+{
+  // Deliberately NO format-on-save: the repo has no Prettier config, and
+  // auto-reformatting large existing files would create unreviewable diffs.
+  "editor.formatOnSave": false,
+  "editor.tabSize": 2,
+  "editor.insertSpaces": true,
+  "files.insertFinalNewline": true,
+  "files.trimTrailingWhitespace": true,
+  "files.eol": "\n",
+  // Keep search/agents out of the noise (token efficiency too).
+  "search.exclude": {
+    "**/node_modules": true,
+    "**/dist": true,
+    "**/ComfyUI": true,
+    "**/*.log": true,
+    "**/package-lock.json": true
+  },
+  "files.watcherExclude": {
+    "**/node_modules/**": true,
+    "**/ComfyUI/**": true,
+    "**/dist/**": true
+  }
+}
