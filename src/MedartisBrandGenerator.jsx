@@ -5237,13 +5237,18 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
   }, [savedLibrary]);
 
   // Compress + persist an image element into the saved library. Returns true on success.
+  // Dedupe by CONTENT, never by label: every AI variant of one prompt carries the
+  // same "AI · <prompt>" label, so a label check silently kept only the FIRST
+  // variant and dropped every later save ("saves always the same one").
+  const libSourceKey = (src) => (src ? `${src.length}:${src.slice(-96)}` : '');
   const saveImageToLibrary = (img, label = 'Saved image', category = 'saved') => {
     if (!img) return false;
-    if (savedLibrary.some(a => a.label === label && a.category === category)) return true; // already saved
+    const srcKey = libSourceKey(img.src);
+    if (srcKey && savedLibrary.some(a => a.sourceKey === srcKey)) return true; // this exact image is already saved
     try {
       const src = compressDataUrl(img, 1600, 0.82);
       const id = 'saved-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 6);
-      const entry = { id, label: (label || 'Saved image').slice(0, 48), category, src, saved: true, savedAt: Date.now() };
+      const entry = { id, label: (label || 'Saved image').slice(0, 48), category, src, sourceKey: srcKey, saved: true, savedAt: Date.now() };
       setLibraryImages(prev => ({ ...prev, [id]: img }));
       setSavedLibrary((cur) => [entry, ...cur]);
       idbLib('readwrite', (st) => st.put(entry)).catch((e) => {
