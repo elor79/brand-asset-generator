@@ -33,7 +33,10 @@ middleware on `/api/gen/*` → ComfyUI: engines zimage (recommended; Apache-2.0)
 / flux (non-commercial) / sdxl (conditioning engine) / sdxl-turbo. Draft
 ladder: half-res same-seed draft first → final ANCHORED on the draft (img2img,
 skipped when batch>1) → optional latent refine (~2K, tiled VAE decode on MPS)
-→ ESRGAN tail. Live previews stream as binary WS frames (needs
+→ ESRGAN tail. Per-tile pipeline (ported from IBRA): `✦ refine`
+(/api/gen/refine, zimage img2img), `⤢ 2X` upscale, `ⓘ` provenance panel
+(copy prompt, per-tile download, save to library); variants up to ×6;
+house-look strength slider. Both generators share the same feature set. Live previews stream as binary WS frames (needs
 `--preview-method`, set by the launcher). Prompt = house_style.json parts; the
 LoRA trigger word is stripped when the LoRA did not resolve.
 
