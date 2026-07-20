@@ -1106,7 +1106,7 @@ export default function genai() {
 
             // How many variants in one run. Cost is linear; the queue is one
             // ComfyUI, so 4 is the honest ceiling before the panel feels stuck.
-            const batch = clampInt(b.batch ?? 1, 1, 4);
+            const batch = clampInt(b.batch ?? 1, 1, 6);
             if (wf['5']?.inputs) wf['5'].inputs.batch_size = batch;
 
             configureUpscale(wf, target, upscaler);
@@ -1239,6 +1239,43 @@ export default function genai() {
               await comfyRun(id, ready);
             })().catch((e) => patchJob(id, { status: 'error', error: e.message }));
             return send(res, 202, { jobId: id, ...meta });
+          }
+
+          // ── refine ONE picked result (ported from the IBRA generator) ─
+          // img2img on Z-Image at partial denoise: keeps the composition the
+          // user picked, re-renders the detail. Native size out — upscale is
+          // the separate next step.
+          if (url.pathname === '/api/gen/refine' && req.method === 'POST') {
+            const b = await body(req);
+            if (!b.image) return send(res, 400, { error: 'No image to refine.' });
+            // Refining is still generating — the same gate applies.
+            const gate = safetyCheck(b.prompt);
+            if (!gate.ok) return send(res, 422, { error: gate.message, term: gate.term });
+
+            const { positive } = compilePrompt(b);
+            const name = await comfyUploadImage(b.image);
+            const wf = loadWorkflow('ai/workflows/zimage_img2img_refine.api.json');
+            wf['20'].inputs.image = name;
+            wf['6'].inputs.text = positive;
+            const refineSeed = Number.isFinite(b.seed) ? b.seed : Math.floor(Math.random() * 2 ** 31);
+            wf['3'].inputs.seed = refineSeed;
+            wf['3'].inputs.steps = clampInt(b.steps ?? 10, 6, 20);
+            // Clamped so a slider can never turn refine into a copy (0) or a
+            // fresh roll (1) — neither is what the button says it does.
+            wf['3'].inputs.denoise = clampNum(b.denoise ?? 0.5, 0.35, 0.7);
+
+            const { wf: ready, usedLora } = await resolveWorkflow(wf);
+            // No house Z-Image LoRA on this install → the trigger token would be
+            // painted as literal type. Same strip rule as generate.
+            if (!usedLora && ready['6']?.inputs?.text) {
+              const trig = (STYLE().trigger || '').trim();
+              if (trig) ready['6'].inputs.text = ready['6'].inputs.text.split(trig).join('').replace(/^[,\s]+/, '').trim();
+            }
+            if ((await comfyDevice().catch(() => 'unknown')) === 'mps') useTiledVaeDecode(ready);
+            const id = newJob();
+            patchJob(id, { kind: 'refine', engine: 'zimage', prompt: ready['6'].inputs.text, seed: refineSeed, denoise: wf['3'].inputs.denoise });
+            comfyRun(id, ready).catch((e) => patchJob(id, { status: 'error', error: e.message }));
+            return send(res, 202, { jobId: id, kind: 'refine', seed: refineSeed });
           }
 
           // ── manual upscale: ESRGAN + lanczos on any produced image ─

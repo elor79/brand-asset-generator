@@ -1,0 +1,53 @@
+{
+  "_comment": "REFINE one picked result (ported from the IBRA generator): the image is encoded to a latent (20 LoadImage → 21 VAEEncode) and re-sampled at partial denoise, so the composition survives and only detail is re-rendered. Runs on Z-Image Turbo — the family this install has (setup:zimage) — at CFG 1 with the negative zeroed, exactly like the txt2img graph. Node ids follow the house zimage convention (28 UNET, 30 CLIP, 29 VAE, 6 prompt, 3 sampler, 8 decode, 9 save) so resolveWorkflow and compilePrompt patch it unchanged.",
+  "_denoise": "denoise < 1 is the whole point: 1.0 ignores the source, 0 returns it untouched. ~0.5 keeps the picked composition and adds detail. The plugin clamps it into a sane band.",
+  "28": {
+    "class_type": "UNETLoader",
+    "inputs": { "unet_name": "z_image_turbo_bf16.safetensors", "weight_dtype": "default" }
+  },
+  "30": {
+    "class_type": "CLIPLoader",
+    "inputs": { "clip_name": "qwen_3_4b.safetensors", "type": "lumina2", "device": "default" }
+  },
+  "29": {
+    "class_type": "VAELoader",
+    "inputs": { "vae_name": "ae.safetensors" }
+  },
+  "6": {
+    "class_type": "CLIPTextEncode",
+    "inputs": { "clip": ["30", 0], "text": "medartishouse editorial product photograph" }
+  },
+  "33": {
+    "class_type": "ConditioningZeroOut",
+    "inputs": { "conditioning": ["6", 0] }
+  },
+  "20": { "class_type": "LoadImage", "inputs": { "image": "INPUT", "upload": "image" } },
+  "21": { "class_type": "VAEEncode", "inputs": { "pixels": ["20", 0], "vae": ["29", 0] } },
+  "11": {
+    "class_type": "ModelSamplingAuraFlow",
+    "inputs": { "model": ["28", 0], "shift": 3 }
+  },
+  "3": {
+    "class_type": "KSampler",
+    "inputs": {
+      "model": ["11", 0],
+      "positive": ["6", 0],
+      "negative": ["33", 0],
+      "latent_image": ["21", 0],
+      "seed": 0,
+      "steps": 10,
+      "cfg": 1.0,
+      "sampler_name": "res_multistep",
+      "scheduler": "simple",
+      "denoise": 0.5
+    }
+  },
+  "8": {
+    "class_type": "VAEDecode",
+    "inputs": { "samples": ["3", 0], "vae": ["29", 0] }
+  },
+  "9": {
+    "class_type": "SaveImage",
+    "inputs": { "images": ["8", 0], "filename_prefix": "medartis_zimage_refined" }
+  }
+}

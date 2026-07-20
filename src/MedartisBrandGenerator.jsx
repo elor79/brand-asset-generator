@@ -10405,7 +10405,9 @@ const GenerateSection = ({
   const [refine, setRefine] = useState(false);          // latent hi-res second pass (print)
   const [lockSeed, setLockSeed] = useState(false);      // reuse the last seed (iterate on one image)
   const [steps, setSteps] = useState(null);             // null = the engine's own default
-  const [batch, setBatch] = useState(1);                // outputs per run (1 / 2 / 4)
+  const [batch, setBatch] = useState(1);                // outputs per run (1 / 2 / 4 / 6)
+  const [detail, setDetail] = useState(null);           // the result whose provenance is open (IBRA pattern)
+  const [strength, setStrength] = useState(0.85);       // house-LoRA strength (engines that carry one)
   const [lastSeed, setLastSeed] = useState(null);
   const [busy, setBusy] = useState(false);
   const [job, setJob] = useState(null);
@@ -10482,6 +10484,7 @@ const GenerateSection = ({
           refine,
           steps: steps ?? undefined,
           batch,
+          strength,
           seed: lockSeed && Number.isFinite(lastSeed) ? lastSeed : undefined,
           w: format.w, h: format.h,
           // Conditioning. The server reports back what it could actually honour.
@@ -10531,6 +10534,29 @@ const GenerateSection = ({
   };
 
   const cancel = () => { if (jobId) fetch(`/api/gen/cancel/${jobId}`, { method: 'POST' }).catch(() => {}); };
+
+  // Per-tile REFINE (ported from the IBRA generator): img2img on Z-Image at
+  // partial denoise — keeps the tile's composition, re-renders the detail.
+  const [refining, setRefining] = useState(null);
+  const refineResult = async (entry, i) => {
+    if (refining !== null || !status?.zimage) return;
+    setRefining(i);
+    try {
+      const r = await fetch('/api/gen/refine', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ image: entry.src, prompt: entry.prompt || prompt, surface, seed: entry.seed }),
+      });
+      const sub = await r.json();
+      if (!r.ok) throw new Error(sub.error || 'Refine rejected.');
+      const done = await poll(sub.jobId);
+      const out = (done.images || [])[0];
+      if (out) setResults((rs) => [{ ...entry, src: out, refined: true, draft: false, seed: sub.seed }, ...rs].slice(0, 12));
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setRefining(null);
+    }
+  };
 
   // Manual upscale for any produced image: ESRGAN + lanczos on the server, the
   // result lands in the grid next to its source.
@@ -10845,10 +10871,24 @@ const GenerateSection = ({
               title={Number.isFinite(lastSeed) ? `Re-use seed ${lastSeed} — iterate on this exact image (change the prompt, keep the composition).` : 'After the first render, lock the seed to iterate on that exact image.'}>
               ⟳ Same seed{Number.isFinite(lastSeed) && lockSeed ? ` · ${String(lastSeed).slice(0, 6)}` : ''}
             </button>
-            <button onClick={() => setBatch((n) => (n === 1 ? 2 : n === 2 ? 4 : 1))} style={btn(batch > 1)}
-              title="Variants per run — click to cycle 1 → 2 → 4. Time is linear. With more than one output, the draft stays a preview and each variant composes freely (anchoring one draft onto all of them would make near-copies).">
+            <button onClick={() => setBatch((n) => (n === 1 ? 2 : n === 2 ? 4 : n === 4 ? 6 : 1))} style={btn(batch > 1)}
+              title="Variants per run — click to cycle 1 → 2 → 4 → 6. Time is linear. With more than one output, the draft stays a preview and each variant composes freely (anchoring one draft onto all of them would make near-copies).">
               ▤ Outputs ×{batch}
             </button>
+          </div>
+
+          {/* House look strength — the LoRA weight, for engines that carry one.
+              (IBRA pattern; on engines without a house LoRA it has no effect and
+              the run report already says NO HOUSE LORA.) */}
+          <div style={{ marginBottom: 8 }}>
+            <div style={{ fontSize: 9.5, color: BRAND.ink600, marginBottom: 3, fontFamily: BRAND.mono, letterSpacing: '0.1em', textTransform: 'uppercase' }}>
+              House look · {strength.toFixed(2)}
+              <span style={{ color: BRAND.ink300, letterSpacing: 0, textTransform: 'none' }}> · LoRA weight, double-click resets</span>
+            </div>
+            <input type="range" min="0.4" max="1.1" step="0.05" value={strength}
+              onChange={(e) => setStrength(parseFloat(e.target.value))}
+              onDoubleClick={() => setStrength(0.85)}
+              style={{ width: '100%' }} />
           </div>
 
           {/* Realism + strict negatives */}
@@ -11255,7 +11295,7 @@ const GenerateSection = ({
                       position: 'absolute', top: 3, left: 3, padding: '1px 4px',
                       background: 'rgba(19,19,16,0.72)', color: entry.draft ? BRAND.gold : BRAND.bone00,
                       fontSize: 8, fontFamily: BRAND.mono, letterSpacing: '0.06em',
-                    }}>{entry.draft ? 'DRAFT' : entry.upscaled ? 'AI · 2X' : 'AI'}</span>
+                    }}>{entry.draft ? 'DRAFT' : entry.upscaled ? 'AI · 2X' : entry.refined ? 'AI · ✦' : 'AI'}</span>
                     <span
                       onClick={(e) => {
                         e.stopPropagation();
@@ -11284,6 +11324,24 @@ const GenerateSection = ({
                             fontSize: 8.5, fontFamily: BRAND.mono, cursor: 'pointer', borderRadius: 2,
                           }}>⟳ RECIPE</span>
                       )}
+                      {status?.zimage && !entry.upscaled && (
+                        <span
+                          onClick={() => refineResult(entry, i)}
+                          title="Refine this exact image: img2img on Z-Image at partial denoise — same composition, better detail. (IBRA's middle stage.)"
+                          style={{
+                            padding: '1px 5px', background: 'rgba(19,19,16,0.72)',
+                            color: refining === i ? BRAND.gold : BRAND.bone00,
+                            fontSize: 8.5, fontFamily: BRAND.mono, cursor: 'pointer', borderRadius: 2,
+                          }}>{refining === i ? '…' : '✦'}</span>
+                      )}
+                      <span
+                        onClick={() => setDetail(detail?.src === entry.src ? null : entry)}
+                        title="Provenance: what made this image — copy the prompt, download this exact file."
+                        style={{
+                          padding: '1px 5px', background: 'rgba(19,19,16,0.72)',
+                          color: detail?.src === entry.src ? BRAND.gold : BRAND.bone00,
+                          fontSize: 8.5, fontFamily: BRAND.mono, cursor: 'pointer', borderRadius: 2,
+                        }}>ⓘ</span>
                       {!entry.upscaled && (
                         <span
                           onClick={() => upscaleResult(entry, i)}
@@ -11299,6 +11357,41 @@ const GenerateSection = ({
                   );
                 })}
               </div>
+              {detail && (
+                <div style={{ marginTop: 6, padding: '9px 10px', background: BRAND.bone, border: `1px solid ${BRAND.ink100}` }}>
+                  <div style={{ fontFamily: BRAND.mono, fontSize: 8.5, color: BRAND.ink600, lineHeight: 1.6, letterSpacing: '0.03em', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+                    {[
+                      detail.engine ? `ENGINE ${String(detail.engine).toUpperCase()}` : null,
+                      Number.isFinite(detail.seed) ? `SEED ${detail.seed}` : null,
+                      detail.draft ? 'DRAFT (half-res)' : null,
+                      detail.refined ? 'REFINED' : null,
+                      detail.upscaled ? 'UPSCALED' : null,
+                    ].filter(Boolean).join(' · ')}
+                    {detail.prompt ? `\n${detail.prompt}` : ''}
+                  </div>
+                  <div style={{ display: 'flex', gap: 4, marginTop: 7 }}>
+                    {detail.prompt && (
+                      <button onClick={() => navigator.clipboard?.writeText(detail.prompt)}
+                        style={{ ...btn(false), flex: 1, padding: '5px 0', fontSize: 8.5 }}>COPY PROMPT</button>
+                    )}
+                    <button
+                      onClick={() => {
+                        const a = document.createElement('a');
+                        a.href = detail.src;
+                        a.download = `medartis-ai-${Number.isFinite(detail.seed) ? detail.seed : Date.now().toString(36)}.png`;
+                        a.click();
+                      }}
+                      style={{ ...btn(false), flex: 1, padding: '5px 0', fontSize: 8.5 }}>DOWNLOAD PNG</button>
+                    <button
+                      onClick={() => {
+                        const im = new Image();
+                        im.onload = () => onSaveToLibrary(im, `AI · ${(detail.prompt || prompt).slice(0, 28)}`, 'ai');
+                        im.src = detail.src;
+                      }}
+                      style={{ ...btn(false), flex: 1, padding: '5px 0', fontSize: 8.5 }}>SAVE TO LIBRARY</button>
+                  </div>
+                </div>
+              )}
             </>
           )}
         </>
