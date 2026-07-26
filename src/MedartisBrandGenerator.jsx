@@ -11161,42 +11161,42 @@ function ProjectCard({ name, preset, onPick, onDelete }) {
 }
 
 function PlaygroundView({ onBack }) {
-  // The § 99 playground, rebuilt around a LAYER STACK. Each layer is one effect
-  // (glow particles, network, halftone, contour, scatter, duotone) with its own
-  // opacity + blend mode; the compositor in playground.js draws them bottom-to-top,
-  // so several effects combine without any special-casing here. The view is a thin
-  // shell: source image, the sampling detail, the layer list, and I/O (upload / pick
-  // from the library / download / save back to the library).
-  const SIZE = { w: 1080, h: 1440 };
+  // The § 99 playground: a layer stack of luminance-driven effects over a source
+  // image, with an add/remove brush that steers particle density by hand. The
+  // canvas takes the LOADED IMAGE's proportions, so particles and the image base
+  // layer share one coordinate space — no letterbox/stretch mismatch.
   const canvasRef = useRef(null);
   const fileRef = useRef(null);
   const wrapRef = useRef(null);
+  const maskRef = useRef(null);        // offscreen mask canvas, sample resolution
+  const paintingRef = useRef(false);
 
-  const [img, setImg] = useState(null);            // the loaded source Image (state, so it drives the field memo)
-  const [imageData, setImageData] = useState(null); // downscaled pixels for sampling
+  const [size, setSize] = useState({ w: 1080, h: 1440 });   // canvas = image proportions
+  const [img, setImg] = useState(null);
+  const [imageData, setImageData] = useState(null);
   const [bg, setBg] = useState('black');
   const [layers, setLayers] = useState(() => [PG.makeLayer('glow')]);
   const [selId, setSelId] = useState(null);
 
-  // Field-sampling detail (feeds the grid/points effects). The particle effects
-  // carry their own density in their params.
   const [blockSize, setBlockSize] = useState(26);
   const [threshold, setThreshold] = useState(40);
   const [minDistance, setMinDistance] = useState(28);
   const [maxCount, setMaxCount] = useState(220);
 
-  const [previewSize, setPreviewSize] = useState({ w: 500, h: 666 });
+  const [previewSize, setPreviewSize] = useState({ w: 400, h: 533 });
   const [libItems, setLibItems] = useState([]);
   const [showLib, setShowLib] = useState(false);
   const [note, setNote] = useState('');
 
+  const [brush, setBrush] = useState('off');     // off | add | remove
+  const [brushSize, setBrushSize] = useState(60);
+  const [maskData, setMaskData] = useState(null);
+
   const BGS = { black: '#000000', coal: BRAND.coal, ink: BRAND.ink, bone: BRAND.bone };
 
-  // ── the shared IndexedDB library (same store the main app uses) ─────────────
+  // ── shared IndexedDB library (the same store the main app uses) ─────────────
   const pgIdb = (mode, run) => new Promise((resolve, reject) => {
     const rq = indexedDB.open('medartis-bag', 1);
-    // The store is created by the main app; declare it here too so opening the
-    // playground first (before the main library mounts) still finds it.
     rq.onupgradeneeded = () => { if (!rq.result.objectStoreNames.contains('saved-library')) rq.result.createObjectStore('saved-library', { keyPath: 'id' }); };
     rq.onerror = () => reject(rq.error);
     rq.onsuccess = () => {
@@ -11211,32 +11211,44 @@ function PlaygroundView({ onBack }) {
       const all = (await pgIdb('readonly', (st) => st.getAll())) || [];
       all.sort((a, b) => (b.savedAt || 0) - (a.savedAt || 0));
       setLibItems(all.filter((e) => e && e.src));
-    } catch { /* library simply stays empty */ }
+    } catch { /* stays empty */ }
   };
   useEffect(() => { refreshLibrary(); }, []);
 
-  // ── preview sizing ──────────────────────────────────────────────────────────
   useEffect(() => {
     const update = () => {
       if (!wrapRef.current) return;
       const rect = wrapRef.current.getBoundingClientRect();
-      const r = SIZE.w / SIZE.h; let w = rect.width - 40, h = w / r;
+      const r = size.w / size.h; let w = rect.width - 40, h = w / r;
       if (h > rect.height - 40) { h = rect.height - 40; w = h * r; }
       setPreviewSize({ w, h });
     };
     update(); window.addEventListener('resize', update);
     return () => window.removeEventListener('resize', update);
-  }, []);
+  }, [size]);
 
-  // ── load an image (from upload or the library) ──────────────────────────────
+  // ── load an image: adopt its proportions, sample it, reset the mask, and make
+  //    sure there is a source base layer so effects sit ON the picture ──────────
   const loadImage = (src) => {
     const im = new Image(); im.crossOrigin = 'anonymous';
     im.onload = () => {
       setImg(im);
-      const aw = 460, ah = Math.round(aw * (im.height / im.width));
-      const ac = document.createElement('canvas'); ac.width = aw; ac.height = ah;
-      const ax = ac.getContext('2d'); ax.drawImage(im, 0, 0, aw, ah);
-      try { setImageData(ax.getImageData(0, 0, aw, ah)); } catch { setImageData(null); }
+      // output canvas = image proportions, longest edge capped for performance
+      const cap = 1600, ar = im.width / im.height;
+      const outW = im.width >= im.height ? cap : Math.round(cap * ar);
+      const outH = im.width >= im.height ? Math.round(cap / ar) : cap;
+      setSize({ w: outW, h: outH });
+      // sample at the SAME aspect (longest edge ~ 480)
+      const s = 480 / Math.max(im.width, im.height);
+      const sw = Math.max(2, Math.round(im.width * s)), sh = Math.max(2, Math.round(im.height * s));
+      const ac = document.createElement('canvas'); ac.width = sw; ac.height = sh;
+      const ax = ac.getContext('2d'); ax.drawImage(im, 0, 0, sw, sh);
+      try { setImageData(ax.getImageData(0, 0, sw, sh)); } catch { setImageData(null); }
+      // fresh neutral mask at sample resolution
+      const mc = document.createElement('canvas'); mc.width = sw; mc.height = sh;
+      const mx = mc.getContext('2d'); mx.fillStyle = 'rgb(128,128,128)'; mx.fillRect(0, 0, sw, sh);
+      maskRef.current = mc; setMaskData(mx.getImageData(0, 0, sw, sh));
+      setLayers((ls) => (ls.some((l) => l.type === 'source') ? ls : [PG.makeLayer('source'), ...ls]));
     };
     im.src = src;
   };
@@ -11246,82 +11258,98 @@ function PlaygroundView({ onBack }) {
     e.target.value = '';
   };
 
-  // ── the field, computed only for what the stack needs ───────────────────────
+  // ── the shared field (grid/points, edge map, mask) ──────────────────────────
+  const edgeMap = useMemo(() => PG.computeEdgeMap(imageData), [imageData]);
   const field = useMemo(() => {
     const needs = PG.stackNeeds(layers);
     const base = needs.field
-      ? PG.sampleField(imageData, SIZE.w, SIZE.h, { blockSize, threshold, minDistance, maxCount })
+      ? PG.sampleField(imageData, size.w, size.h, { blockSize, threshold, minDistance, maxCount })
       : { grid: [], points: [], cell: 20 };
-    return { ...base, imageData: needs.imageData ? imageData : null, img };
-  }, [imageData, img, blockSize, threshold, minDistance, maxCount,
-      // re-sample when the SET of effect types changes (not on every param tweak)
+    return { ...base, imageData: needs.imageData ? imageData : null, edgeMap, mask: maskData, img };
+  }, [imageData, img, edgeMap, maskData, size, blockSize, threshold, minDistance, maxCount,
       layers.map((l) => l.type).join(',')]);
 
-  // ── render the stack ────────────────────────────────────────────────────────
   useEffect(() => {
     const canvas = canvasRef.current; if (!canvas) return;
-    canvas.width = SIZE.w; canvas.height = SIZE.h;
-    PG.renderStack(canvas.getContext('2d'), layers, field, SIZE.w, SIZE.h, BGS[bg] || '#000');
-  }, [layers, field, bg]);
+    canvas.width = size.w; canvas.height = size.h;
+    PG.renderStack(canvas.getContext('2d'), layers, field, size.w, size.h, BGS[bg] || '#000');
+  }, [layers, field, bg, size]);
 
-  // ── layer operations ────────────────────────────────────────────────────────
+  // ── brush: paint the mask (white = add density, black = remove) ──────────────
+  const paintAt = (clientX, clientY) => {
+    const mc = maskRef.current; if (!mc || brush === 'off') return;
+    const rect = canvasRef.current.getBoundingClientRect();
+    const nx = (clientX - rect.left) / rect.width, ny = (clientY - rect.top) / rect.height;
+    if (nx < 0 || nx > 1 || ny < 0 || ny > 1) return;
+    const mx = mc.getContext('2d');
+    const cx = nx * mc.width, cy = ny * mc.height;
+    const r = (brushSize / size.w) * mc.width;
+    const col = brush === 'add' ? '255,255,255' : '0,0,0';
+    const g = mx.createRadialGradient(cx, cy, 0, cx, cy, r);
+    g.addColorStop(0, `rgba(${col},0.35)`); g.addColorStop(1, `rgba(${col},0)`);
+    mx.fillStyle = g; mx.beginPath(); mx.arc(cx, cy, r, 0, Math.PI * 2); mx.fill();
+    setMaskData(mx.getImageData(0, 0, mc.width, mc.height));
+  };
+  const clearMask = () => {
+    const mc = maskRef.current; if (!mc) return;
+    const mx = mc.getContext('2d'); mx.fillStyle = 'rgb(128,128,128)'; mx.fillRect(0, 0, mc.width, mc.height);
+    setMaskData(mx.getImageData(0, 0, mc.width, mc.height));
+  };
+  const onPointerDown = (e) => { if (brush === 'off') return; paintingRef.current = true; paintAt(e.clientX, e.clientY); };
+  const onPointerMove = (e) => { if (paintingRef.current) paintAt(e.clientX, e.clientY); };
+  const stopPaint = () => { paintingRef.current = false; };
+
+  // ── layer ops ────────────────────────────────────────────────────────────────
   const addLayer = (type) => { const l = PG.makeLayer(type); setLayers((ls) => [...ls, l]); setSelId(l.id); };
   const removeLayer = (id) => setLayers((ls) => ls.filter((l) => l.id !== id));
   const patchLayer = (id, patch) => setLayers((ls) => ls.map((l) => (l.id === id ? { ...l, ...patch } : l)));
   const patchParam = (id, k, v) => setLayers((ls) => ls.map((l) => (l.id === id ? { ...l, params: { ...l.params, [k]: v } } : l)));
-  const moveLayer = (id, dir) => setLayers((ls) => {   // dir +1 = toward top (later in array)
+  const moveLayer = (id, dir) => setLayers((ls) => {
     const i = ls.findIndex((l) => l.id === id); const j = i + dir;
     if (i < 0 || j < 0 || j >= ls.length) return ls;
     const n = ls.slice(); [n[i], n[j]] = [n[j], n[i]]; return n;
   });
 
-  // ── output ──────────────────────────────────────────────────────────────────
-  const download = () => {
-    const a = document.createElement('a');
-    a.download = `playground-${Date.now()}.png`;
-    a.href = canvasRef.current.toDataURL('image/png'); a.click();
-  };
+  // ── output ────────────────────────────────────────────────────────────────────
+  const download = () => { const a = document.createElement('a'); a.download = `playground-${Date.now()}.png`; a.href = canvasRef.current.toDataURL('image/png'); a.click(); };
   const saveToLibrary = async () => {
     try {
-      // Compress to a reasonable JPEG so the library stays light.
       const c = canvasRef.current;
       const maxEdge = 1600, scale = Math.min(1, maxEdge / Math.max(c.width, c.height));
       const off = document.createElement('canvas');
       off.width = Math.round(c.width * scale); off.height = Math.round(c.height * scale);
-      const octx = off.getContext('2d');
-      octx.fillStyle = '#000'; octx.fillRect(0, 0, off.width, off.height);
+      const octx = off.getContext('2d'); octx.fillStyle = '#000'; octx.fillRect(0, 0, off.width, off.height);
       octx.drawImage(c, 0, 0, off.width, off.height);
       const src = off.toDataURL('image/jpeg', 0.85);
       const id = 'saved-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 6);
-      const entry = { id, label: 'Playground · ' + new Date().toLocaleDateString(), category: 'playground', src, sourceKey: `pg:${id}`, saved: true, savedAt: Date.now() };
-      await pgIdb('readwrite', (st) => st.put(entry));
+      await pgIdb('readwrite', (st) => st.put({ id, label: 'Playground · ' + new Date().toLocaleDateString(), category: 'playground', src, sourceKey: `pg:${id}`, saved: true, savedAt: Date.now() }));
       await refreshLibrary();
       setNote('Saved to library ✓'); setTimeout(() => setNote(''), 2200);
     } catch (e) { setNote('Save failed: ' + (e?.message || e)); setTimeout(() => setNote(''), 3500); }
   };
 
-  const sel = layers.find((l) => l.id === selId) || null;
   const lab = { display: 'block', fontFamily: BRAND.mono, fontSize: 9, letterSpacing: '0.14em', textTransform: 'uppercase', color: BRAND.ink600, margin: '18px 0 8px' };
-  const displayLayers = [...layers].reverse();   // top of stack shown first
+  const displayLayers = [...layers].reverse();
 
   return (
     <div style={{ width: '100%', height: '100vh', display: 'flex', fontFamily: BRAND.display, background: BRAND.coal, color: BRAND.ink }}>
       <div ref={wrapRef} style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', background: BRAND.coal, position: 'relative' }}>
-        <button onClick={onBack} style={{ position: 'absolute', top: 22, left: 22, padding: '10px 14px', background: 'transparent', color: BRAND.bone00, border: `1px solid ${BRAND.cream300}`, cursor: 'pointer', fontSize: 10.5, fontWeight: 500, fontFamily: BRAND.mono, letterSpacing: '0.12em', textTransform: 'uppercase' }}>← BACK TO TEMPLATES</button>
+        <button onClick={onBack} style={{ position: 'absolute', top: 22, left: 22, padding: '10px 14px', background: 'transparent', color: BRAND.bone00, border: `1px solid ${BRAND.cream300}`, cursor: 'pointer', fontSize: 10.5, fontWeight: 500, fontFamily: BRAND.mono, letterSpacing: '0.12em', textTransform: 'uppercase', zIndex: 2 }}>← BACK TO TEMPLATES</button>
         {!img && (
           <div style={{ position: 'absolute', color: BRAND.cream300, fontFamily: BRAND.mono, fontSize: 12, letterSpacing: '0.1em', textAlign: 'center' }}>
             UPLOAD OR PICK A LIBRARY IMAGE →<br /><span style={{ fontSize: 10, opacity: 0.7 }}>then stack effects on the right</span>
           </div>
         )}
-        <canvas ref={canvasRef} style={{ width: previewSize.w, height: previewSize.h, boxShadow: '0 32px 80px rgba(0,0,0,0.6)' }} />
+        <canvas ref={canvasRef}
+          onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={stopPaint} onPointerLeave={stopPaint}
+          style={{ width: previewSize.w, height: previewSize.h, boxShadow: '0 32px 80px rgba(0,0,0,0.6)', cursor: brush === 'off' ? 'default' : 'crosshair', touchAction: 'none' }} />
       </div>
 
       <div style={{ width: 356, background: BRAND.bone00, padding: '22px 20px', overflowY: 'auto' }}>
         <div style={{ fontSize: 10, letterSpacing: '0.16em', fontWeight: 500, color: BRAND.ink600, marginBottom: 8, fontFamily: BRAND.mono, textTransform: 'uppercase' }}>§ 99 — EXPERIMENTAL</div>
         <h2 style={{ fontSize: 22, fontWeight: 700, margin: '0 0 6px', letterSpacing: '-0.02em', color: BRAND.ink }}>Geometric Playground</h2>
-        <p style={{ fontSize: 12, color: BRAND.ink600, margin: '0 0 6px', fontWeight: 300, lineHeight: 1.5 }}>Stack luminance-driven effects on any image, then save the result to your library.</p>
+        <p style={{ fontSize: 12, color: BRAND.ink600, margin: '0 0 6px', fontWeight: 300, lineHeight: 1.5 }}>Stack luminance-driven effects on any image, brush density by hand, and save the result to your library.</p>
 
-        {/* SOURCE */}
         <input ref={fileRef} type="file" accept="image/*,.psd,.psb" onChange={handleFile} style={{ display: 'none' }} />
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6, marginTop: 14 }}>
           <button onClick={() => fileRef.current?.click()} style={pillStyle(false)}>{img ? 'Replace' : 'Upload'}</button>
@@ -11338,10 +11366,23 @@ function PlaygroundView({ onBack }) {
         )}
 
         <div style={{ display: 'flex', gap: 3, marginTop: 10 }}>
-          {Object.keys(BGS).map((k) => (
-            <button key={k} onClick={() => setBg(k)} style={{ ...pillStyle(bg === k), padding: '7px' }}>{k}</button>
+          {Object.keys(BGS).map((k) => (<button key={k} onClick={() => setBg(k)} style={{ ...pillStyle(bg === k), padding: '7px' }}>{k}</button>))}
+        </div>
+
+        {/* BRUSH */}
+        <div style={lab}>Density brush</div>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 4 }}>
+          {[['off', 'Off'], ['add', '+ Add'], ['remove', '− Remove']].map(([k, l]) => (
+            <button key={k} onClick={() => setBrush(k)} style={pillStyle(brush === k)}>{l}</button>
           ))}
         </div>
+        {brush !== 'off' && (
+          <>
+            <div style={{ marginTop: 8 }}><PSlider label="Brush size" value={brushSize} min={10} max={300} step={5} onChange={setBrushSize} /></div>
+            <button onClick={clearMask} style={{ ...pillStyle(false), width: '100%' }}>Clear brush mask</button>
+            <div style={{ fontFamily: BRAND.mono, fontSize: 8.5, color: BRAND.ink300, marginTop: 6, lineHeight: 1.5 }}>Paint on the canvas: ADD boosts particles, REMOVE clears them. Affects glow &amp; scatter layers.</div>
+          </>
+        )}
 
         {/* DETAIL */}
         <div style={lab}>Detail · sampling</div>
@@ -11351,16 +11392,10 @@ function PlaygroundView({ onBack }) {
         <PSlider label="Max points" value={maxCount} min={20} max={600} step={10} onChange={setMaxCount} />
 
         {/* LAYERS */}
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', margin: '18px 0 8px' }}>
-          <span style={{ fontFamily: BRAND.mono, fontSize: 9, letterSpacing: '0.14em', textTransform: 'uppercase', color: BRAND.ink600 }}>Layers · {layers.length}</span>
-        </div>
+        <div style={{ margin: '18px 0 8px', fontFamily: BRAND.mono, fontSize: 9, letterSpacing: '0.14em', textTransform: 'uppercase', color: BRAND.ink600 }}>Layers · {layers.length}</div>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 4, marginBottom: 10 }}>
-          {PG.EFFECT_KEYS.map((k) => (
-            <button key={k} onClick={() => addLayer(k)} title={`Add ${PG.EFFECTS[k].label}`}
-              style={{ ...pillStyle(false), padding: '7px 4px', fontSize: 9 }}>+ {PG.EFFECTS[k].label.split(' ')[0]}</button>
-          ))}
+          {PG.EFFECT_KEYS.map((k) => (<button key={k} onClick={() => addLayer(k)} title={`Add ${PG.EFFECTS[k].label}`} style={{ ...pillStyle(false), padding: '7px 4px', fontSize: 9 }}>+ {PG.EFFECTS[k].label.split(' ')[0]}</button>))}
         </div>
-
         {displayLayers.map((l) => {
           const isSel = l.id === selId;
           return (
@@ -11378,18 +11413,19 @@ function PlaygroundView({ onBack }) {
                     <span style={{ fontFamily: BRAND.mono, fontSize: 9, color: BRAND.ink600, width: 46 }}>OPACITY</span>
                     <input type="range" min="0" max="100" value={Math.round(l.opacity * 100)} onChange={(e) => patchLayer(l.id, { opacity: +e.target.value / 100 })} style={{ flex: 1 }} />
                   </div>
-                  <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8 }}>
-                    <span style={{ fontFamily: BRAND.mono, fontSize: 9, color: BRAND.ink600, width: 46 }}>BLEND</span>
-                    <select value={l.blend} onChange={(e) => patchLayer(l.id, { blend: e.target.value })} style={{ flex: 1, fontFamily: BRAND.mono, fontSize: 10, padding: '4px' }}>
-                      {PG.BLEND_MODES.map(([v, name]) => <option key={v} value={v}>{name}</option>)}
-                    </select>
-                  </div>
+                  {l.type !== 'source' && (
+                    <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8 }}>
+                      <span style={{ fontFamily: BRAND.mono, fontSize: 9, color: BRAND.ink600, width: 46 }}>BLEND</span>
+                      <select value={l.blend} onChange={(e) => patchLayer(l.id, { blend: e.target.value })} style={{ flex: 1, fontFamily: BRAND.mono, fontSize: 10, padding: '4px' }}>
+                        {PG.BLEND_MODES.map(([v, name]) => <option key={v} value={v}>{name}</option>)}
+                      </select>
+                    </div>
+                  )}
                   {PG.PARAM_SCHEMA[l.type].map((c) => {
                     const v = l.params[c.k];
                     if (c.type === 'color') return (
                       <label key={c.k} style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6, fontFamily: BRAND.mono, fontSize: 9.5, color: BRAND.ink600 }}>
-                        <input type="color" value={v} onChange={(e) => patchParam(l.id, c.k, e.target.value)} style={{ width: 30, height: 22, padding: 0, border: 'none', background: 'none' }} />
-                        {c.label}
+                        <input type="color" value={v} onChange={(e) => patchParam(l.id, c.k, e.target.value)} style={{ width: 30, height: 22, padding: 0, border: 'none', background: 'none' }} />{c.label}
                       </label>
                     );
                     if (c.type === 'toggle') return (
@@ -11403,7 +11439,7 @@ function PlaygroundView({ onBack }) {
                         <div style={{ display: 'flex', gap: 3 }}>{c.options.map((o) => <button key={o} onClick={() => patchParam(l.id, c.k, o)} style={pillStyle(v === o)}>{o}</button>)}</div>
                       </div>
                     );
-                    return <PSlider key={c.k} label={c.label} value={v} min={c.min} max={c.max} step={c.step || 1} onChange={(nv) => patchParam(l.id, c.k, nv)} format={c.step < 1 ? (x) => x.toFixed(1) : undefined} />;
+                    return <PSlider key={c.k} label={c.label} value={v} min={c.min} max={c.max} step={c.step || 1} onChange={(nv) => patchParam(l.id, c.k, nv)} format={c.step < 1 ? (x) => x.toFixed(2) : undefined} />;
                   })}
                 </div>
               )}
@@ -11411,7 +11447,6 @@ function PlaygroundView({ onBack }) {
           );
         })}
 
-        {/* OUTPUT */}
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6, marginTop: 18 }}>
           <button onClick={download} style={{ padding: '13px', background: BRAND.ink, color: BRAND.bone00, border: 'none', cursor: 'pointer', fontSize: 10.5, fontWeight: 500, fontFamily: BRAND.mono, letterSpacing: '0.12em', textTransform: 'uppercase' }}>Download</button>
           <button onClick={saveToLibrary} disabled={!img} style={{ padding: '13px', background: BRAND.gold, color: BRAND.coal, border: 'none', cursor: img ? 'pointer' : 'default', opacity: img ? 1 : 0.5, fontSize: 10.5, fontWeight: 600, fontFamily: BRAND.mono, letterSpacing: '0.12em', textTransform: 'uppercase' }}>Save to library</button>

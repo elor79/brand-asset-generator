@@ -84,22 +84,60 @@ export function sampleField(imageData, W, H, { blockSize = 28, threshold = 44, m
   return { grid, points, cols, rows, cell: ab * (W / width) };
 }
 
-// A luminance-weighted scatter of N points (rejection sampling) — the basis of the
-// glow and stipple effects, where density should follow brightness, not a grid.
-export function weightedPoints(imageData, W, H, { count = 1400, gamma = 1.6, seed = 1 } = {}) {
+// Local-contrast (edge) map — high where the image changes fast, which is exactly
+// where facial features live: the outlines of eyes, nose, mouth, jaw. Normalised
+// 0..1. Cheap central-difference gradient, computed once per image.
+export function computeEdgeMap(imageData) {
+  if (!imageData) return null;
+  const { data, width, height } = imageData;
+  const lum = new Float32Array(width * height);
+  for (let i = 0, j = 0; i < data.length; i += 4, j++) lum[j] = (0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2]) / 255;
+  const edge = new Float32Array(width * height);
+  let max = 1e-6;
+  for (let y = 1; y < height - 1; y++) {
+    for (let x = 1; x < width - 1; x++) {
+      const j = y * width + x;
+      const gx = lum[j + 1] - lum[j - 1];
+      const gy = lum[j + width] - lum[j - width];
+      const m = Math.sqrt(gx * gx + gy * gy);
+      edge[j] = m; if (m > max) max = m;
+    }
+  }
+  for (let i = 0; i < edge.length; i++) edge[i] /= max;
+  return { data: edge, width, height };
+}
+
+// A weighted scatter of N points (rejection sampling). Its placement is steerable:
+//   placement 0 → uniform random (pure scatter, ignores the image)
+//   placement 1 → fully concentrated on the FEATURE score
+//   edges 0 → the feature score is brightness; edges 1 → it is contrast/edges
+//     (facial features); in between it is a blend.
+// An optional `mask` (grayscale, 128 = neutral) multiplies the local probability so
+// an add/remove brush can push density up or down by hand.
+export function weightedPoints(imageData, W, H, opts = {}) {
   if (!imageData) return [];
+  const { count = 1400, gamma = 1.6, seed = 1, placement = 1, edges = 0, edgeMap = null, mask = null, maskStrength = 1 } = opts;
   const { data, width, height } = imageData;
   let s = seed >>> 0;
   const rnd = () => ((s = (s * 1664525 + 1013904223) >>> 0) / 4294967296);
+  const em = edges > 0 ? edgeMap : null;
   const out = [];
-  let guard = count * 40;
+  let guard = count * 60;
   while (out.length < count && guard-- > 0) {
     const px = Math.floor(rnd() * width), py = Math.floor(rnd() * height);
     const idx = (py * width + px) * 4;
     const l = (0.299 * data[idx] + 0.587 * data[idx + 1] + 0.114 * data[idx + 2]) / 255;
-    if (rnd() < Math.pow(l, gamma)) {
-      out.push({ x: px * (W / width), y: py * (H / height), lum: l, rnd: rnd() });
+    const e = em ? em.data[py * width + px] : 0;
+    const feature = clamp(lerp(l, e, edges), 0, 1);
+    // accept = blend between "always" (scatter) and the feature-weighted probability
+    let prob = lerp(1, Math.pow(feature, gamma), clamp(placement, 0, 1));
+    if (mask) {
+      const mx = Math.min(mask.width - 1, Math.floor((px / width) * mask.width));
+      const my = Math.min(mask.height - 1, Math.floor((py / height) * mask.height));
+      const g = mask.data[(my * mask.width + mx) * 4];          // grayscale channel
+      prob *= clamp(1 + ((g - 128) / 127) * maskStrength, 0, 2);
     }
+    if (rnd() < prob) out.push({ x: px * (W / width), y: py * (H / height), lum: l, edge: e, rnd: rnd() });
   }
   return out;
 }
@@ -113,7 +151,7 @@ function drawGlow(ctx, field, p, W, H) {
   // image is bright, coloured gold on the highlights and steel-blue toward the mids
   // — the gold/blue split in the reference. Additive blend (set by the layer) makes
   // overlapping particles bloom.
-  const pts = weightedPoints(field.imageData, W, H, { count: p.count, gamma: p.gamma, seed: p.seed || 1 });
+  const pts = weightedPoints(field.imageData, W, H, { count: p.count, gamma: p.gamma, seed: p.seed || 1, placement: p.placement, edges: p.edges, edgeMap: field.edgeMap, mask: field.mask, maskStrength: p.maskStrength ?? 1 });
   for (const pt of pts) {
     const t = clamp(Math.pow(pt.lum, 0.8), 0, 1);
     const col = mix(p.cool, p.warm, t);            // shadow→highlight colour ramp
@@ -199,7 +237,7 @@ function drawContour(ctx, field, p, W, H) {
 function drawScatter(ctx, field, p, W, H) {
   ctx.fillStyle = p.color;
   ctx.globalAlpha = clamp(p.dotAlpha, 0, 1) * (p._alpha ?? 1);
-  for (const pt of weightedPoints(field.imageData, W, H, { count: p.count, gamma: p.gamma, seed: p.seed || 7 })) {
+  for (const pt of weightedPoints(field.imageData, W, H, { count: p.count, gamma: p.gamma, seed: p.seed || 7, placement: p.placement, edges: p.edges, edgeMap: field.edgeMap, mask: field.mask, maskStrength: p.maskStrength ?? 1 })) {
     const r = lerp(p.minSize, p.maxSize, pt.rnd);
     ctx.beginPath(); ctx.arc(pt.x, pt.y, r, 0, Math.PI * 2); ctx.fill();
   }
@@ -244,11 +282,11 @@ function drawSource(ctx, field, p, W, H) {
 // ─── Registry ────────────────────────────────────────────────────────────────
 export const EFFECTS = {
   source:   { label: 'Source image', draw: drawSource,   defaults: {} },
-  glow:     { label: 'Glow particles', draw: drawGlow,    defaults: { count: 1600, gamma: 1.7, minSize: 3, maxSize: 16, seed: 1, cool: PLAY_COLORS.steel, warm: PLAY_COLORS.gold }, blend: 'lighter' },
+  glow:     { label: 'Glow particles', draw: drawGlow,    defaults: { count: 1600, gamma: 1.7, placement: 1, edges: 0.4, minSize: 3, maxSize: 16, seed: 1, maskStrength: 1, cool: PLAY_COLORS.steel, warm: PLAY_COLORS.gold }, blend: 'lighter' },
   network:  { label: 'Network',        draw: drawNetwork, defaults: { shape: 'circle', scale: 1, fill: false, lineWeight: 0.8, connect: 230, color: PLAY_COLORS.bone } },
   halftone: { label: 'Halftone',       draw: drawHalftone,defaults: { scale: 1, invert: false, color: PLAY_COLORS.bone } },
   contour:  { label: 'Contour lines',  draw: drawContour, defaults: { density: 46, amp: 90, lineWeight: 1, color: PLAY_COLORS.gold } },
-  scatter:  { label: 'Scatter',        draw: drawScatter, defaults: { count: 2600, gamma: 1.5, minSize: 0.5, maxSize: 2.2, dotAlpha: 0.9, seed: 7, color: PLAY_COLORS.warm } },
+  scatter:  { label: 'Scatter',        draw: drawScatter, defaults: { count: 2600, gamma: 1.5, placement: 1, edges: 0.3, minSize: 0.5, maxSize: 2.2, dotAlpha: 0.9, seed: 7, maskStrength: 1, color: PLAY_COLORS.warm } },
   duotone:  { label: 'Duotone',        draw: drawDuotone, defaults: { shadow: PLAY_COLORS.coal, highlight: PLAY_COLORS.gold }, blend: 'source-over' },
 };
 
@@ -300,6 +338,8 @@ export const PARAM_SCHEMA = {
   source:   [],
   glow:     [
     { k: 'count', label: 'Density', min: 200, max: 6000, step: 50 },
+    { k: 'placement', label: 'Placement · scatter→features', min: 0, max: 1, step: 0.05 },
+    { k: 'edges', label: 'Cling to edges', min: 0, max: 1, step: 0.05 },
     { k: 'gamma', label: 'Falloff', min: 0.5, max: 4, step: 0.1 },
     { k: 'minSize', label: 'Min size', min: 0.5, max: 24, step: 0.5 },
     { k: 'maxSize', label: 'Max size', min: 2, max: 60, step: 1 },
@@ -328,6 +368,8 @@ export const PARAM_SCHEMA = {
   ],
   scatter:  [
     { k: 'count', label: 'Density', min: 300, max: 12000, step: 100 },
+    { k: 'placement', label: 'Placement · scatter→features', min: 0, max: 1, step: 0.05 },
+    { k: 'edges', label: 'Cling to edges', min: 0, max: 1, step: 0.05 },
     { k: 'gamma', label: 'Falloff', min: 0.5, max: 4, step: 0.1 },
     { k: 'minSize', label: 'Min size', min: 0.2, max: 6, step: 0.1 },
     { k: 'maxSize', label: 'Max size', min: 0.5, max: 10, step: 0.1 },

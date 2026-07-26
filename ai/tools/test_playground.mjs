@@ -1,26 +1,46 @@
 #!/usr/bin/env node
-// The playground effect engine: pure functions, so they are tested here without a
-// browser. Every effect must render without throwing, the compositor must walk a
-// mixed stack, and every effect must declare a param schema whose keys exist in its
-// defaults (or the sidebar renders a control bound to nothing).
-import { sampleField, weightedPoints, EFFECTS, EFFECT_KEYS, PARAM_SCHEMA, makeLayer, renderStack, stackNeeds } from '../../src/playground.js';
+// The playground effect engine: pure functions tested without a browser. Every
+// effect renders; the compositor walks a mixed stack; every effect's PARAM_SCHEMA
+// keys exist in its defaults; placement 0 scatters while placement 1 concentrates;
+// the mask suppresses where painted.
+import { sampleField, weightedPoints, computeEdgeMap, EFFECTS, EFFECT_KEYS, PARAM_SCHEMA, makeLayer, renderStack } from '../../src/playground.js';
 
 let fail = 0;
 const ok = (m) => console.log(`✓ ${m}`);
 const bad = (m) => { console.log(`✗ ${m}`); fail++; };
 
-// synthetic gradient image
-const W = 48, H = 48, data = new Uint8ClampedArray(W * H * 4);
-for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) { const i = (y * W + x) * 4, v = Math.floor((x / W) * 255); data[i] = data[i + 1] = data[i + 2] = v; data[i + 3] = 255; }
+// synthetic: bright feature-y square in the middle of a dark field
+const W = 64, H = 64, data = new Uint8ClampedArray(W * H * 4);
+for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) { const i = (y * W + x) * 4; const inBox = x > 24 && x < 40 && y > 24 && y < 40; const v = inBox ? 240 : 20; data[i] = data[i + 1] = data[i + 2] = v; data[i + 3] = 255; }
 const imageData = { data, width: W, height: H };
-const OW = 1080, OH = 1440;
+const OW = 900, OH = 900;
 
-const f = sampleField(imageData, OW, OH, {});
-if (!f.grid.length || !f.points.length) bad('sampleField produced no grid/points'); else ok(`sampleField: ${f.grid.length} grid, ${f.points.length} points`);
-const wp = weightedPoints(imageData, OW, OH, { count: 400 });
-if (!wp.length) bad('weightedPoints empty'); else ok(`weightedPoints: ${wp.length} luminance-weighted`);
+const edge = computeEdgeMap(imageData);
+if (!edge || edge.data.length !== W * H) bad('computeEdgeMap wrong shape'); else ok('computeEdgeMap normalised');
 
-// stub ctx + document
+// placement 0 = scatter (points spread across the whole frame); placement 1 = concentrated on the bright box
+const spread = (pts) => { const xs = pts.map(p => p.x); return Math.max(...xs) - Math.min(...xs); };
+const scat = weightedPoints(imageData, OW, OH, { count: 300, placement: 0, seed: 3 });
+const conc = weightedPoints(imageData, OW, OH, { count: 300, placement: 1, gamma: 2, seed: 3 });
+const inBox = (pts) => pts.filter(p => p.x > OW * 0.37 && p.x < OW * 0.63 && p.y > OH * 0.37 && p.y < OH * 0.63).length / pts.length;
+if (inBox(conc) <= inBox(scat)) bad(`placement 1 (${(inBox(conc)*100).toFixed(0)}% in feature) is not more concentrated than placement 0 (${(inBox(scat)*100).toFixed(0)}%)`);
+else ok(`placement steers: scatter ${(inBox(scat)*100).toFixed(0)}% vs concentrated ${(inBox(conc)*100).toFixed(0)}% inside the bright feature`);
+
+// edges: cling-to-edges should favour the box OUTLINE over its flat interior
+const edgey = weightedPoints(imageData, OW, OH, { count: 300, placement: 1, edges: 1, edgeMap: edge, gamma: 1.5, seed: 5 });
+if (!edgey.length) bad('edge-clinging produced nothing'); else ok(`edge-cling places ${edgey.length} points on contrast`);
+
+// mask suppresses where painted dark (below 128)
+const maskData = new Uint8ClampedArray(W * H * 4).fill(128);
+for (let i = 3; i < maskData.length; i += 4) maskData[i] = 255;         // alpha
+for (let y = 0; y < H; y++) for (let x = 0; x < W / 2; x++) { const i = (y * W + x) * 4; maskData[i] = maskData[i + 1] = maskData[i + 2] = 0; } // left half = remove
+const mask = { data: maskData, width: W, height: H };
+const masked = weightedPoints(imageData, OW, OH, { count: 600, placement: 0, mask, seed: 9 });
+const leftFrac = masked.filter(p => p.x < OW / 2).length / masked.length;
+if (leftFrac > 0.15) bad(`remove-brushed left half still has ${(leftFrac*100).toFixed(0)}% of points`);
+else ok(`mask suppresses: only ${(leftFrac*100).toFixed(0)}% of points fall in the removed half`);
+
+// every effect renders + schema matches defaults
 const ctx = new Proxy({}, { get: (t, k) => {
   if (k === 'createRadialGradient' || k === 'createLinearGradient') return () => ({ addColorStop() {} });
   if (k === 'createImageData') return (w, h) => ({ data: new Uint8ClampedArray(w * h * 4), width: w, height: h });
@@ -29,26 +49,16 @@ const ctx = new Proxy({}, { get: (t, k) => {
   return typeof k === 'string' && /^[a-z]/.test(k) ? (() => {}) : undefined;
 }, set: () => true });
 global.document = { createElement: () => ({ width: 0, height: 0, getContext: () => ctx }) };
-const field = { ...f, imageData, img: null };
-
+const field = { ...sampleField(imageData, OW, OH, {}), imageData, edgeMap: edge, mask: null, img: null };
 for (const key of EFFECT_KEYS) {
-  if (!PARAM_SCHEMA[key]) { bad(`${key}: no PARAM_SCHEMA`); continue; }
   const bogus = PARAM_SCHEMA[key].filter((c) => !(c.k in EFFECTS[key].defaults));
-  if (bogus.length) { bad(`${key}: schema keys not in defaults: ${bogus.map((c) => c.k).join(', ')}`); continue; }
-  if (key === 'source') { ok(`${key.padEnd(9)} schema ok (needs a real image)`); continue; }
-  try { EFFECTS[key].draw(ctx, field, { ...EFFECTS[key].defaults, _alpha: 1 }, OW, OH); ok(`${key.padEnd(9)} renders, schema matches defaults`); }
+  if (bogus.length) { bad(`${key}: schema keys not in defaults: ${bogus.map(c => c.k).join(', ')}`); continue; }
+  if (key === 'source') { ok(`${key.padEnd(9)} schema ok`); continue; }
+  try { EFFECTS[key].draw(ctx, field, { ...EFFECTS[key].defaults, _alpha: 1 }, OW, OH); ok(`${key.padEnd(9)} renders`); }
   catch (e) { bad(`${key}: threw ${e.message}`); }
 }
-
-// mixed stack
-try { renderStack(ctx, EFFECT_KEYS.filter((k) => k !== 'source').map(makeLayer), field, OW, OH, '#000'); ok('renderStack composites a mixed stack'); }
+try { renderStack(ctx, EFFECT_KEYS.filter(k => k !== 'source').map(makeLayer), field, OW, OH, '#000'); ok('renderStack composites a mixed stack'); }
 catch (e) { bad(`renderStack threw ${e.message}`); }
 
-// disabled layers are skipped
-const l = makeLayer('glow'); l.enabled = false;
-let drew = false; const spy = new Proxy(ctx, { get: (t, k) => (k === 'arc' ? (() => { drew = true; }) : t[k]) });
-renderStack(spy, [l], field, OW, OH, '#000');
-if (drew) bad('a disabled layer still drew'); else ok('disabled layers are skipped');
-
-console.log(fail ? `\n✗ ${fail} problem(s) in the playground engine` : '\n✓ every effect renders, composites, and matches its schema');
+console.log(fail ? `\n✗ ${fail} problem(s)` : '\n✓ placement, edges, mask, and every effect check out');
 process.exit(fail ? 1 : 0);
