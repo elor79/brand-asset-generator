@@ -17,6 +17,7 @@ import {
   // two copies of the same maths quietly drift apart.
 } from './customFormats';
 import { makeZip } from './zip';
+import * as PG from './playground';
 import {
   DEFAULT_GRADIENT, ANGLE_PRESETS, axisFor, tAt, gradientStops, colorAt,
   applyCanvasGradient, gradientToSvgDefs, describeGradient,
@@ -11160,248 +11161,271 @@ function ProjectCard({ name, preset, onPick, onDelete }) {
 }
 
 function PlaygroundView({ onBack }) {
-  const [imageSrc, setImageSrc] = useState(null);
-  const [shape, setShape] = useState('Square');
-  const [blockSize, setBlockSize] = useState(28);
-  const [threshold, setThreshold] = useState(44);
-  const [maxCircles, setMaxCircles] = useState(180);
-  const [minDistance, setMinDistance] = useState(30);
-  const [minRadius, setMinRadius] = useState(13);
-  const [maxRadius, setMaxRadius] = useState(36);
-  const [maxConnDistance, setMaxConnDistance] = useState(230);
-  const [lineWeight, setLineWeight] = useState(0.8);
-  const [bg, setBg] = useState('coal');
-
+  // The § 99 playground, rebuilt around a LAYER STACK. Each layer is one effect
+  // (glow particles, network, halftone, contour, scatter, duotone) with its own
+  // opacity + blend mode; the compositor in playground.js draws them bottom-to-top,
+  // so several effects combine without any special-casing here. The view is a thin
+  // shell: source image, the sampling detail, the layer list, and I/O (upload / pick
+  // from the library / download / save back to the library).
+  const SIZE = { w: 1080, h: 1440 };
   const canvasRef = useRef(null);
   const fileRef = useRef(null);
-  const imgRef = useRef(null);
-  const [imageData, setImageData] = useState(null);
-  const [previewSize, setPreviewSize] = useState({ w: 500, h: 666 });
   const wrapRef = useRef(null);
-  const SIZE = { w: 1080, h: 1440 };
 
+  const [img, setImg] = useState(null);            // the loaded source Image (state, so it drives the field memo)
+  const [imageData, setImageData] = useState(null); // downscaled pixels for sampling
+  const [bg, setBg] = useState('black');
+  const [layers, setLayers] = useState(() => [PG.makeLayer('glow')]);
+  const [selId, setSelId] = useState(null);
+
+  // Field-sampling detail (feeds the grid/points effects). The particle effects
+  // carry their own density in their params.
+  const [blockSize, setBlockSize] = useState(26);
+  const [threshold, setThreshold] = useState(40);
+  const [minDistance, setMinDistance] = useState(28);
+  const [maxCount, setMaxCount] = useState(220);
+
+  const [previewSize, setPreviewSize] = useState({ w: 500, h: 666 });
+  const [libItems, setLibItems] = useState([]);
+  const [showLib, setShowLib] = useState(false);
+  const [note, setNote] = useState('');
+
+  const BGS = { black: '#000000', coal: BRAND.coal, ink: BRAND.ink, bone: BRAND.bone };
+
+  // ── the shared IndexedDB library (same store the main app uses) ─────────────
+  const pgIdb = (mode, run) => new Promise((resolve, reject) => {
+    const rq = indexedDB.open('medartis-bag', 1);
+    // The store is created by the main app; declare it here too so opening the
+    // playground first (before the main library mounts) still finds it.
+    rq.onupgradeneeded = () => { if (!rq.result.objectStoreNames.contains('saved-library')) rq.result.createObjectStore('saved-library', { keyPath: 'id' }); };
+    rq.onerror = () => reject(rq.error);
+    rq.onsuccess = () => {
+      const tx = rq.result.transaction('saved-library', mode);
+      const req = run(tx.objectStore('saved-library'));
+      tx.oncomplete = () => { resolve(req?.result); rq.result.close(); };
+      tx.onerror = () => { reject(tx.error); rq.result.close(); };
+    };
+  });
+  const refreshLibrary = async () => {
+    try {
+      const all = (await pgIdb('readonly', (st) => st.getAll())) || [];
+      all.sort((a, b) => (b.savedAt || 0) - (a.savedAt || 0));
+      setLibItems(all.filter((e) => e && e.src));
+    } catch { /* library simply stays empty */ }
+  };
+  useEffect(() => { refreshLibrary(); }, []);
+
+  // ── preview sizing ──────────────────────────────────────────────────────────
   useEffect(() => {
     const update = () => {
       if (!wrapRef.current) return;
       const rect = wrapRef.current.getBoundingClientRect();
-      const pad = 40;
-      const r = SIZE.w / SIZE.h;
-      let w = rect.width - pad, h = w / r;
-      if (h > rect.height - pad) { h = rect.height - pad; w = h * r; }
+      const r = SIZE.w / SIZE.h; let w = rect.width - 40, h = w / r;
+      if (h > rect.height - 40) { h = rect.height - 40; w = h * r; }
       setPreviewSize({ w, h });
     };
-    update();
-    window.addEventListener('resize', update);
+    update(); window.addEventListener('resize', update);
     return () => window.removeEventListener('resize', update);
   }, []);
 
+  // ── load an image (from upload or the library) ──────────────────────────────
   const loadImage = (src) => {
-    setImageSrc(src);
-    const img = new Image();
-    img.crossOrigin = 'anonymous';
-    img.onload = () => {
-      imgRef.current = img;
-      const ac = document.createElement('canvas');
-      const aw = 400, ah = Math.round(aw * (img.height / img.width));
-      ac.width = aw; ac.height = ah;
-      const ax = ac.getContext('2d');
-      ax.drawImage(img, 0, 0, aw, ah);
-      try { setImageData(ax.getImageData(0, 0, aw, ah)); } catch (e) {}
+    const im = new Image(); im.crossOrigin = 'anonymous';
+    im.onload = () => {
+      setImg(im);
+      const aw = 460, ah = Math.round(aw * (im.height / im.width));
+      const ac = document.createElement('canvas'); ac.width = aw; ac.height = ah;
+      const ax = ac.getContext('2d'); ax.drawImage(im, 0, 0, aw, ah);
+      try { setImageData(ax.getImageData(0, 0, aw, ah)); } catch { setImageData(null); }
     };
-    img.src = src;
+    im.src = src;
   };
-
   const handleFile = async (e) => {
-    const f = e.target.files?.[0];
-    if (!f) return;
-    try {
-      const dataUrl = await fileToImageDataUrl(f);
-      loadImage(dataUrl);
-    } catch (err) {
-      alert('Could not load image: ' + err.message);
-    }
+    const f = e.target.files?.[0]; if (!f) return;
+    try { loadImage(await fileToImageDataUrl(f)); } catch (err) { alert('Could not load image: ' + err.message); }
+    e.target.value = '';
   };
 
-  const points = useMemo(() => {
-    if (!imageData) return [];
-    const { data, width, height } = imageData;
-    const ab = Math.max(8, Math.round(blockSize * (width / SIZE.w)));
-    const raw = [];
-    for (let y = 0; y < height; y += ab) {
-      for (let x = 0; x < width; x += ab) {
-        let lumSum = 0, count = 0, minL = 255, maxL = 0;
-        for (let by = 0; by < ab && y + by < height; by += 2) {
-          for (let bx = 0; bx < ab && x + bx < width; bx += 2) {
-            const idx = ((y + by) * width + (x + bx)) * 4;
-            const l = 0.299 * data[idx] + 0.587 * data[idx + 1] + 0.114 * data[idx + 2];
-            lumSum += l; if (l < minL) minL = l; if (l > maxL) maxL = l;
-            count++;
-          }
-        }
-        if (count === 0) continue;
-        const avg = lumSum / count;
-        const contrast = maxL - minL;
-        const score = avg * 0.5 + contrast * 0.5;
-        raw.push({ x: x + ab / 2, y: y + ab / 2, score });
-      }
-    }
-    const sx = SIZE.w / width, sy = SIZE.h / height;
-    const scaled = raw.map(p => ({ x: p.x * sx, y: p.y * sy, score: p.score }));
-    const passing = scaled.filter(p => p.score >= threshold).sort((a, b) => b.score - a.score);
-    const chosen = [];
-    for (const p of passing) {
-      if (chosen.length >= maxCircles) break;
-      let ok = true;
-      for (const q of chosen) {
-        const dx = p.x - q.x, dy = p.y - q.y;
-        if (dx * dx + dy * dy < minDistance * minDistance) { ok = false; break; }
-      }
-      if (ok) chosen.push(p);
-    }
-    const maxScore = Math.max(...chosen.map(p => p.score), 1);
-    return chosen.map(p => ({ ...p, r: minRadius + (maxRadius - minRadius) * (p.score / maxScore) }));
-  }, [imageData, blockSize, threshold, maxCircles, minDistance, minRadius, maxRadius]);
+  // ── the field, computed only for what the stack needs ───────────────────────
+  const field = useMemo(() => {
+    const needs = PG.stackNeeds(layers);
+    const base = needs.field
+      ? PG.sampleField(imageData, SIZE.w, SIZE.h, { blockSize, threshold, minDistance, maxCount })
+      : { grid: [], points: [], cell: 20 };
+    return { ...base, imageData: needs.imageData ? imageData : null, img };
+  }, [imageData, img, blockSize, threshold, minDistance, maxCount,
+      // re-sample when the SET of effect types changes (not on every param tweak)
+      layers.map((l) => l.type).join(',')]);
 
+  // ── render the stack ────────────────────────────────────────────────────────
   useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
+    const canvas = canvasRef.current; if (!canvas) return;
     canvas.width = SIZE.w; canvas.height = SIZE.h;
-    const ctx = canvas.getContext('2d');
-    const palettes = {
-      coal: { bg: BRAND.coal, fg: BRAND.bone00 },
-      bone: { bg: BRAND.bone, fg: BRAND.ink },
-      ink:  { bg: BRAND.ink,  fg: BRAND.cream100 },
-    };
-    const p = palettes[bg] || palettes.coal;
-    ctx.fillStyle = p.bg;
-    ctx.fillRect(0, 0, SIZE.w, SIZE.h);
-    if (imgRef.current) {
-      ctx.globalAlpha = 0.85;
-      const ir = imgRef.current.width / imgRef.current.height;
-      const cr = SIZE.w / SIZE.h;
-      let dw, dh, dx, dy;
-      if (ir > cr) { dw = SIZE.w; dh = dw / ir; dx = 0; dy = (SIZE.h - dh) / 2; }
-      else         { dh = SIZE.h; dw = dh * ir; dy = 0; dx = (SIZE.w - dw) / 2; }
-      ctx.drawImage(imgRef.current, dx, dy, dw, dh);
-      ctx.globalAlpha = 1;
-    }
-    ctx.strokeStyle = p.fg; ctx.fillStyle = p.fg;
-    ctx.lineWidth = lineWeight;
-    ctx.globalAlpha = 0.65;
-    for (let i = 0; i < points.length; i++) {
-      for (let j = i + 1; j < points.length; j++) {
-        const a = points[i], b = points[j];
-        const d2 = (a.x - b.x) ** 2 + (a.y - b.y) ** 2;
-        if (d2 < maxConnDistance ** 2) {
-          ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
-        }
-      }
-    }
-    ctx.globalAlpha = 1;
-    ctx.lineWidth = 1;
-    ctx.font = `500 9px ${BRAND.mono}`;
-    for (const pt of points) {
-      ctx.beginPath();
-      if (shape === 'Circle') ctx.arc(pt.x, pt.y, pt.r, 0, Math.PI * 2);
-      else ctx.rect(pt.x - pt.r, pt.y - pt.r, pt.r * 2, pt.r * 2);
-      ctx.stroke();
-      ctx.globalAlpha = 0.55;
-      ctx.fillText(`${Math.round(pt.x)},${Math.round(pt.y)}`, pt.x + pt.r + 4, pt.y - pt.r - 2);
-      ctx.globalAlpha = 1;
-    }
-    ctx.fillStyle = BRAND.gold;
-    ctx.fillRect(40, 40, 6, 6);
-  }, [points, shape, bg, imageSrc, lineWeight, maxConnDistance]);
+    PG.renderStack(canvas.getContext('2d'), layers, field, SIZE.w, SIZE.h, BGS[bg] || '#000');
+  }, [layers, field, bg]);
 
+  // ── layer operations ────────────────────────────────────────────────────────
+  const addLayer = (type) => { const l = PG.makeLayer(type); setLayers((ls) => [...ls, l]); setSelId(l.id); };
+  const removeLayer = (id) => setLayers((ls) => ls.filter((l) => l.id !== id));
+  const patchLayer = (id, patch) => setLayers((ls) => ls.map((l) => (l.id === id ? { ...l, ...patch } : l)));
+  const patchParam = (id, k, v) => setLayers((ls) => ls.map((l) => (l.id === id ? { ...l, params: { ...l.params, [k]: v } } : l)));
+  const moveLayer = (id, dir) => setLayers((ls) => {   // dir +1 = toward top (later in array)
+    const i = ls.findIndex((l) => l.id === id); const j = i + dir;
+    if (i < 0 || j < 0 || j >= ls.length) return ls;
+    const n = ls.slice(); [n[i], n[j]] = [n[j], n[i]]; return n;
+  });
+
+  // ── output ──────────────────────────────────────────────────────────────────
   const download = () => {
-    const link = document.createElement('a');
-    link.download = `playground-${Date.now()}.png`;
-    link.href = canvasRef.current.toDataURL('image/png');
-    link.click();
+    const a = document.createElement('a');
+    a.download = `playground-${Date.now()}.png`;
+    a.href = canvasRef.current.toDataURL('image/png'); a.click();
   };
+  const saveToLibrary = async () => {
+    try {
+      // Compress to a reasonable JPEG so the library stays light.
+      const c = canvasRef.current;
+      const maxEdge = 1600, scale = Math.min(1, maxEdge / Math.max(c.width, c.height));
+      const off = document.createElement('canvas');
+      off.width = Math.round(c.width * scale); off.height = Math.round(c.height * scale);
+      const octx = off.getContext('2d');
+      octx.fillStyle = '#000'; octx.fillRect(0, 0, off.width, off.height);
+      octx.drawImage(c, 0, 0, off.width, off.height);
+      const src = off.toDataURL('image/jpeg', 0.85);
+      const id = 'saved-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 6);
+      const entry = { id, label: 'Playground · ' + new Date().toLocaleDateString(), category: 'playground', src, sourceKey: `pg:${id}`, saved: true, savedAt: Date.now() };
+      await pgIdb('readwrite', (st) => st.put(entry));
+      await refreshLibrary();
+      setNote('Saved to library ✓'); setTimeout(() => setNote(''), 2200);
+    } catch (e) { setNote('Save failed: ' + (e?.message || e)); setTimeout(() => setNote(''), 3500); }
+  };
+
+  const sel = layers.find((l) => l.id === selId) || null;
+  const lab = { display: 'block', fontFamily: BRAND.mono, fontSize: 9, letterSpacing: '0.14em', textTransform: 'uppercase', color: BRAND.ink600, margin: '18px 0 8px' };
+  const displayLayers = [...layers].reverse();   // top of stack shown first
 
   return (
-    <div style={{
-      width: '100%', height: '100vh', display: 'flex',
-      fontFamily: BRAND.display, background: BRAND.coal, color: BRAND.ink
-    }}>
-      <div ref={wrapRef} style={{
-        flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center',
-        background: BRAND.coal, position: 'relative'
-      }}>
-        <button onClick={onBack} style={{
-          position: 'absolute', top: 22, left: 22, padding: '10px 14px',
-          background: 'transparent', color: BRAND.bone00,
-          border: `1px solid ${BRAND.cream300}`, borderRadius: 0,
-          cursor: 'pointer', fontSize: 10.5, fontWeight: 500,
-          fontFamily: BRAND.mono, letterSpacing: '0.12em', textTransform: 'uppercase'
-        }}>← BACK TO TEMPLATES</button>
-        <canvas ref={canvasRef} style={{
-          width: previewSize.w, height: previewSize.h,
-          boxShadow: '0 32px 80px rgba(0,0,0,0.6)'
-        }} />
+    <div style={{ width: '100%', height: '100vh', display: 'flex', fontFamily: BRAND.display, background: BRAND.coal, color: BRAND.ink }}>
+      <div ref={wrapRef} style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', background: BRAND.coal, position: 'relative' }}>
+        <button onClick={onBack} style={{ position: 'absolute', top: 22, left: 22, padding: '10px 14px', background: 'transparent', color: BRAND.bone00, border: `1px solid ${BRAND.cream300}`, cursor: 'pointer', fontSize: 10.5, fontWeight: 500, fontFamily: BRAND.mono, letterSpacing: '0.12em', textTransform: 'uppercase' }}>← BACK TO TEMPLATES</button>
+        {!img && (
+          <div style={{ position: 'absolute', color: BRAND.cream300, fontFamily: BRAND.mono, fontSize: 12, letterSpacing: '0.1em', textAlign: 'center' }}>
+            UPLOAD OR PICK A LIBRARY IMAGE →<br /><span style={{ fontSize: 10, opacity: 0.7 }}>then stack effects on the right</span>
+          </div>
+        )}
+        <canvas ref={canvasRef} style={{ width: previewSize.w, height: previewSize.h, boxShadow: '0 32px 80px rgba(0,0,0,0.6)' }} />
       </div>
-      <div style={{ width: 340, background: BRAND.bone00, padding: '24px 22px', overflowY: 'auto' }}>
-        <div style={{
-          fontSize: 10, letterSpacing: '0.16em', fontWeight: 500,
-          color: BRAND.ink600, marginBottom: 8, fontFamily: BRAND.mono,
-          textTransform: 'uppercase'
-        }}>§ 99 — EXPERIMENTAL</div>
-        <h2 style={{ fontSize: 22, fontWeight: 700, margin: '0 0 6px', letterSpacing: '-0.02em', color: BRAND.ink }}>
-          Geometric Playground
-        </h2>
-        <p style={{ fontSize: 12, color: BRAND.ink600, margin: '0 0 22px', fontWeight: 300, lineHeight: 1.5 }}>
-          Topology overlay derived from image luminance. Functional — not decorative.
-        </p>
+
+      <div style={{ width: 356, background: BRAND.bone00, padding: '22px 20px', overflowY: 'auto' }}>
+        <div style={{ fontSize: 10, letterSpacing: '0.16em', fontWeight: 500, color: BRAND.ink600, marginBottom: 8, fontFamily: BRAND.mono, textTransform: 'uppercase' }}>§ 99 — EXPERIMENTAL</div>
+        <h2 style={{ fontSize: 22, fontWeight: 700, margin: '0 0 6px', letterSpacing: '-0.02em', color: BRAND.ink }}>Geometric Playground</h2>
+        <p style={{ fontSize: 12, color: BRAND.ink600, margin: '0 0 6px', fontWeight: 300, lineHeight: 1.5 }}>Stack luminance-driven effects on any image, then save the result to your library.</p>
+
+        {/* SOURCE */}
         <input ref={fileRef} type="file" accept="image/*,.psd,.psb" onChange={handleFile} style={{ display: 'none' }} />
-        <button onClick={() => fileRef.current?.click()} style={{
-          width: '100%', padding: '12px', background: BRAND.ink, color: BRAND.bone00,
-          border: 'none', borderRadius: 0, fontSize: 11, fontWeight: 500,
-          cursor: 'pointer', marginBottom: 22, fontFamily: BRAND.mono,
-          letterSpacing: '0.14em', textTransform: 'uppercase'
-        }}>{imageSrc ? 'REPLACE IMAGE' : 'UPLOAD IMAGE'}</button>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6, marginTop: 14 }}>
+          <button onClick={() => fileRef.current?.click()} style={pillStyle(false)}>{img ? 'Replace' : 'Upload'}</button>
+          <button onClick={() => setShowLib((v) => !v)} style={pillStyle(showLib)}>Library ({libItems.length})</button>
+        </div>
+        {showLib && (
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 4, marginTop: 8, maxHeight: 168, overflowY: 'auto' }}>
+            {libItems.length === 0 && <div style={{ gridColumn: '1 / -1', fontFamily: BRAND.mono, fontSize: 9.5, color: BRAND.ink300 }}>Library is empty. Save generations or playground results here.</div>}
+            {libItems.map((it) => (
+              <button key={it.id} title={it.label} onClick={() => { loadImage(it.src); setShowLib(false); }}
+                style={{ padding: 0, height: 52, border: `1px solid ${BRAND.ink100}`, background: `#000 center/cover url(${it.src})`, cursor: 'pointer' }} />
+            ))}
+          </div>
+        )}
 
-        <PSlider label="Block Size" value={blockSize} min={8} max={80} onChange={setBlockSize} />
+        <div style={{ display: 'flex', gap: 3, marginTop: 10 }}>
+          {Object.keys(BGS).map((k) => (
+            <button key={k} onClick={() => setBg(k)} style={{ ...pillStyle(bg === k), padding: '7px' }}>{k}</button>
+          ))}
+        </div>
+
+        {/* DETAIL */}
+        <div style={lab}>Detail · sampling</div>
+        <PSlider label="Block size" value={blockSize} min={8} max={80} onChange={setBlockSize} />
         <PSlider label="Threshold" value={threshold} min={0} max={150} onChange={setThreshold} />
-        <PSlider label="Max Shapes" value={maxCircles} min={10} max={500} step={5} onChange={setMaxCircles} />
-        <PSlider label="Min Distance" value={minDistance} min={5} max={120} onChange={setMinDistance} />
-        <PSlider label="Min Radius" value={minRadius} min={1} max={50} onChange={setMinRadius} />
-        <PSlider label="Max Radius" value={maxRadius} min={5} max={150} onChange={setMaxRadius} />
-        <PSlider label="Connection" value={maxConnDistance} min={0} max={500} step={5} onChange={setMaxConnDistance} />
-        <PSlider label="Line Weight" value={lineWeight} min={0} max={3} step={0.1} onChange={setLineWeight} format={(v) => v.toFixed(1)} />
+        <PSlider label="Min distance" value={minDistance} min={5} max={120} onChange={setMinDistance} />
+        <PSlider label="Max points" value={maxCount} min={20} max={600} step={10} onChange={setMaxCount} />
 
-        <div style={{ marginTop: 16, marginBottom: 14 }}>
-          <div style={{
-            fontSize: 10, fontWeight: 500, letterSpacing: '0.12em',
-            marginBottom: 6, fontFamily: BRAND.mono, textTransform: 'uppercase', color: BRAND.ink600
-          }}>SHAPE</div>
-          <div style={{ display: 'flex', gap: 3 }}>
-            {['Circle', 'Square'].map(s => (
-              <button key={s} onClick={() => setShape(s)} style={pillStyle(shape === s)}>{s}</button>
-            ))}
-          </div>
+        {/* LAYERS */}
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', margin: '18px 0 8px' }}>
+          <span style={{ fontFamily: BRAND.mono, fontSize: 9, letterSpacing: '0.14em', textTransform: 'uppercase', color: BRAND.ink600 }}>Layers · {layers.length}</span>
         </div>
-        <div style={{ marginBottom: 22 }}>
-          <div style={{
-            fontSize: 10, fontWeight: 500, letterSpacing: '0.12em',
-            marginBottom: 6, fontFamily: BRAND.mono, textTransform: 'uppercase', color: BRAND.ink600
-          }}>SURFACE</div>
-          <div style={{ display: 'flex', gap: 3 }}>
-            {['coal', 'bone', 'ink'].map(b => (
-              <button key={b} onClick={() => setBg(b)} style={pillStyle(bg === b)}>{b.toUpperCase()}</button>
-            ))}
-          </div>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 4, marginBottom: 10 }}>
+          {PG.EFFECT_KEYS.map((k) => (
+            <button key={k} onClick={() => addLayer(k)} title={`Add ${PG.EFFECTS[k].label}`}
+              style={{ ...pillStyle(false), padding: '7px 4px', fontSize: 9 }}>+ {PG.EFFECTS[k].label.split(' ')[0]}</button>
+          ))}
         </div>
-        <button onClick={download} style={{
-          width: '100%', padding: '13px', background: BRAND.ink, color: BRAND.bone00,
-          border: 'none', borderRadius: 0, fontSize: 11, fontWeight: 500,
-          cursor: 'pointer', fontFamily: BRAND.mono,
-          letterSpacing: '0.16em', textTransform: 'uppercase'
-        }}>DOWNLOAD PNG</button>
+
+        {displayLayers.map((l) => {
+          const isSel = l.id === selId;
+          return (
+            <div key={l.id} style={{ border: `1px solid ${isSel ? BRAND.ink : BRAND.ink100}`, marginBottom: 6, background: BRAND.paper }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '7px 8px' }}>
+                <input type="checkbox" checked={l.enabled} onChange={(e) => patchLayer(l.id, { enabled: e.target.checked })} />
+                <button onClick={() => setSelId(isSel ? null : l.id)} style={{ flex: 1, textAlign: 'left', background: 'none', border: 'none', cursor: 'pointer', fontSize: 12, fontWeight: 600, color: BRAND.ink, fontFamily: BRAND.display }}>{PG.EFFECTS[l.type].label}</button>
+                <button onClick={() => moveLayer(l.id, 1)} title="Up" style={miniBtn}>▲</button>
+                <button onClick={() => moveLayer(l.id, -1)} title="Down" style={miniBtn}>▼</button>
+                <button onClick={() => removeLayer(l.id)} title="Remove" style={{ ...miniBtn, color: BRAND.goldDeep }}>×</button>
+              </div>
+              {isSel && (
+                <div style={{ padding: '4px 10px 12px', borderTop: `1px solid ${BRAND.ink100}` }}>
+                  <div style={{ display: 'flex', gap: 8, alignItems: 'center', margin: '8px 0' }}>
+                    <span style={{ fontFamily: BRAND.mono, fontSize: 9, color: BRAND.ink600, width: 46 }}>OPACITY</span>
+                    <input type="range" min="0" max="100" value={Math.round(l.opacity * 100)} onChange={(e) => patchLayer(l.id, { opacity: +e.target.value / 100 })} style={{ flex: 1 }} />
+                  </div>
+                  <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8 }}>
+                    <span style={{ fontFamily: BRAND.mono, fontSize: 9, color: BRAND.ink600, width: 46 }}>BLEND</span>
+                    <select value={l.blend} onChange={(e) => patchLayer(l.id, { blend: e.target.value })} style={{ flex: 1, fontFamily: BRAND.mono, fontSize: 10, padding: '4px' }}>
+                      {PG.BLEND_MODES.map(([v, name]) => <option key={v} value={v}>{name}</option>)}
+                    </select>
+                  </div>
+                  {PG.PARAM_SCHEMA[l.type].map((c) => {
+                    const v = l.params[c.k];
+                    if (c.type === 'color') return (
+                      <label key={c.k} style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6, fontFamily: BRAND.mono, fontSize: 9.5, color: BRAND.ink600 }}>
+                        <input type="color" value={v} onChange={(e) => patchParam(l.id, c.k, e.target.value)} style={{ width: 30, height: 22, padding: 0, border: 'none', background: 'none' }} />
+                        {c.label}
+                      </label>
+                    );
+                    if (c.type === 'toggle') return (
+                      <label key={c.k} style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6, fontFamily: BRAND.mono, fontSize: 9.5, color: BRAND.ink600 }}>
+                        <input type="checkbox" checked={!!v} onChange={(e) => patchParam(l.id, c.k, e.target.checked)} /> {c.label}
+                      </label>
+                    );
+                    if (c.type === 'pills') return (
+                      <div key={c.k} style={{ marginBottom: 8 }}>
+                        <div style={{ fontFamily: BRAND.mono, fontSize: 9, color: BRAND.ink600, marginBottom: 4 }}>{c.label.toUpperCase()}</div>
+                        <div style={{ display: 'flex', gap: 3 }}>{c.options.map((o) => <button key={o} onClick={() => patchParam(l.id, c.k, o)} style={pillStyle(v === o)}>{o}</button>)}</div>
+                      </div>
+                    );
+                    return <PSlider key={c.k} label={c.label} value={v} min={c.min} max={c.max} step={c.step || 1} onChange={(nv) => patchParam(l.id, c.k, nv)} format={c.step < 1 ? (x) => x.toFixed(1) : undefined} />;
+                  })}
+                </div>
+              )}
+            </div>
+          );
+        })}
+
+        {/* OUTPUT */}
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6, marginTop: 18 }}>
+          <button onClick={download} style={{ padding: '13px', background: BRAND.ink, color: BRAND.bone00, border: 'none', cursor: 'pointer', fontSize: 10.5, fontWeight: 500, fontFamily: BRAND.mono, letterSpacing: '0.12em', textTransform: 'uppercase' }}>Download</button>
+          <button onClick={saveToLibrary} disabled={!img} style={{ padding: '13px', background: BRAND.gold, color: BRAND.coal, border: 'none', cursor: img ? 'pointer' : 'default', opacity: img ? 1 : 0.5, fontSize: 10.5, fontWeight: 600, fontFamily: BRAND.mono, letterSpacing: '0.12em', textTransform: 'uppercase' }}>Save to library</button>
+        </div>
+        {note && <div style={{ marginTop: 8, fontFamily: BRAND.mono, fontSize: 10, color: note.includes('✓') ? BRAND.goldDeep : '#b00', letterSpacing: '0.04em' }}>{note}</div>}
       </div>
     </div>
   );
 }
+
+const miniBtn = {
+  width: 20, height: 20, lineHeight: '18px', padding: 0, fontSize: 10, cursor: 'pointer',
+  background: 'transparent', border: `1px solid ${BRAND.ink100}`, color: BRAND.ink600, fontFamily: BRAND.mono,
+};
 
 const pillStyle = (active) => ({
   flex: 1, padding: '9px', fontSize: 10.5, fontWeight: 500,
