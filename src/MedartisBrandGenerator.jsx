@@ -6749,6 +6749,13 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
     lanyard,
     textOverflow,
     partners,
+    // The Group branding and the surface (flat colour vs gradient) are part of the
+    // asset's identity — a saved project that drops them reopens as a different
+    // design. The thumbnail is a live render so it LOOKS right; without these two
+    // the restored state does not match it. (Both are plain JSON: primitives, a
+    // coBrands map, and the gradient's hexes/stops.)
+    surface,
+    group,
     partnerLogos: partnerLogos.map(({ img, src, ...rest }) => ({
       ...rest,
       src: src && src.startsWith('data:') ? null : src,
@@ -6788,6 +6795,11 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
     // when nothing ever did — a migration that edits your work is not a migration.
     setTextOverflow(preset.textOverflow ?? 'allow');
     if (preset.partners) setPartners((p) => ({ ...p, ...preset.partners }));
+    // Merge over the defaults, so a preset saved before a field existed (e.g. an
+    // older gradient without `stops`, or group without `align`) still restores —
+    // it inherits today's defaults for anything it does not carry.
+    if (preset.surface) setSurface((v) => ({ ...v, ...preset.surface }));
+    if (preset.group) setGroup((g) => ({ ...g, ...preset.group }));
     if (Array.isArray(preset.partnerLogos)) {
       // Only the ones whose src survived (a library path, not a stripped data URL).
       const keep = preset.partnerLogos.filter((l) => l && l.src);
