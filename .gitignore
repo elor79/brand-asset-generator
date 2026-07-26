@@ -13,3 +13,6 @@ vite.config.js.timestamp-*.mjs
 # playwright artifacts
 test-results/
 playwright-report/
+
+# Claude Code local settings — machine/session-local, never committed
+.claude/settings.local.json
