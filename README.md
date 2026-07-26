@@ -28,6 +28,14 @@ npm start          # boots ComfyUI *and* the app
 The app opens automatically at http://localhost:5174 (Cadence owns 5173), and the AI backend on
 http://127.0.0.1:8188.
 
+## Requirements & models
+
+For hardware requirements, disk footprints, the local image models and their
+licences (Z-Image, SDXL/Juggernaut, FLUX, the ESRGAN upscale tail), and measured
+generation times, see the cross-app technical overview:
+[`../cadence/docs/TECH-OVERVIEW.md`](../cadence/docs/TECH-OVERVIEW.md). It covers
+all three apps in one page; this generator is the Medartis entry.
+
 `npm start` (or double-clicking **Start Medartis Asset Generator.command**) is
 the normal way in. It does not ship its own ComfyUI: if one is already answering
 on 8188 it **reuses** it, otherwise it looks in `$COMFY_HOME`, `./ComfyUI`, the
