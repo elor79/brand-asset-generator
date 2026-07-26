@@ -5176,21 +5176,22 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
   });
 
   const [savedLibrary, setSavedLibrary] = useState([]);
-  useEffect(() => {
-    (async () => {
-      try {
-        const legacy = localStorage.getItem(SAVED_LIB_KEY);
-        if (legacy) {
-          for (const e of JSON.parse(legacy)) await idbLib('readwrite', (st) => st.put({ savedAt: 0, ...e }));
-          localStorage.removeItem(SAVED_LIB_KEY);
-        }
-        const all = (await idbLib('readonly', (st) => st.getAll())) || [];
-        all.sort((a, b) => (b.savedAt || 0) - (a.savedAt || 0));
-        setSavedLibrary(all);
-      } catch { /* e.g. private browsing without IDB: the library is session-only */ }
-    })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  // Re-readable, so a write from ELSEWHERE (the § 99 playground writes to the same
+  // IndexedDB store) can be reflected here without a full reload — the playground is
+  // a separate view whose saves would otherwise leave this component's copy stale.
+  const reloadSavedLibrary = async () => {
+    try {
+      const legacy = localStorage.getItem(SAVED_LIB_KEY);
+      if (legacy) {
+        for (const e of JSON.parse(legacy)) await idbLib('readwrite', (st) => st.put({ savedAt: 0, ...e }));
+        localStorage.removeItem(SAVED_LIB_KEY);
+      }
+      const all = (await idbLib('readonly', (st) => st.getAll())) || [];
+      all.sort((a, b) => (b.savedAt || 0) - (a.savedAt || 0));
+      setSavedLibrary(all);
+    } catch { /* e.g. private browsing without IDB: the library is session-only */ }
+  };
+  useEffect(() => { reloadSavedLibrary(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, []);
   useEffect(() => {
     savedLibrary.forEach(asset => {
       if (libraryImages[asset.id]) return;
@@ -7221,7 +7222,7 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
   const template = TEMPLATES[templateKey];
 
   if (view === 'playground') {
-    return <PlaygroundView onBack={() => setView('templates')} />;
+    return <PlaygroundView onBack={() => setView('templates')} onSaved={reloadSavedLibrary} />;
   }
   if (view === 'projects') {
     return (
@@ -11160,7 +11161,7 @@ function ProjectCard({ name, preset, onPick, onDelete }) {
   );
 }
 
-function PlaygroundView({ onBack }) {
+function PlaygroundView({ onBack, onSaved }) {
   // The § 99 playground: a layer stack of luminance-driven effects over a source
   // image, with an add/remove brush that steers particle density by hand. The
   // canvas takes the LOADED IMAGE's proportions, so particles and the image base
@@ -11320,10 +11321,15 @@ function PlaygroundView({ onBack }) {
       off.width = Math.round(c.width * scale); off.height = Math.round(c.height * scale);
       const octx = off.getContext('2d'); octx.fillStyle = '#000'; octx.fillRect(0, 0, off.width, off.height);
       octx.drawImage(c, 0, 0, off.width, off.height);
-      const src = off.toDataURL('image/jpeg', 0.85);
+      // toDataURL throws if the canvas is tainted (a cross-origin source image
+      // without CORS). Try JPEG, then PNG, then surface the real reason.
+      let src;
+      try { src = off.toDataURL('image/jpeg', 0.85); }
+      catch { src = off.toDataURL('image/png'); }
       const id = 'saved-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 6);
       await pgIdb('readwrite', (st) => st.put({ id, label: 'Playground · ' + new Date().toLocaleDateString(), category: 'playground', src, sourceKey: `pg:${id}`, saved: true, savedAt: Date.now() }));
       await refreshLibrary();
+      onSaved?.();                       // refresh the MAIN library too
       setNote('Saved to library ✓'); setTimeout(() => setNote(''), 2200);
     } catch (e) { setNote('Save failed: ' + (e?.message || e)); setTimeout(() => setNote(''), 3500); }
   };
