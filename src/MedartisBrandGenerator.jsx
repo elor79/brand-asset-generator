@@ -4731,10 +4731,10 @@ function computeFolioBox(ctx, frame, pos, formatKey, safeArea, folioText) {
   let tw = 0;
   for (const ch of folioText) tw += ctx.measureText(ch).width + ls;
 
-  const top = sa.y + padY * 0.85;
-  const bottom = sa.y + sa.h - padY * 0.4;
-  const left = sa.x + padX * 0.6;
-  const right = sa.x + sa.w - padX * 0.6 - tw + ls;
+  const top = sa.y + padY * 0.95;
+  const bottom = sa.y + sa.h - padY * 0.7;
+  const left = sa.x + padX * 0.75;
+  const right = sa.x + sa.w - padX * 0.75 - tw + ls;
   let x, y;
   if (pos === 'tl') { x = left;  y = top; }
   if (pos === 'tr') { x = right; y = top; }
@@ -4768,6 +4768,7 @@ function brandBarClearance(ctx, frame, opts) {
   const wmBox  = computeWordmarkBox(frame, wmPos, opts.formatKey, opts.safeArea, opts.wordmarkPctOverride);
   const flBox  = computeFolioBox(ctx, frame, flPos, opts.formatKey, opts.safeArea, opts.folioText);
   const gap    = frame.padY * 0.5;
+  const folioGap = frame.padY * 1.0;   // the sender gets more room than other furniture
   const sa     = opts.safeArea || { x: 0, y: 0, w: frame.w, h: frame.h };
 
   // ABSOLUTE canvas Y, not a delta. Returning "distance from the safe-area top"
@@ -4791,8 +4792,8 @@ function brandBarClearance(ctx, frame, opts) {
     // line — which is precisely how "medartis.com" ended up sitting under the
     // subline instead of clear of it.
     const flTop = flBox.y - flBox.h;
-    if (flBox.pos === 'tl' || flBox.pos === 'tr') topY    = Math.max(topY,    flBox.y + gap);
-    if (flBox.pos === 'bl' || flBox.pos === 'br') bottomY = Math.min(bottomY, flTop - gap);
+    if (flBox.pos === 'tl' || flBox.pos === 'tr') topY    = Math.max(topY,    flBox.y + folioGap);
+    if (flBox.pos === 'bl' || flBox.pos === 'br') bottomY = Math.min(bottomY, flTop - folioGap);
   }
   // THE GROUP LOCKUP IS FURNITURE TOO.
   //
