@@ -11386,7 +11386,7 @@ function PlaygroundView({ onBack, onSaved }) {
           <>
             <div style={{ marginTop: 8 }}><PSlider label="Brush size" value={brushSize} min={10} max={300} step={5} onChange={setBrushSize} /></div>
             <button onClick={clearMask} style={{ ...pillStyle(false), width: '100%' }}>Clear brush mask</button>
-            <div style={{ fontFamily: BRAND.mono, fontSize: 8.5, color: BRAND.ink300, marginTop: 6, lineHeight: 1.5 }}>Paint on the canvas: ADD boosts particles, REMOVE clears them. Affects glow &amp; scatter layers.</div>
+            <div style={{ fontFamily: BRAND.mono, fontSize: 8.5, color: BRAND.ink300, marginTop: 6, lineHeight: 1.5 }}>Paint on the canvas. Each layer has a &lsquo;Respond to brush&rsquo; toggle: particles gain/lose density, other layers (incl. the photo) are erased/revealed.</div>
           </>
         )}
 
@@ -11419,6 +11419,10 @@ function PlaygroundView({ onBack, onSaved }) {
                     <span style={{ fontFamily: BRAND.mono, fontSize: 9, color: BRAND.ink600, width: 46 }}>OPACITY</span>
                     <input type="range" min="0" max="100" value={Math.round(l.opacity * 100)} onChange={(e) => patchLayer(l.id, { opacity: +e.target.value / 100 })} style={{ flex: 1 }} />
                   </div>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8, fontFamily: BRAND.mono, fontSize: 9.5, color: brush !== 'off' ? BRAND.ink : BRAND.ink600 }} title={PG.EFFECTS[l.type].maskMode === 'density' ? 'Brush adds/removes particle density here' : 'Brush erases/reveals this layer'}>
+                    <input type="checkbox" checked={!!l.brushed} onChange={(e) => patchLayer(l.id, { brushed: e.target.checked })} />
+                    Respond to brush {l.brushed && <span style={{ color: BRAND.goldDeep }}>· {PG.EFFECTS[l.type].maskMode === 'density' ? 'density' : 'erase'}</span>}
+                  </label>
                   {l.type !== 'source' && (
                     <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8 }}>
                       <span style={{ fontFamily: BRAND.mono, fontSize: 9, color: BRAND.ink600, width: 46 }}>BLEND</span>

@@ -60,5 +60,24 @@ for (const key of EFFECT_KEYS) {
 try { renderStack(ctx, EFFECT_KEYS.filter(k => k !== 'source').map(makeLayer), field, OW, OH, '#000'); ok('renderStack composites a mixed stack'); }
 catch (e) { bad(`renderStack threw ${e.message}`); }
 
+// per-layer brushing: density effects default brushed on, others off
+for (const k of EFFECT_KEYS) {
+  const l = makeLayer(k);
+  const want = EFFECTS[k].maskMode === 'density';
+  if (l.brushed !== want) bad(`${k}: makeLayer.brushed=${l.brushed}, expected ${want} (from maskMode ${EFFECTS[k].maskMode})`);
+}
+ok('makeLayer sets brushed per maskMode (particles on, others off)');
+
+// a mixed brushed stack, WITH a mask, composites without throwing (exercises both
+// the density read and the offscreen alpha-mask path)
+const maskGray = new Uint8ClampedArray(field.imageData.width * field.imageData.height * 4);
+for (let i = 0; i < maskGray.length; i += 4) { maskGray[i] = maskGray[i+1] = maskGray[i+2] = 128; maskGray[i+3] = 255; }
+const brushedField = { ...field, mask: { data: maskGray, width: field.imageData.width, height: field.imageData.height } };
+try {
+  const stack = ['glow', 'network', 'duotone', 'source'].map((k) => { const l = makeLayer(k); l.brushed = true; return l; });
+  renderStack(ctx, stack, brushedField, OW, OH, '#000');
+  ok('brushed stack composites both mask modes (density + alpha) without throwing');
+} catch (e) { bad(`brushed stack threw ${e.message}`); }
+
 console.log(fail ? `\n✗ ${fail} problem(s)` : '\n✓ placement, edges, mask, and every effect check out');
 process.exit(fail ? 1 : 0);

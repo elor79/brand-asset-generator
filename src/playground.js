@@ -295,7 +295,7 @@ export const EFFECT_KEYS = Object.keys(EFFECTS);
 let _seq = 0;
 export function makeLayer(type) {
   const e = EFFECTS[type];
-  return { id: `L${Date.now().toString(36)}${_seq++}`, type, enabled: true, opacity: 1, blend: e.blend || 'source-over', params: { ...e.defaults } };
+  return { id: `L${Date.now().toString(36)}${_seq++}`, type, enabled: true, opacity: 1, blend: e.blend || 'source-over', brushed: e.maskMode === 'density', params: { ...e.defaults } };
 }
 
 // Which derived data does a given stack need? (so the view computes only what's used)
@@ -319,13 +319,32 @@ export function renderStack(ctx, layers, field, W, H, bg) {
     if (!layer.enabled) continue;
     const e = EFFECTS[layer.type];
     if (!e) continue;
-    ctx.save();
-    ctx.globalCompositeOperation = layer.blend || 'source-over';
-    // Opacity is folded into the effect via params._alpha AND globalAlpha, so an
-    // additive-blend glow still dims correctly (globalAlpha alone interacts oddly
-    // with 'lighter' when the effect sets its own per-particle alpha).
-    e.draw(ctx, field, { ...layer.params, _alpha: layer.opacity }, W, H);
-    ctx.restore();
+    const useMask = !!(layer.brushed && field.mask);
+    if (useMask && e.maskMode === 'alpha') {
+      // Render the effect clean to an offscreen, erase it through the brush mask,
+      // then composite the stencilled result — so line/raster effects (and the
+      // source photo) obey the brush just like the particles do.
+      const off = document.createElement('canvas'); off.width = W; off.height = H;
+      const octx = off.getContext('2d');
+      e.draw(octx, { ...field, mask: null }, { ...layer.params, _alpha: 1 }, W, H);
+      octx.globalCompositeOperation = 'destination-in';
+      octx.imageSmoothingEnabled = true;
+      octx.drawImage(maskToAlpha(field.mask), 0, 0, W, H);
+      octx.globalCompositeOperation = 'source-over';
+      ctx.save();
+      ctx.globalCompositeOperation = layer.blend || 'source-over';
+      ctx.globalAlpha = layer.opacity;
+      ctx.drawImage(off, 0, 0);
+      ctx.restore();
+    } else {
+      // Density effects read the mask themselves; a non-brushed layer gets mask:null
+      // so it ignores the brush entirely.
+      const lf = useMask ? field : { ...field, mask: null };
+      ctx.save();
+      ctx.globalCompositeOperation = layer.blend || 'source-over';
+      e.draw(ctx, lf, { ...layer.params, _alpha: layer.opacity }, W, H);
+      ctx.restore();
+    }
   }
   ctx.globalCompositeOperation = 'source-over';
   ctx.globalAlpha = 1;
