@@ -9068,6 +9068,7 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
         {(() => null)()}
         <SideGroup n="4" label="Imagery" />
 
+        {(layoutKey === 'collage' || layoutKey === 'duo') && (
         <Section label={SEC('COLLAGE', 'COLLAGE IMAGES')} {...sp('COLLAGE')}>
           {(() => {
             const N = layoutKey === 'duo' ? 2 : collageCount;
@@ -9128,6 +9129,7 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
             );
           })()}
         </Section>
+        )}
 
         <Section label={SEC('IMAGE', `IMAGE${format.multi ? ` · SLIDE ${carouselSlide + 1}` : ''}`)} {...sp('IMAGE')}>
         {perSlideImageDisabled && (
