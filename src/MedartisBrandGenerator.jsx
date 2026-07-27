@@ -8439,62 +8439,6 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
         </Section>
 
         {/* Frosted-glass / solid backdrop behind text */}
-        <Section label={SEC('LOGOFILES', 'LOGO FILES')} {...sp('LOGOFILES')}>
-          {(() => {
-            const lab = { display: 'block', fontFamily: BRAND.mono, fontSize: 9, letterSpacing: '0.1em',
-                          textTransform: 'uppercase', color: BRAND.ink600, marginBottom: 4 };
-            const b = (active) => ({
-              padding: '9px 4px', cursor: logoBusy ? 'wait' : 'pointer', borderRadius: 0,
-              background: active ? BRAND.ink : BRAND.paper, color: active ? BRAND.bone00 : BRAND.ink600,
-              border: `1px solid ${active ? BRAND.ink : BRAND.ink100}`,
-              fontFamily: BRAND.mono, fontSize: 10, letterSpacing: '0.1em', textTransform: 'uppercase',
-            });
-            return (
-              <>
-                <label style={lab}>Colour</label>
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4, marginBottom: 10 }}>
-                  {Object.entries(LOGO_COLORS).map(([k, c]) => (
-                    <SidebarBtn key={k} active={logoColorKey === k} onClick={() => setLogoColorKey(k)} title={c.label}>
-                      {k === 'ink' ? 'Ink' : 'Bone'}
-                    </SidebarBtn>
-                  ))}
-                </div>
-                <SidebarBtn active={logoClearSpace} onClick={() => setLogoClearSpace((v) => !v)}>
-                  {logoClearSpace ? 'Clear space included' : 'Cropped tight to the glyphs'}
-                </SidebarBtn>
-                <div style={{ fontFamily: BRAND.mono, fontSize: 8.5, color: BRAND.ink300, lineHeight: 1.6,
-                              letterSpacing: '0.03em', margin: '6px 0 10px' }}>
-                  {logoClearSpace
-                    ? 'THE FILE CARRIES ITS OWN 1.5 × d MARGIN, SO PLACING IT EDGE-TO-EDGE IS CORRECT.'
-                    : '⚠ NO MARGIN IN THE FILE — WHOEVER PLACES IT MUST ADD 1.5 × d THEMSELVES.'}
-                </div>
-
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4, marginBottom: 12 }}>
-                  <button onClick={() => downloadLogo('svg')} disabled={logoBusy} style={b(false)}>↓ SVG</button>
-                  <button onClick={() => downloadLogo('pdf')} disabled={logoBusy} style={b(false)}>↓ PDF</button>
-                </div>
-
-                <div style={{ borderTop: `1px solid ${BRAND.ink100}`, paddingTop: 10 }}>
-                  <label style={lab}>Brand kit · one zip for an agency</label>
-                  <label style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8, fontSize: 11, color: BRAND.ink600 }}>
-                    <input type="checkbox" checked={kitPdfs} onChange={(e) => setKitPdfs(e.target.checked)} />
-                    Include print PDFs (slower)
-                  </label>
-                  <button onClick={downloadBrandKit} disabled={!!kitProgress} style={{ ...b(true), width: '100%' }}>
-                    {kitProgress ? `Building… ${kitProgress.done}/${kitProgress.total}` : '↓ Brand kit (.zip)'}
-                  </button>
-                  <div style={{ fontFamily: BRAND.mono, fontSize: 8.5, color: BRAND.ink300, lineHeight: 1.6,
-                                letterSpacing: '0.03em', marginTop: 8 }}>
-                    EVERY COLOUR × FORMAT, THE PALETTE, AND A README ANSWERING WHAT AN AGENCY WOULD
-                    OTHERWISE EMAIL YOU A WEEK BEFORE PRINT. THE WORDMARK IS OUTLINES, NOT LIVE TEXT —
-                    IT CANNOT FALL BACK TO THE WRONG TYPEFACE ON A MACHINE WITHOUT INTER.
-                  </div>
-                </div>
-              </>
-            );
-          })()}
-        </Section>
-
         <Section label={SEC('GROUP', 'MEDARTIS GROUP')} {...sp('GROUP')}>
           {(() => {
             const set = (patch) => setGroup((g) => ({ ...g, ...patch }));
@@ -9692,6 +9636,62 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
             </label>
           </div>
         </Section>
+
+        <Section label={SEC('LOGOFILES', 'LOGO FILES')} {...sp('LOGOFILES')}>
+          {(() => {
+            const lab = { display: 'block', fontFamily: BRAND.mono, fontSize: 9, letterSpacing: '0.1em',
+                          textTransform: 'uppercase', color: BRAND.ink600, marginBottom: 4 };
+            const b = (active) => ({
+              padding: '9px 4px', cursor: logoBusy ? 'wait' : 'pointer', borderRadius: 0,
+              background: active ? BRAND.ink : BRAND.paper, color: active ? BRAND.bone00 : BRAND.ink600,
+              border: `1px solid ${active ? BRAND.ink : BRAND.ink100}`,
+              fontFamily: BRAND.mono, fontSize: 10, letterSpacing: '0.1em', textTransform: 'uppercase',
+            });
+            return (
+              <>
+                <label style={lab}>Colour</label>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4, marginBottom: 10 }}>
+                  {Object.entries(LOGO_COLORS).map(([k, c]) => (
+                    <SidebarBtn key={k} active={logoColorKey === k} onClick={() => setLogoColorKey(k)} title={c.label}>
+                      {k === 'ink' ? 'Ink' : 'Bone'}
+                    </SidebarBtn>
+                  ))}
+                </div>
+                <SidebarBtn active={logoClearSpace} onClick={() => setLogoClearSpace((v) => !v)}>
+                  {logoClearSpace ? 'Clear space included' : 'Cropped tight to the glyphs'}
+                </SidebarBtn>
+                <div style={{ fontFamily: BRAND.mono, fontSize: 8.5, color: BRAND.ink300, lineHeight: 1.6,
+                              letterSpacing: '0.03em', margin: '6px 0 10px' }}>
+                  {logoClearSpace
+                    ? 'THE FILE CARRIES ITS OWN 1.5 × d MARGIN, SO PLACING IT EDGE-TO-EDGE IS CORRECT.'
+                    : '⚠ NO MARGIN IN THE FILE — WHOEVER PLACES IT MUST ADD 1.5 × d THEMSELVES.'}
+                </div>
+
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4, marginBottom: 12 }}>
+                  <button onClick={() => downloadLogo('svg')} disabled={logoBusy} style={b(false)}>↓ SVG</button>
+                  <button onClick={() => downloadLogo('pdf')} disabled={logoBusy} style={b(false)}>↓ PDF</button>
+                </div>
+
+                <div style={{ borderTop: `1px solid ${BRAND.ink100}`, paddingTop: 10 }}>
+                  <label style={lab}>Brand kit · one zip for an agency</label>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8, fontSize: 11, color: BRAND.ink600 }}>
+                    <input type="checkbox" checked={kitPdfs} onChange={(e) => setKitPdfs(e.target.checked)} />
+                    Include print PDFs (slower)
+                  </label>
+                  <button onClick={downloadBrandKit} disabled={!!kitProgress} style={{ ...b(true), width: '100%' }}>
+                    {kitProgress ? `Building… ${kitProgress.done}/${kitProgress.total}` : '↓ Brand kit (.zip)'}
+                  </button>
+                  <div style={{ fontFamily: BRAND.mono, fontSize: 8.5, color: BRAND.ink300, lineHeight: 1.6,
+                                letterSpacing: '0.03em', marginTop: 8 }}>
+                    EVERY COLOUR × FORMAT, THE PALETTE, AND A README ANSWERING WHAT AN AGENCY WOULD
+                    OTHERWISE EMAIL YOU A WEEK BEFORE PRINT. THE WORDMARK IS OUTLINES, NOT LIVE TEXT —
+                    IT CANNOT FALL BACK TO THE WRONG TYPEFACE ON A MACHINE WITHOUT INTER.
+                  </div>
+                </div>
+              </>
+            );
+          })()}
+        </Section>
       </div>
     </div>
   );
@@ -9735,11 +9735,11 @@ const SECTION_ORDER = [
   // 2 · Story — TEMPLATE and BROCHURE are alternates; exactly one is ever visible
   'TEMPLATE', 'BROCHURE',
   // 3 · Brand system
-  'LANYARD', 'SURFACE', 'BRANDBAR', 'LOGOFILES', 'GROUP', 'PARTNERS', 'TEXTBG', 'QR', 'CAROUSEL', 'CAROUSEL_BG', 'CONTENT',
+  'LANYARD', 'SURFACE', 'BRANDBAR', 'GROUP', 'PARTNERS', 'TEXTBG', 'QR', 'CAROUSEL', 'CAROUSEL_BG', 'CONTENT',
   // 4 · Imagery
   'COLLAGE', 'IMAGE', 'GENERATE', 'CANTO', 'IMAGEFIT',
   // 5 · Output
-  'CHECK', 'EXPORT', 'PRESETS',
+  'CHECK', 'EXPORT', 'PRESETS', 'LOGOFILES',
 ];
 
 /** Which sections exist for the current canvas? The numbering follows from this. */
