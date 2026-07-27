@@ -4947,21 +4947,29 @@ export default function MedartisBrandGenerator() {
   // Collage: up to 9 independent cells, each its own image + fit. Duo reads cells
   // 0 and 1, so it can finally show two different pictures.
   const [collageCount, setCollageCount] = useState(4);
-  const [collageCells, setCollageCells] = useState([]);   // [{ img, fit, src }]
-  const [collageLibFor, setCollageLibFor] = useState(null); // which cell's library picker is open
-  const setCell = (i, patch) => setCollageCells((cs) => {
-    const n = cs.slice(); n[i] = { fit: { ...DEFAULT_FIT }, ...(n[i] || {}), ...patch }; return n;
+  // Collage cells are keyed BY SLIDE/PAGE, exactly like carouselImages/pageImages —
+  // so slide 2's images are slide 2's, and editing one slide never touches another.
+  // The active key is computed each render (see activeCollageKey below); setters take
+  // it explicitly so their closures never capture a stale slide.
+  const [collageByKey, setCollageByKey] = useState({});   // { slideKey: [{ img, fit, src }] }
+  const [collageLibFor, setCollageLibFor] = useState(null);
+  const setCellIn = (key, i, patch) => setCollageByKey((m) => {
+    const cells = (m[key] || []).slice();
+    cells[i] = { fit: { ...DEFAULT_FIT }, ...(cells[i] || {}), ...patch };
+    return { ...m, [key]: cells };
   });
-  const setCellFit = (i, patch) => setCollageCells((cs) => {
-    const n = cs.slice(); const cur = n[i] || { fit: { ...DEFAULT_FIT } };
-    n[i] = { ...cur, fit: { ...DEFAULT_FIT, ...(cur.fit || {}), ...patch } }; return n;
+  const setCellFitIn = (key, i, patch) => setCollageByKey((m) => {
+    const cells = (m[key] || []).slice();
+    const cur = cells[i] || { fit: { ...DEFAULT_FIT } };
+    cells[i] = { ...cur, fit: { ...DEFAULT_FIT, ...(cur.fit || {}), ...patch } };
+    return { ...m, [key]: cells };
   });
-  const loadCellImage = (i, src) => {
+  const loadCellImageIn = (key, i, src) => {
     const im = new Image(); im.crossOrigin = 'anonymous';
-    im.onload = () => setCell(i, { img: im, src });
+    im.onload = () => setCellIn(key, i, { img: im, src });
     im.src = src;
   };
-  const clearCell = (i) => setCell(i, { img: null, src: null });
+  const clearCellIn = (key, i) => setCellIn(key, i, { img: null, src: null });
   const [carouselFits, setCarouselFits] = useState([{...DEFAULT_FIT}, {...DEFAULT_FIT}, {...DEFAULT_FIT}]);
 
   useEffect(() => {
@@ -5722,6 +5730,10 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
                       : pages ? (pageImages[curPage] || image) : (format.multi ? carouselImages[carouselSlide]   : image);
   const activeFit     = isBrochure ? (brochurePage?.fit || DEFAULT_FIT)
                       : pages ? (pageFits[curPage] || DEFAULT_FIT) : (format.multi ? (carouselFits[carouselSlide] || DEFAULT_FIT) : imageFit);
+  // The collage cells for THIS slide/page (same isolation as the image above).
+  const activeCollageKey = isBrochure ? `b:${brochurePage?.id ?? 0}`
+                      : pages ? `p:${curPage}` : (format.multi ? `c:${carouselSlide}` : 'single');
+  const activeCollage = collageByKey[activeCollageKey] || [];
   // Per-slide image picker is redundant when a spanning bg is covering the image area
   const perSlideImageDisabled = format.multi
     && carouselBg.enabled
@@ -5982,8 +5994,8 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
       // one. No new field — a layout that demands its own content model is a
       // layout nobody reaches for.
       duoImage: format.multi ? (carouselImages[(carouselSlide + 1) % carouselSlides] || null) : null,
-      collage: collageCells, collageCount,
-      collage: collageCells, collageCount,
+      collage: activeCollage, collageCount,
+      collage: activeCollage, collageCount,
         wordmarkPos,
         folioPos: slideShowsFolio ? folioPos : 'hidden',
         formatKey,
@@ -6026,7 +6038,7 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
         ctx.fill();
       }
     }
-  }, [format, layoutKey, activeContent, activeImage, activeFit, palette, carouselSlides, carouselSlide, wordmarkPos, folioPos, formatKey, wordmarkOverImage, folioOverImage, wordmarkColor, folioColor, folioText, qrConfig, qrImage, carouselBg, carouselBgImage, carouselQrPer, carouselFolioPer, textBackdrop, wordmarkPctOverride, wmReady, logoPlate, accentColor, isBrochure, brochurePage, brochureImgs, brochureTitle, curBrochure, partnerLogos, partners, lanyard, textOverflow, surface, group, collageCells, collageCount]);
+  }, [format, layoutKey, activeContent, activeImage, activeFit, palette, carouselSlides, carouselSlide, wordmarkPos, folioPos, formatKey, wordmarkOverImage, folioOverImage, wordmarkColor, folioColor, folioText, qrConfig, qrImage, carouselBg, carouselBgImage, carouselQrPer, carouselFolioPer, textBackdrop, wordmarkPctOverride, wmReady, logoPlate, accentColor, isBrochure, brochurePage, brochureImgs, brochureTitle, curBrochure, partnerLogos, partners, lanyard, textOverflow, surface, group, collageByKey, activeCollageKey, collageCount]);
 
   useEffect(() => { draw(); }, [draw]);
 
@@ -6851,7 +6863,9 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
     collageCount,
     // Cells keep their source (a data URL or library path) + fit — never the live
     // Image object, which does not serialise.
-    collage: collageCells.map((c) => (c ? { src: c.src || null, fit: c.fit || null } : null)),
+    // Per slide/page: { key: [{ src, fit }] }. Live Image objects are dropped.
+    collageByKey: Object.fromEntries(Object.entries(collageByKey).map(([k, cells]) =>
+      [k, (cells || []).map((c) => (c ? { src: c.src || null, fit: c.fit || null } : null))])),
     partnerLogos: partnerLogos.map(({ img, src, ...rest }) => ({
       ...rest,
       src: src && src.startsWith('data:') ? null : src,
@@ -6897,13 +6911,19 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
     if (preset.surface) setSurface((v) => ({ ...v, ...preset.surface }));
     if (preset.group) setGroup((g) => ({ ...g, ...preset.group }));
     if (typeof preset.collageCount === 'number') setCollageCount(preset.collageCount);
-    if (Array.isArray(preset.collage)) {
-      // Rebuild cells with their fit, then load each image from its stored src.
-      const cells = preset.collage.map((c) => (c ? { src: c.src || null, fit: c.fit || { ...DEFAULT_FIT }, img: null } : null));
-      setCollageCells(cells);
-      cells.forEach((c, i) => {
-        if (c && c.src) { const im = new Image(); im.crossOrigin = 'anonymous'; im.onload = () => setCell(i, { img: im }); im.src = c.src; }
-      });
+    // Accept the keyed map (current) or an old flat array (legacy 'single' slide).
+    const km = preset.collageByKey || (Array.isArray(preset.collage) ? { single: preset.collage } : null);
+    if (km) {
+      const rebuilt = {};
+      for (const [k, cells] of Object.entries(km)) {
+        rebuilt[k] = (cells || []).map((c) => (c ? { src: c.src || null, fit: c.fit || { ...DEFAULT_FIT }, img: null } : null));
+      }
+      setCollageByKey(rebuilt);
+      for (const [k, cells] of Object.entries(rebuilt)) {
+        cells.forEach((c, i) => {
+          if (c && c.src) { const im = new Image(); im.crossOrigin = 'anonymous'; im.onload = () => setCellIn(k, i, { img: im }); im.src = c.src; }
+        });
+      }
     }
     if (Array.isArray(preset.partnerLogos)) {
       // Only the ones whose src survived (a library path, not a stripped data URL).
@@ -9070,35 +9090,35 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
                   <div style={{ fontFamily: BRAND.mono, fontSize: 8.5, color: BRAND.ink300, marginBottom: 10 }}>Two panels, side by side. Load a different image into each.</div>
                 )}
                 {Array.from({ length: N }).map((_, i) => {
-                  const c = collageCells[i] || {};
+                  const c = activeCollage[i] || {};
                   return (
                     <div key={i} style={{ border: `1px solid ${BRAND.ink100}`, marginBottom: 8, padding: '8px 10px', background: BRAND.paper }}>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
                         <div style={{ width: 34, height: 34, flexShrink: 0, border: `1px solid ${BRAND.ink100}`, background: c.src ? `#000 center/cover url(${c.src})` : BRAND.bone }} />
                         <span style={{ fontFamily: BRAND.mono, fontSize: 10, color: BRAND.ink600, flex: 1, letterSpacing: '0.08em' }}>CELL {i + 1}{c.img ? '' : ' · empty'}</span>
-                        {c.img && <button onClick={() => clearCell(i)} title="Clear" style={miniBtn}>×</button>}
+                        {c.img && <button onClick={() => clearCellIn(activeCollageKey, i)} title="Clear" style={miniBtn}>×</button>}
                       </div>
                       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4 }}>
                         <label style={{ ...pillStyle(false), textAlign: 'center', cursor: 'pointer' }}>
                           Upload
                           <input type="file" accept="image/*,.psd,.psb" style={{ display: 'none' }}
-                            onChange={async (e) => { const f = e.target.files?.[0]; if (f) { try { loadCellImage(i, await fileToImageDataUrl(f)); } catch (err) { alert('Could not load: ' + err.message); } } e.target.value = ''; }} />
+                            onChange={async (e) => { const f = e.target.files?.[0]; if (f) { try { loadCellImageIn(activeCollageKey, i, await fileToImageDataUrl(f)); } catch (err) { alert('Could not load: ' + err.message); } } e.target.value = ''; }} />
                         </label>
                         <button onClick={() => setCollageLibFor(collageLibFor === i ? null : i)} style={pillStyle(collageLibFor === i)}>Library</button>
                       </div>
                       {collageLibFor === i && (
                         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 3, marginTop: 6, maxHeight: 132, overflowY: 'auto' }}>
                           {[...LIBRARY, ...savedLibrary].map((a) => (
-                            <button key={a.id} title={a.label} onClick={() => { loadCellImage(i, a.src); setCollageLibFor(null); }}
+                            <button key={a.id} title={a.label} onClick={() => { loadCellImageIn(activeCollageKey, i, a.src); setCollageLibFor(null); }}
                               style={{ padding: 0, height: 36, border: `1px solid ${BRAND.ink100}`, background: `#000 center/cover url(${a.src})`, cursor: 'pointer' }} />
                           ))}
                         </div>
                       )}
                       {c.img && (
                         <div style={{ marginTop: 8 }}>
-                          <FitSlider label="Scale" value={(c.fit || DEFAULT_FIT).scale} min={0.5} max={4} step={0.05} onChange={(v) => setCellFit(i, { scale: v })} format={(v) => v.toFixed(2) + '×'} />
-                          <FitSlider label="Focus X" value={(c.fit || DEFAULT_FIT).focalX} min={0} max={1} step={0.02} onChange={(v) => setCellFit(i, { focalX: v })} format={(v) => (v * 100).toFixed(0) + '%'} />
-                          <FitSlider label="Focus Y" value={(c.fit || DEFAULT_FIT).focalY} min={0} max={1} step={0.02} onChange={(v) => setCellFit(i, { focalY: v })} format={(v) => (v * 100).toFixed(0) + '%'} />
+                          <FitSlider label="Scale" value={(c.fit || DEFAULT_FIT).scale} min={0.5} max={4} step={0.05} onChange={(v) => setCellFitIn(activeCollageKey, i, { scale: v })} format={(v) => v.toFixed(2) + '×'} />
+                          <FitSlider label="Focus X" value={(c.fit || DEFAULT_FIT).focalX} min={0} max={1} step={0.02} onChange={(v) => setCellFitIn(activeCollageKey, i, { focalX: v })} format={(v) => (v * 100).toFixed(0) + '%'} />
+                          <FitSlider label="Focus Y" value={(c.fit || DEFAULT_FIT).focalY} min={0} max={1} step={0.02} onChange={(v) => setCellFitIn(activeCollageKey, i, { focalY: v })} format={(v) => (v * 100).toFixed(0) + '%'} />
                         </div>
                       )}
                     </div>
