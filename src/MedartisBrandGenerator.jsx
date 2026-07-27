@@ -18,6 +18,7 @@ import {
 } from './customFormats';
 import { makeZip } from './zip';
 import * as PG from './playground';
+import { collageGrid, COLLAGE_COUNTS } from './collage';
 import {
   DEFAULT_GRADIENT, ANGLE_PRESETS, axisFor, tAt, gradientStops, colorAt,
   applyCanvasGradient, gradientToSvgDefs, describeGradient,
@@ -451,6 +452,7 @@ const LAYOUTS = {
   'table':        { label: 'Table · agenda & facts', draw: (ctx, frame, content, image, opts) => drawTable(ctx, frame, content, image, opts) },
   'stat':         { label: 'Statistic · one number', draw: (ctx, frame, content, image, opts) => drawStat(ctx, frame, content, image, opts) },
   'duo':          { label: 'Duo · two images compared', draw: (ctx, frame, content, image, opts) => drawDuo(ctx, frame, content, image, opts) },
+  'collage':      { label: 'Collage · grid of images', draw: (ctx, frame, content, image, opts) => drawCollage(ctx, frame, content, image, opts) },
   'lanyard':      { label: 'Lanyard · repeating mark', draw: (ctx, frame, content, image, opts) => drawLanyardStrip(ctx, frame, content, image, opts) },
 };
 
@@ -497,7 +499,7 @@ registerCustomFormats();
 // The order IS the menu. Image-led first (the common case), then the composed
 // ones, then type-only — which is the right answer more often than its position
 // suggests, but should not be the first thing offered.
-const ALL_LAYOUTS = ['image-bottom', 'image-top', 'overlay', 'split-right', 'split-left', 'duo', 'stat', 'table', 'type-only'];
+const ALL_LAYOUTS = ['image-bottom', 'image-top', 'overlay', 'split-right', 'split-left', 'duo', 'collage', 'stat', 'table', 'type-only'];
 // What a format can HOLD, not what we happen to have written. A 4:1 banner has no
 // room for a stat's figure or a table's rows — offering them would be offering a
 // broken result. A strap has exactly one layout, and that is not a limitation.
@@ -3277,13 +3279,18 @@ function drawDuo(ctx, frame, content, image, opts) {
   const cellH = Math.max(40, bottom - y - capH - ctaH);
 
   // The second picture: slide 2's image, or this one again.
-  const imgB = (opts.duoImage ?? image) || image;
+  // Cell A/B come from the collage store first (two DIFFERENT pictures), then the
+  // next carousel slide, then this image. Each keeps its own fit.
+  const cA = opts.collage?.[0], cB = opts.collage?.[1];
+  const imgA = (cA?.img) || image;
+  const imgB = (cB?.img) || (opts.duoImage ?? image) || image;
+  const fitA = cA?.fit || fit, fitB = cB?.fit || fit;
   const cells = [
-    { x, img: image, cap: capLines[0] },
-    { x: x + cellW + gutter, img: imgB, cap: capLines[1] },
+    { x, img: imgA, fit: fitA, cap: capLines[0] },
+    { x: x + cellW + gutter, img: imgB, fit: fitB, cap: capLines[1] },
   ];
   for (const c of cells) {
-    if (c.img) drawImageFit(ctx, c.img, c.x, y, cellW, cellH, fit, palette.bg);
+    if (c.img) drawImageFit(ctx, c.img, c.x, y, cellW, cellH, c.fit, palette.bg);
     else {
       ctx.fillStyle = palette.mode === 'dark' ? BRAND.coal800 : BRAND.bone;
       ctx.fillRect(c.x, y, cellW, cellH);
@@ -3311,6 +3318,69 @@ function drawDuo(ctx, frame, content, image, opts) {
   drawPartnerLogos(ctx, frame, opts.partners, palette);
   drawGroupLockup(ctx, frame, opts.group, palette, opts.surface);
 }
+
+// ═══ LAYOUT · COLLAGE ═════════════════════════════════════════════════
+// A grid of 1–9 images, each its own picture and its own fit. Duo is the 2-cell
+// case; beyond that it is a composition. The grid geometry is pure (collage.js);
+// this only fills the rects and lays the brand furniture on top.
+function drawCollage(ctx, frame, content, image, opts) {
+  const { w, h, padX, padY } = frame;
+  const { palette, accent, fit } = opts;
+  const bleed = frame.bleedPx || 0;
+
+  paintSurface(ctx, frame, palette, opts.surface);
+
+  const safeArea = { x: 0, y: 0, w, h };
+  const clearance = brandBarClearance(ctx, frame, { ...opts, safeArea });
+  const ts = computeTypeScale(frame);
+  const ink = palette.ink;
+
+  let y = Math.max(padY * 1.2, clearance.topY);
+  const x = padX, tw = w - padX * 2;
+
+  if (content.eyebrow) {
+    const r = drawTrackedFit(ctx, content.eyebrow.toUpperCase(), x, y + ts.eyebrowSize,
+      tw, ts.eyebrowSize, 500, BRAND.mono, 0.14, accent);
+    y += ts.eyebrowSize * 2.2 + r.extra;
+  }
+  if (content.headline) {
+    const size = fitFont(ctx, content.headline.split('\n')[0], tw, ts.headlineMax * 0.62, ts.headlineMin, 700);
+    ctx.font = `700 ${size}px ${BRAND.display}`;
+    ctx.fillStyle = ink;
+    for (const line of wrapText(ctx, content.headline, tw)) { ctx.fillText(line, x, y + size); y += size * 1.14; }
+    y += size * 0.4;
+  }
+
+  const gutter = w * 0.02;
+  const bottom = Math.min(h - padY, clearance.bottomY);
+  const gridH = Math.max(40, bottom - y);
+  const cells = opts.collage || [];
+  const count = Math.max(1, Math.min(9, opts.collageCount || 2));
+  const rects = collageGrid(count, tw, gridH, gutter);
+  for (let i = 0; i < rects.length; i++) {
+    const r = rects[i], cell = cells[i];
+    const cx = x + r.x, cy = y + r.y;
+    if (cell && cell.img) {
+      drawImageFit(ctx, cell.img, cx, cy, r.w, r.h, cell.fit || DEFAULT_FIT, palette.bg);
+    } else {
+      // Empty cell: a quiet placeholder with its number, so it reads as "drop an
+      // image here" rather than a rendering gap.
+      ctx.fillStyle = palette.mode === 'dark' ? BRAND.coal800 : BRAND.bone;
+      ctx.fillRect(cx, cy, r.w, r.h);
+      ctx.fillStyle = palette.mode === 'dark' ? BRAND.ink600 : BRAND.ink300;
+      ctx.font = `600 ${Math.max(12, Math.min(r.w, r.h) * 0.18)}px ${BRAND.mono}`;
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText(String(i + 1), cx + r.w / 2, cy + r.h / 2);
+      ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+    }
+  }
+
+  if (!opts.skipOverlays) drawBrandBar(ctx, frame, palette, accent, false, { ...opts, safeArea });
+  if (!opts.skipOverlays) drawQrOverlay(ctx, frame, opts.qr, opts.qrImage, palette);
+  drawPartnerLogos(ctx, frame, opts.partners, palette);
+  drawGroupLockup(ctx, frame, opts.group, palette, opts.surface);
+}
+
 
 // ═══ LANYARD ═════════════════════════════════════════════════════════
 // A congress lanyard is printed FLAT and then folded into a neck loop, so the
@@ -4874,6 +4944,24 @@ export default function MedartisBrandGenerator() {
   const [image, setImage] = useState(null);
   const [carouselImages, setCarouselImages] = useState([null, null, null]);
   const [imageFit, setImageFit] = useState({ ...DEFAULT_FIT });
+  // Collage: up to 9 independent cells, each its own image + fit. Duo reads cells
+  // 0 and 1, so it can finally show two different pictures.
+  const [collageCount, setCollageCount] = useState(4);
+  const [collageCells, setCollageCells] = useState([]);   // [{ img, fit, src }]
+  const [collageLibFor, setCollageLibFor] = useState(null); // which cell's library picker is open
+  const setCell = (i, patch) => setCollageCells((cs) => {
+    const n = cs.slice(); n[i] = { fit: { ...DEFAULT_FIT }, ...(n[i] || {}), ...patch }; return n;
+  });
+  const setCellFit = (i, patch) => setCollageCells((cs) => {
+    const n = cs.slice(); const cur = n[i] || { fit: { ...DEFAULT_FIT } };
+    n[i] = { ...cur, fit: { ...DEFAULT_FIT, ...(cur.fit || {}), ...patch } }; return n;
+  });
+  const loadCellImage = (i, src) => {
+    const im = new Image(); im.crossOrigin = 'anonymous';
+    im.onload = () => setCell(i, { img: im, src });
+    im.src = src;
+  };
+  const clearCell = (i) => setCell(i, { img: null, src: null });
   const [carouselFits, setCarouselFits] = useState([{...DEFAULT_FIT}, {...DEFAULT_FIT}, {...DEFAULT_FIT}]);
 
   useEffect(() => {
@@ -5470,8 +5558,8 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
   // down the component. Putting it up with the other sidebar plumbing threw
   // "can't access 'isBrochure' before initialization" on the first paint.
   const secNo = useMemo(
-    () => sectionNumbers(visibleSections({ isBrochure, isCarousel: !!format.multi, isLanyard })),
-    [isBrochure, format.multi, isLanyard]
+    () => sectionNumbers(visibleSections({ isBrochure, isCarousel: !!format.multi, isLanyard, isCollage: layoutKey === 'collage' || layoutKey === 'duo' })),
+    [isBrochure, format.multi, isLanyard, layoutKey]
   );
   /** "§ 07 — CANTO DAM" — never typed by hand, never counts a panel you can't see. */
   const SEC = (key, label) => `§ ${secNo[key] || '--'} — ${label}`;
@@ -5894,6 +5982,8 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
       // one. No new field — a layout that demands its own content model is a
       // layout nobody reaches for.
       duoImage: format.multi ? (carouselImages[(carouselSlide + 1) % carouselSlides] || null) : null,
+      collage: collageCells, collageCount,
+      collage: collageCells, collageCount,
         wordmarkPos,
         folioPos: slideShowsFolio ? folioPos : 'hidden',
         formatKey,
@@ -5936,7 +6026,7 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
         ctx.fill();
       }
     }
-  }, [format, layoutKey, activeContent, activeImage, activeFit, palette, carouselSlides, carouselSlide, wordmarkPos, folioPos, formatKey, wordmarkOverImage, folioOverImage, wordmarkColor, folioColor, folioText, qrConfig, qrImage, carouselBg, carouselBgImage, carouselQrPer, carouselFolioPer, textBackdrop, wordmarkPctOverride, wmReady, logoPlate, accentColor, isBrochure, brochurePage, brochureImgs, brochureTitle, curBrochure, partnerLogos, partners, lanyard, textOverflow, surface, group]);
+  }, [format, layoutKey, activeContent, activeImage, activeFit, palette, carouselSlides, carouselSlide, wordmarkPos, folioPos, formatKey, wordmarkOverImage, folioOverImage, wordmarkColor, folioColor, folioText, qrConfig, qrImage, carouselBg, carouselBgImage, carouselQrPer, carouselFolioPer, textBackdrop, wordmarkPctOverride, wmReady, logoPlate, accentColor, isBrochure, brochurePage, brochureImgs, brochureTitle, curBrochure, partnerLogos, partners, lanyard, textOverflow, surface, group, collageCells, collageCount]);
 
   useEffect(() => { draw(); }, [draw]);
 
@@ -6758,6 +6848,10 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
     // coBrands map, and the gradient's hexes/stops.)
     surface,
     group,
+    collageCount,
+    // Cells keep their source (a data URL or library path) + fit — never the live
+    // Image object, which does not serialise.
+    collage: collageCells.map((c) => (c ? { src: c.src || null, fit: c.fit || null } : null)),
     partnerLogos: partnerLogos.map(({ img, src, ...rest }) => ({
       ...rest,
       src: src && src.startsWith('data:') ? null : src,
@@ -6802,6 +6896,15 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
     // it inherits today's defaults for anything it does not carry.
     if (preset.surface) setSurface((v) => ({ ...v, ...preset.surface }));
     if (preset.group) setGroup((g) => ({ ...g, ...preset.group }));
+    if (typeof preset.collageCount === 'number') setCollageCount(preset.collageCount);
+    if (Array.isArray(preset.collage)) {
+      // Rebuild cells with their fit, then load each image from its stored src.
+      const cells = preset.collage.map((c) => (c ? { src: c.src || null, fit: c.fit || { ...DEFAULT_FIT }, img: null } : null));
+      setCollageCells(cells);
+      cells.forEach((c, i) => {
+        if (c && c.src) { const im = new Image(); im.crossOrigin = 'anonymous'; im.onload = () => setCell(i, { img: im }); im.src = c.src; }
+      });
+    }
     if (Array.isArray(preset.partnerLogos)) {
       // Only the ones whose src survived (a library path, not a stripped data URL).
       const keep = preset.partnerLogos.filter((l) => l && l.src);
@@ -8945,6 +9048,67 @@ const COLLAPSE_KEY = 'medartis-bag-collapsed-v4';
         {(() => null)()}
         <SideGroup n="4" label="Imagery" />
 
+        <Section label={SEC('COLLAGE', 'COLLAGE IMAGES')} {...sp('COLLAGE')}>
+          {(() => {
+            const N = layoutKey === 'duo' ? 2 : collageCount;
+            const clab = { display: 'block', fontFamily: BRAND.mono, fontSize: 9, letterSpacing: '0.12em', textTransform: 'uppercase', color: BRAND.ink600, marginBottom: 6 };
+            return (
+              <>
+                {layoutKey === 'collage' && (
+                  <>
+                    <label style={clab}>How many images</label>
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 4, marginBottom: 6 }}>
+                      {COLLAGE_COUNTS.map((c) => (
+                        <button key={c} onClick={() => setCollageCount(c)} style={pillStyle(collageCount === c)}>{c}</button>
+                      ))}
+                    </div>
+                    <input type="range" min="2" max="9" value={collageCount} onChange={(e) => setCollageCount(+e.target.value)} style={{ width: '100%', marginBottom: 4 }} />
+                    <div style={{ fontFamily: BRAND.mono, fontSize: 8.5, color: BRAND.ink300, marginBottom: 12 }}>Each cell takes its own image and fit. The grid arranges them automatically.</div>
+                  </>
+                )}
+                {layoutKey === 'duo' && (
+                  <div style={{ fontFamily: BRAND.mono, fontSize: 8.5, color: BRAND.ink300, marginBottom: 10 }}>Two panels, side by side. Load a different image into each.</div>
+                )}
+                {Array.from({ length: N }).map((_, i) => {
+                  const c = collageCells[i] || {};
+                  return (
+                    <div key={i} style={{ border: `1px solid ${BRAND.ink100}`, marginBottom: 8, padding: '8px 10px', background: BRAND.paper }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+                        <div style={{ width: 34, height: 34, flexShrink: 0, border: `1px solid ${BRAND.ink100}`, background: c.src ? `#000 center/cover url(${c.src})` : BRAND.bone }} />
+                        <span style={{ fontFamily: BRAND.mono, fontSize: 10, color: BRAND.ink600, flex: 1, letterSpacing: '0.08em' }}>CELL {i + 1}{c.img ? '' : ' · empty'}</span>
+                        {c.img && <button onClick={() => clearCell(i)} title="Clear" style={miniBtn}>×</button>}
+                      </div>
+                      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4 }}>
+                        <label style={{ ...pillStyle(false), textAlign: 'center', cursor: 'pointer' }}>
+                          Upload
+                          <input type="file" accept="image/*,.psd,.psb" style={{ display: 'none' }}
+                            onChange={async (e) => { const f = e.target.files?.[0]; if (f) { try { loadCellImage(i, await fileToImageDataUrl(f)); } catch (err) { alert('Could not load: ' + err.message); } } e.target.value = ''; }} />
+                        </label>
+                        <button onClick={() => setCollageLibFor(collageLibFor === i ? null : i)} style={pillStyle(collageLibFor === i)}>Library</button>
+                      </div>
+                      {collageLibFor === i && (
+                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 3, marginTop: 6, maxHeight: 132, overflowY: 'auto' }}>
+                          {[...LIBRARY, ...savedLibrary].map((a) => (
+                            <button key={a.id} title={a.label} onClick={() => { loadCellImage(i, a.src); setCollageLibFor(null); }}
+                              style={{ padding: 0, height: 36, border: `1px solid ${BRAND.ink100}`, background: `#000 center/cover url(${a.src})`, cursor: 'pointer' }} />
+                          ))}
+                        </div>
+                      )}
+                      {c.img && (
+                        <div style={{ marginTop: 8 }}>
+                          <FitSlider label="Scale" value={(c.fit || DEFAULT_FIT).scale} min={0.5} max={4} step={0.05} onChange={(v) => setCellFit(i, { scale: v })} format={(v) => v.toFixed(2) + '×'} />
+                          <FitSlider label="Focus X" value={(c.fit || DEFAULT_FIT).focalX} min={0} max={1} step={0.02} onChange={(v) => setCellFit(i, { focalX: v })} format={(v) => (v * 100).toFixed(0) + '%'} />
+                          <FitSlider label="Focus Y" value={(c.fit || DEFAULT_FIT).focalY} min={0} max={1} step={0.02} onChange={(v) => setCellFit(i, { focalY: v })} format={(v) => (v * 100).toFixed(0) + '%'} />
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </>
+            );
+          })()}
+        </Section>
+
         <Section label={SEC('IMAGE', `IMAGE${format.multi ? ` · SLIDE ${carouselSlide + 1}` : ''}`)} {...sp('IMAGE')}>
         {perSlideImageDisabled && (
           <div style={{
@@ -9550,14 +9714,15 @@ const SECTION_ORDER = [
   // 3 · Brand system
   'LANYARD', 'SURFACE', 'BRANDBAR', 'LOGOFILES', 'GROUP', 'PARTNERS', 'TEXTBG', 'QR', 'CAROUSEL', 'CAROUSEL_BG', 'CONTENT',
   // 4 · Imagery
-  'IMAGE', 'GENERATE', 'CANTO', 'IMAGEFIT',
+  'COLLAGE', 'IMAGE', 'GENERATE', 'CANTO', 'IMAGEFIT',
   // 5 · Output
   'CHECK', 'EXPORT', 'PRESETS',
 ];
 
 /** Which sections exist for the current canvas? The numbering follows from this. */
-function visibleSections({ isBrochure, isCarousel, isLanyard }) {
+function visibleSections({ isBrochure, isCarousel, isLanyard, isCollage }) {
   return SECTION_ORDER.filter((k) => {
+    if (k === 'COLLAGE') return isCollage;
     if (k === 'LANYARD') return isLanyard;
     if (k === 'BROCHURE') return isBrochure;
     if (k === 'LAYOUT' || k === 'TEMPLATE' || k === 'CONTENT') return !isBrochure;

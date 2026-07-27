@@ -26,7 +26,7 @@ const ok = (m) => console.log(`✓ ${m}`);
 // separately via imageRef and are intentionally excluded here.)
 const MUST_PERSIST = [
   'formatKey', 'layoutKey', 'templateKey', 'paletteName',
-  'lanyard', 'textOverflow', 'partners', 'surface', 'group',
+  'lanyard', 'textOverflow', 'partners', 'surface', 'group', 'collageCount',
 ];
 
 // snapshotState() builds its object from raw state variables (e.g. `group,`), never

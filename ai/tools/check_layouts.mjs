@@ -47,7 +47,7 @@ const CONTRACT = [
     id: 'shrink-to-fit',
     needs: /textMaxH/,
     why: 'must pass frame.textMaxH — without it the type overflows its band instead of shrinking (the square-format bug)',
-    skip: ['drawLanyardStrip', 'drawBrochurePage', 'drawTable', 'drawStat', 'drawDuo'], // these size their own type
+    skip: ['drawLanyardStrip', 'drawBrochurePage', 'drawTable', 'drawStat', 'drawDuo', 'drawCollage'], // these size their own type
   },
   {
     id: 'brand-bar',
